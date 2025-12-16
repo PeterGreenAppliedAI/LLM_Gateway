@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 
 from gateway.config import GatewayConfig, load_config
 from gateway.settings import Settings, get_settings
+from gateway.routes import openai_router, devmesh_router
 
 
 @asynccontextmanager
@@ -46,22 +47,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
 
-    @app.get("/health", status_code=status.HTTP_200_OK)
-    async def health_check() -> JSONResponse:
-        """Health check endpoint."""
-        config: GatewayConfig | None = getattr(app.state, "config", None)
-
-        health_status = {
-            "status": "healthy",
-            "version": "0.1.0",
-            "config_loaded": config is not None,
-        }
-
-        if config:
-            health_status["providers_configured"] = len(config.providers)
-            health_status["providers_enabled"] = len(config.get_enabled_providers())
-
-        return JSONResponse(content=health_status)
+    # Include routers
+    app.include_router(openai_router)
+    app.include_router(devmesh_router)
 
     return app
 

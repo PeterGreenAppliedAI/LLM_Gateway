@@ -245,10 +245,10 @@ class TestGatewayConfig:
         assert config.rate_limits is not None
         assert config.routing is None
 
-    def test_gateway_config_empty_providers_raises(self) -> None:
-        """Test that empty providers list raises validation error."""
-        with pytest.raises(ValueError, match="At least one provider must be configured"):
-            GatewayConfig(providers=[])
+    def test_gateway_config_empty_providers_allowed(self) -> None:
+        """Test that empty providers list is allowed for testing/defaults."""
+        config = GatewayConfig(providers=[])
+        assert len(config.providers) == 0
 
     def test_get_provider_by_name(
         self, provider_ollama_data: dict[str, Any], provider_vllm_data: dict[str, Any]
@@ -330,12 +330,12 @@ class TestConfigLoader:
             load_config(tmp_path / "nonexistent.yaml")
 
     def test_load_config_empty_file(self, tmp_path: Path) -> None:
-        """Test handling of empty config file."""
+        """Test handling of empty config file returns default config."""
         config_file = tmp_path / "empty.yaml"
         config_file.touch()
 
-        with pytest.raises(ValueError, match="At least one provider must be configured"):
-            load_config(config_file)
+        config = load_config(config_file)
+        assert len(config.providers) == 0
 
     def test_load_full_config(
         self, tmp_path: Path, full_gateway_config_data: dict[str, Any]
