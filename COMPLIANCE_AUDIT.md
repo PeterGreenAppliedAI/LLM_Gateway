@@ -36,7 +36,7 @@ Full audit of the implementation against `rule.md` (Secure Design Principles) an
 
 **Evidence**:
 - `src/gateway/routes/dependencies.py:29` - `SAFE_API_KEY_PATTERN`
-- `src/gateway/models/common.py:16` - `SafeIdentifier` type with validation
+- Pydantic models enforce type constraints on all fields
 
 ### 1.4 Auditability
 
@@ -241,9 +241,9 @@ Full audit of the implementation against `rule.md` (Secure Design Principles) an
 | Vector | Protection | Status |
 |--------|------------|--------|
 | API key injection | Regex validation | PASS |
-| Model name injection | SafeIdentifier type | PASS |
+| Model name injection | Pydantic string validation | PASS |
 | Message content | Length limits | PASS |
-| JSON parsing | Pydantic strict mode | PASS |
+| JSON parsing | Pydantic validation | PASS |
 
 ### 4.2 Authentication
 
