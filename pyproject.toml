@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "devmesh-gateway"
+version = "0.1.0"
+description = "DevMesh LLM Gateway - AI control plane for inference runtimes"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "DevMesh Services"}
+]
+dependencies = [
+    "fastapi>=0.124.0",
+    "uvicorn[standard]>=0.38.0",
+    "pydantic>=2.12.0",
+    "pydantic-settings>=2.9.0",
+    "pyyaml>=6.0.1",
+    "httpx>=0.28.0",
+    "prometheus-client>=0.23.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.0.0",
+    "pytest-asyncio>=1.3.0",
+    "pytest-cov>=4.1.0",
+    "ruff>=0.14.0",
+    "mypy>=1.19.0",
+    "types-PyYAML>=6.0.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+plugins = ["pydantic.mypy"]
