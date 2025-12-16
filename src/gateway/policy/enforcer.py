@@ -1,0 +1,248 @@
+"""Policy enforcer - coordinates all policy checks.
+
+Per rule.md:
+- Single Responsibility: Coordinates policy checks, doesn't implement them
+- Explicit Boundaries: Clear enforcement contract
+- Contracts: PolicyViolation for any policy failure
+
+Per PRD Section 10:
+- Max tokens per request
+- Requests per minute (global and per user)
+- Allowed providers per task
+- Block execution if provider unhealthy
+"""
+
+from dataclasses import dataclass
+from typing import Optional, Set, Dict, List
+
+from pydantic import BaseModel, Field
+
+from gateway.models.common import TaskType
+from gateway.models.internal import InternalRequest
+from gateway.policy.rate_limiter import RateLimiter, RateLimitConfig, RateLimitExceeded
+from gateway.policy.token_limiter import TokenLimiter, TokenLimitConfig, TokenLimitExceeded
+
+
+class PolicyViolation(Exception):
+    """A policy has been violated."""
+
+    def __init__(
+        self,
+        message: str,
+        policy_type: str,
+        code: str,
+        retry_after: Optional[float] = None,
+    ):
+        super().__init__(message)
+        self.policy_type = policy_type
+        self.code = code
+        self.retry_after = retry_after
+
+
+class TaskProviderPolicy(BaseModel):
+    """Policy for which providers can handle which tasks."""
+
+    task: TaskType
+    allowed_providers: Set[str] = Field(default_factory=set)
+    denied_providers: Set[str] = Field(default_factory=set)
+
+
+class PolicyConfig(BaseModel):
+    """Configuration for policy enforcement."""
+
+    enabled: bool = Field(default=True, description="Whether policy enforcement is enabled")
+    rate_limit: RateLimitConfig = Field(default_factory=RateLimitConfig)
+    token_limit: TokenLimitConfig = Field(default_factory=TokenLimitConfig)
+
+    # Provider-task mapping (optional - empty means all providers allowed for all tasks)
+    task_policies: List[TaskProviderPolicy] = Field(
+        default_factory=list,
+        max_length=50,
+        description="Task-specific provider policies",
+    )
+
+
+@dataclass
+class PolicyCheckResult:
+    """Result of policy check."""
+
+    allowed: bool
+    rate_limit_remaining: Optional[int] = None
+    rate_limit_reset: Optional[float] = None
+    adjusted_max_tokens: Optional[int] = None
+    violation_message: Optional[str] = None
+    violation_code: Optional[str] = None
+
+
+class PolicyEnforcer:
+    """Coordinates policy enforcement across all policy types.
+
+    Checks:
+    1. Rate limits (per client/user)
+    2. Token limits (per request)
+    3. Provider-task authorization
+
+    Usage:
+        enforcer = PolicyEnforcer(config)
+        enforcer.enforce(request, rate_limit_key="client_123")
+    """
+
+    def __init__(self, config: Optional[PolicyConfig] = None):
+        """Initialize policy enforcer.
+
+        Args:
+            config: Policy configuration. Uses defaults if not provided.
+        """
+        self._config = config or PolicyConfig()
+        self._rate_limiter = RateLimiter(self._config.rate_limit)
+        self._token_limiter = TokenLimiter(self._config.token_limit)
+
+        # Build task -> provider policy lookup
+        self._task_policies: Dict[TaskType, TaskProviderPolicy] = {}
+        for policy in self._config.task_policies:
+            self._task_policies[policy.task] = policy
+
+    @property
+    def enabled(self) -> bool:
+        """Check if policy enforcement is enabled."""
+        return self._config.enabled
+
+    def enforce(
+        self,
+        request: InternalRequest,
+        rate_limit_key: Optional[str] = None,
+        provider: Optional[str] = None,
+    ) -> PolicyCheckResult:
+        """Enforce all policies on a request.
+
+        Args:
+            request: The request to check
+            rate_limit_key: Key for rate limiting (defaults to client_id or user_id)
+            provider: Target provider (for task-provider policy check)
+
+        Returns:
+            PolicyCheckResult with enforcement details
+
+        Raises:
+            PolicyViolation: If any policy is violated
+        """
+        if not self._config.enabled:
+            return PolicyCheckResult(allowed=True)
+
+        # Determine rate limit key
+        key = rate_limit_key or request.client_id or request.user_id or "anonymous"
+
+        # 1. Check rate limits
+        try:
+            rate_state = self._rate_limiter.acquire(key)
+        except RateLimitExceeded as e:
+            raise PolicyViolation(
+                message=str(e),
+                policy_type="rate_limit",
+                code="rate_limit_exceeded",
+                retry_after=e.retry_after,
+            )
+
+        # 2. Check token limits
+        try:
+            validated_max_tokens = self._token_limiter.validate_max_tokens(request.max_tokens)
+        except TokenLimitExceeded as e:
+            raise PolicyViolation(
+                message=str(e),
+                policy_type="token_limit",
+                code="token_limit_exceeded",
+            )
+
+        # 3. Check provider-task authorization
+        if provider and request.task in self._task_policies:
+            policy = self._task_policies[request.task]
+
+            # Check denied list first
+            if policy.denied_providers and provider in policy.denied_providers:
+                raise PolicyViolation(
+                    message=f"Provider '{provider}' is not allowed for task '{request.task.value}'",
+                    policy_type="provider_task",
+                    code="provider_denied_for_task",
+                )
+
+            # Check allowed list if specified
+            if policy.allowed_providers and provider not in policy.allowed_providers:
+                raise PolicyViolation(
+                    message=f"Provider '{provider}' is not in allowed list for task '{request.task.value}'",
+                    policy_type="provider_task",
+                    code="provider_not_allowed_for_task",
+                )
+
+        # Determine if max_tokens was adjusted
+        adjusted = None
+        if validated_max_tokens != request.max_tokens and request.max_tokens is not None:
+            adjusted = validated_max_tokens
+
+        return PolicyCheckResult(
+            allowed=True,
+            rate_limit_remaining=rate_state.requests_remaining_minute,
+            rate_limit_reset=rate_state.reset_minute,
+            adjusted_max_tokens=adjusted,
+        )
+
+    def check_rate_limit(self, key: str) -> PolicyCheckResult:
+        """Check rate limit only (without consuming).
+
+        Args:
+            key: Rate limit key
+
+        Returns:
+            PolicyCheckResult with rate limit state
+        """
+        if not self._config.enabled or not self._rate_limiter.enabled:
+            return PolicyCheckResult(allowed=True)
+
+        state = self._rate_limiter.check(key)
+
+        return PolicyCheckResult(
+            allowed=state.requests_remaining_minute > 0,
+            rate_limit_remaining=state.requests_remaining_minute,
+            rate_limit_reset=state.reset_minute,
+        )
+
+    def check_provider_allowed(self, task: TaskType, provider: str) -> bool:
+        """Check if a provider is allowed for a task.
+
+        Args:
+            task: Task type
+            provider: Provider name
+
+        Returns:
+            True if allowed
+        """
+        if not self._config.enabled:
+            return True
+
+        if task not in self._task_policies:
+            return True  # No policy means allowed
+
+        policy = self._task_policies[task]
+
+        if policy.denied_providers and provider in policy.denied_providers:
+            return False
+
+        if policy.allowed_providers and provider not in policy.allowed_providers:
+            return False
+
+        return True
+
+    def get_default_max_tokens(self) -> int:
+        """Get the default max_tokens value."""
+        return self._token_limiter.default_max_tokens
+
+    def reset_rate_limit(self, key: str) -> None:
+        """Reset rate limit for a key (admin operation).
+
+        Args:
+            key: Rate limit key to reset
+        """
+        self._rate_limiter.reset(key)
+
+    def reset_all_rate_limits(self) -> None:
+        """Reset all rate limits (admin operation)."""
+        self._rate_limiter.reset_all()
