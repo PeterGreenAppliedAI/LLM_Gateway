@@ -112,6 +112,7 @@ async def chat_completions(
             latency_ms=ctx.total_latency_ms or 0,
             prompt_tokens=result.response.usage.prompt_tokens,
             completion_tokens=result.response.usage.completion_tokens,
+            tokens_per_second=ctx.tokens_per_second,
         )
 
         # Convert to OpenAI format
@@ -178,6 +179,7 @@ async def _stream_chat_response(
                         status="success",
                         latency_ms=ctx.total_latency_ms or 0,
                         time_to_first_token_ms=ctx.time_to_first_token_ms,
+                        tokens_per_second=ctx.tokens_per_second,
                     )
 
             # Send [DONE] marker
@@ -259,6 +261,7 @@ async def completions(
             latency_ms=ctx.total_latency_ms or 0,
             prompt_tokens=result.response.usage.prompt_tokens,
             completion_tokens=result.response.usage.completion_tokens,
+            tokens_per_second=ctx.tokens_per_second,
         )
 
         return OpenAICompletionResponse.from_internal(result.response)
