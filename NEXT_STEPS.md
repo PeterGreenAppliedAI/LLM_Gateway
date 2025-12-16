@@ -266,6 +266,264 @@ python -m gateway.cli dashboard
 
 ---
 
+## 9. Audit Log Persistence (Database)
+
+### Why Add a Database?
+
+Currently the gateway is fully stateless - logs go to stdout and disappear. For production use, you need:
+- Request history / audit trail
+- Usage analytics over time
+- Compliance reporting
+- Cost tracking per user/team
+
+### Database-Agnostic Design
+
+Use SQLAlchemy Core (not ORM) for maximum portability:
+
+```python
+# src/gateway/storage/schema.py
+from sqlalchemy import (
+    MetaData, Table, Column, String, Integer, Float,
+    DateTime, Text, JSON, Index, create_engine
+)
+from datetime import datetime
+
+metadata = MetaData()
+
+# Audit log - every request
+audit_log = Table(
+    'audit_log', metadata,
+    Column('id', Integer, primary_key=True, autoincrement=True),
+    Column('request_id', String(64), unique=True, nullable=False),
+    Column('timestamp', DateTime, default=datetime.utcnow, nullable=False),
+
+    # Who
+    Column('client_id', String(128), nullable=False),
+    Column('user_id', String(128), nullable=True),
+
+    # What
+    Column('task', String(32), nullable=False),  # chat, completion, embeddings
+    Column('model', String(128), nullable=False),
+    Column('provider', String(64), nullable=False),
+
+    # How it went
+    Column('status', String(16), nullable=False),  # success, error, rate_limited
+    Column('error_code', String(64), nullable=True),
+    Column('error_message', Text, nullable=True),
+
+    # Performance metrics
+    Column('latency_ms', Float, nullable=True),           # Total request time
+    Column('time_to_first_token_ms', Float, nullable=True),  # TTFT for streaming
+    Column('tokens_per_second', Float, nullable=True),    # Generation throughput
+
+    # Token usage
+    Column('prompt_tokens', Integer, default=0),
+    Column('completion_tokens', Integer, default=0),
+    Column('total_tokens', Integer, default=0),
+
+    # Cost (if configured)
+    Column('estimated_cost_usd', Float, nullable=True),
+
+    # Optional: store request/response (configurable, off by default)
+    Column('request_body', JSON, nullable=True),
+    Column('response_body', JSON, nullable=True),
+
+    # Indexes for common queries
+    Index('ix_audit_timestamp', 'timestamp'),
+    Index('ix_audit_client', 'client_id'),
+    Index('ix_audit_user', 'user_id'),
+    Index('ix_audit_model', 'model'),
+    Index('ix_audit_provider', 'provider'),
+)
+
+# Usage aggregates (for dashboards, computed periodically)
+usage_daily = Table(
+    'usage_daily', metadata,
+    Column('id', Integer, primary_key=True, autoincrement=True),
+    Column('date', DateTime, nullable=False),
+    Column('client_id', String(128), nullable=False),
+    Column('user_id', String(128), nullable=True),
+    Column('provider', String(64), nullable=False),
+    Column('model', String(128), nullable=False),
+
+    Column('request_count', Integer, default=0),
+    Column('error_count', Integer, default=0),
+    Column('total_prompt_tokens', Integer, default=0),
+    Column('total_completion_tokens', Integer, default=0),
+    Column('total_cost_usd', Float, default=0.0),
+    Column('avg_latency_ms', Float, nullable=True),
+    Column('p95_latency_ms', Float, nullable=True),
+    Column('avg_ttft_ms', Float, nullable=True),          # Avg time to first token
+    Column('avg_tokens_per_second', Float, nullable=True), # Avg throughput
+
+    Index('ix_usage_date', 'date'),
+    Index('ix_usage_client_date', 'client_id', 'date'),
+)
+
+# API keys (if managing keys in DB instead of config)
+api_keys = Table(
+    'api_keys', metadata,
+    Column('id', Integer, primary_key=True, autoincrement=True),
+    Column('key_hash', String(128), unique=True, nullable=False),  # SHA256 hash, not plaintext
+    Column('name', String(128), nullable=False),
+    Column('client_id', String(128), nullable=False),
+    Column('created_at', DateTime, default=datetime.utcnow),
+    Column('expires_at', DateTime, nullable=True),
+    Column('is_active', Integer, default=1),  # Use Integer for SQLite compatibility
+    Column('rate_limit_rpm', Integer, nullable=True),
+    Column('allowed_models', JSON, nullable=True),  # ["ollama/*", "openai/gpt-4"]
+
+    Index('ix_apikeys_client', 'client_id'),
+)
+```
+
+### Connection Configuration
+
+```yaml
+# config/gateway.yaml
+database:
+  # SQLite (default, zero config)
+  url: "sqlite:///./data/gateway.db"
+
+  # PostgreSQL
+  # url: "postgresql://user:pass@localhost:5432/gateway"
+
+  # MySQL/MariaDB
+  # url: "mysql+pymysql://user:pass@localhost:3306/gateway"
+
+  # Connection pool settings (ignored for SQLite)
+  pool_size: 5
+  max_overflow: 10
+
+  # What to store
+  store_request_body: false   # Privacy: don't store prompts by default
+  store_response_body: false  # Privacy: don't store completions by default
+```
+
+### Implementation
+
+```python
+# src/gateway/storage/engine.py
+from sqlalchemy import create_engine
+from sqlalchemy.pool import QueuePool, NullPool
+from gateway.storage.schema import metadata
+
+def create_db_engine(config):
+    """Create database engine with appropriate pooling."""
+    url = config.database.url
+
+    # SQLite doesn't support connection pooling
+    if url.startswith('sqlite'):
+        engine = create_engine(
+            url,
+            connect_args={"check_same_thread": False},
+            poolclass=NullPool
+        )
+    else:
+        engine = create_engine(
+            url,
+            poolclass=QueuePool,
+            pool_size=config.database.pool_size,
+            max_overflow=config.database.max_overflow,
+        )
+
+    # Create tables if they don't exist
+    metadata.create_all(engine)
+    return engine
+```
+
+```python
+# src/gateway/storage/audit.py
+from sqlalchemy import insert
+from gateway.storage.schema import audit_log
+
+class AuditLogger:
+    """Async-compatible audit logger."""
+
+    def __init__(self, engine, store_bodies: bool = False):
+        self.engine = engine
+        self.store_bodies = store_bodies
+
+    async def log_request(
+        self,
+        request_id: str,
+        client_id: str,
+        user_id: str | None,
+        task: str,
+        model: str,
+        provider: str,
+        status: str,
+        latency_ms: float,
+        time_to_first_token_ms: float | None,
+        tokens_per_second: float | None,
+        prompt_tokens: int,
+        completion_tokens: int,
+        error_code: str | None = None,
+        error_message: str | None = None,
+        request_body: dict | None = None,
+        response_body: dict | None = None,
+        estimated_cost_usd: float | None = None,
+    ):
+        """Log a request to the audit table."""
+        stmt = insert(audit_log).values(
+            request_id=request_id,
+            client_id=client_id,
+            user_id=user_id,
+            task=task,
+            model=model,
+            provider=provider,
+            status=status,
+            latency_ms=latency_ms,
+            time_to_first_token_ms=time_to_first_token_ms,
+            tokens_per_second=tokens_per_second,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=prompt_tokens + completion_tokens,
+            error_code=error_code,
+            error_message=error_message,
+            request_body=request_body if self.store_bodies else None,
+            response_body=response_body if self.store_bodies else None,
+            estimated_cost_usd=estimated_cost_usd,
+        )
+
+        # Run in thread pool to not block async
+        with self.engine.connect() as conn:
+            conn.execute(stmt)
+            conn.commit()
+```
+
+### Migration Path
+
+SQLite → PostgreSQL/MySQL is straightforward:
+
+```bash
+# 1. Export from SQLite
+sqlite3 data/gateway.db .dump > backup.sql
+
+# 2. Update config
+database:
+  url: "postgresql://user:pass@localhost:5432/gateway"
+
+# 3. Restart gateway (tables auto-created)
+
+# 4. Import data (adjust SQL syntax as needed)
+psql gateway < backup.sql
+```
+
+Or use a migration tool like Alembic for schema versioning.
+
+### Estimated Effort
+
+| Task | Effort |
+|------|--------|
+| Schema + engine setup | 2-3 hrs |
+| AuditLogger integration | 2-3 hrs |
+| Config changes | 1 hr |
+| Tests | 2-3 hrs |
+| **Total** | ~8-10 hrs |
+
+---
+
 ## 5. VM Deployment Checklist
 
 ```bash
