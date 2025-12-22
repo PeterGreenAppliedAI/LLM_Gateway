@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from gateway.config import GatewayConfig, ProviderConfig, AuthConfig, ApiKeyConfig
 from gateway.dispatch import ProviderRegistry
+from gateway.exception_handlers import register_exception_handlers
 from gateway.models.common import FinishReason, HealthStatus, ProviderType, TaskType, UsageStats
 from gateway.models.internal import InternalResponse
 from gateway.routes import openai_router, devmesh_router
@@ -23,6 +24,10 @@ from gateway.routes import openai_router, devmesh_router
 def app() -> FastAPI:
     """Create test app with routes."""
     app = FastAPI()
+
+    # Register centralized exception handlers
+    register_exception_handlers(app)
+
     app.include_router(openai_router)
     app.include_router(devmesh_router)
 
@@ -53,6 +58,10 @@ def client(app: FastAPI) -> TestClient:
 def app_with_auth() -> FastAPI:
     """Create test app with authentication enabled."""
     app = FastAPI()
+
+    # Register centralized exception handlers
+    register_exception_handlers(app)
+
     app.include_router(openai_router)
     app.include_router(devmesh_router)
 
@@ -220,7 +229,8 @@ class TestAuthentication:
         """Auth required when enabled."""
         response = auth_client.get("/v1/models")
         assert response.status_code == 401
-        assert "API key required" in response.json()["detail"]
+        # New error format: {"error": {"code": "...", "message": "..."}}
+        assert "API key required" in response.json()["error"]["message"]
 
     def test_auth_with_bearer_token(self, auth_client: TestClient, app_with_auth: FastAPI):
         """Auth with Bearer token works."""
@@ -321,12 +331,12 @@ class TestChatCompletions:
 
     def test_chat_completions_provider_unavailable(self, app: FastAPI, client: TestClient):
         """Provider unavailable returns 503."""
-        from gateway.dispatch import DispatchError
+        from gateway.errors import ProviderUnavailableError
         from gateway.routes.dependencies import get_dispatcher
 
         mock_dispatcher = AsyncMock()
         mock_dispatcher.dispatch = AsyncMock(
-            side_effect=DispatchError("Provider unavailable", provider="ollama")
+            side_effect=ProviderUnavailableError(provider="ollama")
         )
 
         app.dependency_overrides[get_dispatcher] = lambda: mock_dispatcher

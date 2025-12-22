@@ -7,15 +7,20 @@ Per PRD Section 7:
 - POST /v1/devmesh/route (debug routing decisions)
 
 These endpoints provide gateway-specific functionality beyond OpenAI compatibility.
+
+Per API Error Handling Architecture:
+- Routes raise domain errors (GatewayError subclasses)
+- Exception handler middleware translates to HTTP responses
 """
 
 from typing import Annotated, Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, Request, Response
 from pydantic import BaseModel, Field
 
 from gateway.config import GatewayConfig
-from gateway.dispatch import Dispatcher, DispatchError, ProviderRegistry
+from gateway.dispatch import Dispatcher, ProviderRegistry
+from gateway.errors import DispatchError, ProviderNotFoundError
 from gateway.models.common import HealthStatus, TaskType
 from gateway.models.internal import InternalRequest, Message, MessageRole
 from gateway.observability import get_logger, get_metrics
@@ -109,10 +114,13 @@ async def prometheus_metrics() -> Response:
 
     Returns metrics in Prometheus text format for scraping.
     """
+    from gateway.errors import ProviderError, ErrorCode
+
     if not PROMETHEUS_AVAILABLE:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Prometheus client not installed",
+        raise ProviderError(
+            message="Prometheus client not installed",
+            provider="prometheus",
+            code=ErrorCode.PROVIDER_UNAVAILABLE,
         )
 
     return Response(
@@ -217,7 +225,7 @@ async def debug_route(
     """Debug routing decisions.
 
     Shows which provider and model would be selected for a given request
-    without actually executing it.
+    without actually executing it. DispatchError propagates to exception handler.
     """
     # Create minimal internal request
     internal_request = InternalRequest(
@@ -229,42 +237,35 @@ async def debug_route(
         fallback_allowed=body.fallback_allowed,
     )
 
-    try:
-        # Resolve provider
-        provider_name, model_name = dispatcher.resolve_provider(internal_request)
+    # Resolve provider - DispatchError propagates to exception handler
+    provider_name, model_name = dispatcher.resolve_provider(internal_request)
 
-        # Check health
-        is_healthy = registry.is_healthy(provider_name)
+    # Check health
+    is_healthy = registry.is_healthy(provider_name)
 
-        # Get fallback chain
-        fallback_chain = []
-        if body.fallback_allowed:
-            fallback_chain = registry.get_fallback_chain(exclude=provider_name)
+    # Get fallback chain
+    fallback_chain = []
+    if body.fallback_allowed:
+        fallback_chain = registry.get_fallback_chain(exclude=provider_name)
 
-        # Would we fallback?
-        would_fallback = not is_healthy and body.fallback_allowed and len(fallback_chain) > 0
+    # Would we fallback?
+    would_fallback = not is_healthy and body.fallback_allowed and len(fallback_chain) > 0
 
-        reason = None
-        if not is_healthy:
-            if would_fallback:
-                reason = f"Primary provider '{provider_name}' unhealthy, would fallback"
-            else:
-                reason = f"Primary provider '{provider_name}' unhealthy, no fallback available"
+    reason = None
+    if not is_healthy:
+        if would_fallback:
+            reason = f"Primary provider '{provider_name}' unhealthy, would fallback"
+        else:
+            reason = f"Primary provider '{provider_name}' unhealthy, no fallback available"
 
-        return RouteResponse(
-            resolved_provider=provider_name,
-            resolved_model=model_name or body.model,
-            fallback_chain=fallback_chain,
-            provider_healthy=is_healthy,
-            would_fallback=would_fallback,
-            reason=reason,
-        )
-
-    except DispatchError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={"error": e.code, "message": str(e)},
-        )
+    return RouteResponse(
+        resolved_provider=provider_name,
+        resolved_model=model_name or body.model,
+        fallback_chain=fallback_chain,
+        provider_healthy=is_healthy,
+        would_fallback=would_fallback,
+        reason=reason,
+    )
 
 
 # =============================================================================
@@ -348,10 +349,7 @@ async def check_provider_health(
         Health status and details
     """
     if provider_name not in registry.list_providers():
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Provider '{provider_name}' not found",
-        )
+        raise ProviderNotFoundError(provider=provider_name)
 
     status_enum = await registry.check_health(provider_name)
 

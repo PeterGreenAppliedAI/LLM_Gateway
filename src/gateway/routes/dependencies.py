@@ -14,10 +14,20 @@ import secrets
 from typing import Annotated, Optional
 from uuid import uuid4
 
-from fastapi import Depends, Header, HTTPException, Request, status
+from fastapi import Depends, Header, Request
 
 from gateway.config import GatewayConfig
 from gateway.dispatch import Dispatcher, ProviderRegistry
+from gateway.errors import (
+    AuthenticationError,
+    InvalidApiKeyError,
+    InvalidApiKeyFormatError,
+    RateLimitError,
+    PolicyError,
+    TokenLimitError,
+    ProviderNotAllowedError,
+    ErrorCode,
+)
 from gateway.observability import get_logger, get_metrics, RequestContext
 from gateway.observability.logging import set_request_context, clear_request_context
 from gateway.policy import PolicyEnforcer, PolicyViolation
@@ -27,41 +37,6 @@ logger = get_logger(__name__)
 
 # Security: Pattern for valid API keys (prevents injection)
 SAFE_API_KEY_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{16,128}$")
-
-
-class AuthenticationError(HTTPException):
-    """Authentication failed."""
-
-    def __init__(self, detail: str = "Invalid or missing API key"):
-        super().__init__(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=detail,
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-
-
-class RateLimitError(HTTPException):
-    """Rate limit exceeded."""
-
-    def __init__(self, detail: str, retry_after: Optional[float] = None):
-        headers = {}
-        if retry_after is not None:
-            headers["Retry-After"] = str(int(retry_after))
-        super().__init__(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=detail,
-            headers=headers if headers else None,
-        )
-
-
-class PolicyError(HTTPException):
-    """Policy violation."""
-
-    def __init__(self, detail: str, code: str = "policy_violation"):
-        super().__init__(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={"error": code, "message": detail},
-        )
 
 
 def get_config(request: Request) -> GatewayConfig:
@@ -129,11 +104,12 @@ def validate_api_key(api_key: str, config: GatewayConfig) -> str:
         client_id associated with the key
 
     Raises:
-        AuthenticationError: If key is invalid
+        InvalidApiKeyFormatError: If key format is invalid
+        InvalidApiKeyError: If key is not recognized
     """
     # Security: Validate format first
     if not api_key or not SAFE_API_KEY_PATTERN.match(api_key):
-        raise AuthenticationError("Invalid API key format")
+        raise InvalidApiKeyFormatError()
 
     # Check if auth is enabled
     if not config.auth.enabled:
@@ -146,7 +122,7 @@ def validate_api_key(api_key: str, config: GatewayConfig) -> str:
         if secrets.compare_digest(api_key, key_config.key):
             return key_config.client_id
 
-    raise AuthenticationError("Invalid API key")
+    raise InvalidApiKeyError()
 
 
 async def authenticate(
@@ -180,7 +156,7 @@ async def authenticate(
         if authorization.lower().startswith("bearer "):
             api_key = authorization[7:].strip()
         else:
-            raise AuthenticationError("Invalid authorization header format")
+            raise AuthenticationError(message="Invalid authorization header format")
     elif x_api_key:
         api_key = x_api_key
 
@@ -190,7 +166,7 @@ async def authenticate(
 
     # If auth enabled but no key provided
     if config.auth.enabled and not api_key:
-        raise AuthenticationError("API key required")
+        raise AuthenticationError(message="API key required")
 
     # Validate key
     if api_key:
@@ -237,43 +213,36 @@ def cleanup_request_context() -> None:
     clear_request_context()
 
 
-async def check_policy(
-    request: Request,
-    client_id: str,
-    enforcer: PolicyEnforcer,
-    task: str,
-    provider: Optional[str] = None,
-    max_tokens: Optional[int] = None,
-) -> None:
-    """Check request against policies.
+def translate_policy_violation(e: PolicyViolation) -> None:
+    """Translate PolicyViolation to appropriate domain error.
+
+    This is the single place where policy violations are translated
+    to domain errors. Called by routes after enforcer.enforce().
 
     Args:
-        request: FastAPI request
-        client_id: Authenticated client ID
-        enforcer: Policy enforcer
-        task: Task type
-        provider: Provider being used
-        max_tokens: Max tokens requested
+        e: The policy violation exception
 
     Raises:
         RateLimitError: If rate limit exceeded
-        PolicyError: If policy violation
+        TokenLimitError: If token limit exceeded
+        ProviderNotAllowedError: If provider not allowed for task
+        PolicyError: For other policy violations
     """
-    from gateway.models.common import TaskType
-    from gateway.models.internal import InternalRequest, Message, MessageRole
-
-    # Create minimal internal request for policy check
-    internal_req = InternalRequest(
-        task=TaskType(task) if task else TaskType.CHAT,
-        messages=[Message(role=MessageRole.USER, content="policy check")],
-        client_id=client_id,
-        max_tokens=max_tokens or 1024,
-    )
-
-    try:
-        enforcer.enforce(internal_req, provider=provider)
-    except PolicyViolation as e:
-        if e.policy_type == "rate_limit":
-            raise RateLimitError(str(e), retry_after=e.retry_after)
-        else:
-            raise PolicyError(str(e), code=e.code)
+    if e.policy_type == "rate_limit":
+        raise RateLimitError(
+            message=str(e),
+            retry_after=e.retry_after or 60.0,
+        )
+    elif e.policy_type == "token_limit":
+        # Extract details if available
+        raise PolicyError(
+            message=str(e),
+            code=ErrorCode.TOKEN_LIMIT_EXCEEDED,
+        )
+    elif e.policy_type == "provider_task":
+        raise PolicyError(
+            message=str(e),
+            code=ErrorCode.PROVIDER_NOT_ALLOWED,
+        )
+    else:
+        raise PolicyError(message=str(e))

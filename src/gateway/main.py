@@ -1,13 +1,18 @@
-"""FastAPI application entry point."""
+"""FastAPI application entry point.
+
+Per API Error Handling Architecture:
+- Exception handlers are registered for centralized error handling
+- Domain errors (GatewayError subclasses) are translated to HTTP responses
+"""
 
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncGenerator
 
-from fastapi import FastAPI, status
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI
 
 from gateway.config import GatewayConfig, load_config
+from gateway.exception_handlers import register_exception_handlers
 from gateway.settings import Settings, get_settings
 from gateway.routes import openai_router, devmesh_router
 
@@ -46,6 +51,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         version="0.1.0",
         lifespan=lifespan,
     )
+
+    # Register centralized exception handlers
+    # Per API Error Handling Architecture: single choke point for error translation
+    register_exception_handlers(app)
 
     # Include routers
     app.include_router(openai_router)

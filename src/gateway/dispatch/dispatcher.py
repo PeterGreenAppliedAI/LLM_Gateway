@@ -10,6 +10,10 @@ Per rule.md:
 - Single Responsibility: Dispatcher only handles request dispatch
 - Explicit Boundaries: Clear input (request) and output (response or error)
 - No Implicit Trust: Validate provider names from user input
+
+Per API Error Handling Architecture:
+- Uses domain errors from gateway.errors
+- Errors propagate to exception handler middleware
 """
 
 import re
@@ -18,6 +22,13 @@ from typing import Optional, List, AsyncIterator
 
 from gateway.config import SAFE_IDENTIFIER_PATTERN
 from gateway.dispatch.registry import ProviderRegistry
+from gateway.errors import (
+    DispatchError,
+    NoProviderError,
+    ProviderNotFoundError,
+    ProviderUnavailableError,
+    AllProvidersUnavailableError,
+)
 from gateway.models.common import HealthStatus
 from gateway.models.internal import InternalRequest, InternalResponse, StreamChunk
 from gateway.providers import ProviderAdapter
@@ -26,15 +37,6 @@ from gateway.providers import ProviderAdapter
 # Maximum number of providers to attempt before failing
 # Security: Prevents unbounded list growth in attempted_providers
 MAX_FALLBACK_ATTEMPTS = 10
-
-
-class DispatchError(Exception):
-    """Error during request dispatch."""
-
-    def __init__(self, message: str, provider: Optional[str] = None, code: str = "dispatch_error"):
-        super().__init__(message)
-        self.provider = provider
-        self.code = code
 
 
 @dataclass
@@ -141,10 +143,7 @@ class Dispatcher:
         if default:
             return default, request.model
 
-        raise DispatchError(
-            "No provider specified and no default configured",
-            code="no_provider"
-        )
+        raise NoProviderError()
 
     async def dispatch(self, request: InternalRequest) -> DispatchResult:
         """Dispatch a request to the appropriate provider.
@@ -179,11 +178,7 @@ class Dispatcher:
 
         # Primary failed - try fallbacks if allowed
         if not request.fallback_allowed:
-            raise DispatchError(
-                f"Provider '{provider_name}' unavailable and fallback disabled",
-                provider=provider_name,
-                code="provider_unavailable"
-            )
+            raise ProviderUnavailableError(provider=provider_name, fallback_disabled=True)
 
         # Get fallback chain - limited to prevent unbounded attempts
         fallback_chain = self._registry.get_fallback_chain(exclude=provider_name)
@@ -203,10 +198,7 @@ class Dispatcher:
                 )
 
         # All providers failed
-        raise DispatchError(
-            f"All providers unavailable. Tried: {', '.join(attempted)}",
-            code="all_providers_unavailable"
-        )
+        raise AllProvidersUnavailableError(attempted=attempted)
 
     async def _try_provider(
         self, provider_name: str, request: InternalRequest
@@ -295,11 +287,7 @@ class Dispatcher:
         # Just try primary provider
         adapter = self._registry.get(provider_name)
         if adapter is None:
-            raise DispatchError(
-                f"Provider '{provider_name}' not found",
-                provider=provider_name,
-                code="provider_not_found"
-            )
+            raise ProviderNotFoundError(provider=provider_name)
 
         if not self._registry.is_healthy(provider_name):
             # Try fallback for initial connection
@@ -310,17 +298,9 @@ class Dispatcher:
                         provider_name = fallback_name
                         break
                 else:
-                    raise DispatchError(
-                        f"Provider '{provider_name}' unavailable and no healthy fallback",
-                        provider=provider_name,
-                        code="provider_unavailable"
-                    )
+                    raise ProviderUnavailableError(provider=provider_name, fallback_disabled=False)
             else:
-                raise DispatchError(
-                    f"Provider '{provider_name}' unavailable",
-                    provider=provider_name,
-                    code="provider_unavailable"
-                )
+                raise ProviderUnavailableError(provider=provider_name, fallback_disabled=True)
 
         stream = adapter.chat_stream(request)
         return provider_name, stream

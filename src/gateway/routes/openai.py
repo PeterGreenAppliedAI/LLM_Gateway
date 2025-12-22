@@ -12,16 +12,21 @@ Per rule.md:
 - No Implicit Trust: Validate all inputs
 - Explicit Boundaries: Clear request/response contracts
 - Auditability: Log all requests
+
+Per API Error Handling Architecture:
+- Routes raise domain errors (GatewayError subclasses)
+- Exception handler middleware translates to HTTP responses
+- No try/except blocks for error-to-HTTP translation
 """
 
 import json
 from typing import Annotated, AsyncGenerator
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
-from pydantic import ValidationError
 
-from gateway.dispatch import Dispatcher, DispatchError
+from gateway.dispatch import Dispatcher
+from gateway.errors import DispatchError, StreamError
 from gateway.models.common import TaskType
 from gateway.models.openai import (
     OpenAIChatRequest,
@@ -40,8 +45,7 @@ from gateway.routes.dependencies import (
     get_dispatcher,
     get_enforcer,
     setup_request_context,
-    RateLimitError,
-    PolicyError,
+    translate_policy_violation,
 )
 
 logger = get_logger(__name__)
@@ -68,6 +72,7 @@ async def chat_completions(
     OpenAI-compatible endpoint for chat-based interactions.
 
     Supports both streaming and non-streaming responses.
+    Domain errors propagate to exception handler middleware.
     """
     # Setup request context for logging
     ctx = setup_request_context(
@@ -77,71 +82,44 @@ async def chat_completions(
         task="chat",
     )
 
+    # Convert to internal format
+    internal_request = body.to_internal(client_id=client_id, task=TaskType.CHAT)
+
+    # Check policies - raises domain errors on violation
     try:
-        # Convert to internal format
-        internal_request = body.to_internal(client_id=client_id, task=TaskType.CHAT)
+        enforcer.enforce(internal_request)
+    except PolicyViolation as e:
+        translate_policy_violation(e)
 
-        # Check policies
-        try:
-            enforcer.enforce(internal_request)
-        except PolicyViolation as e:
-            if e.policy_type == "rate_limit":
-                raise RateLimitError(str(e), retry_after=e.retry_after)
-            raise PolicyError(str(e), code=e.code)
-
-        # Handle streaming
-        if body.stream:
-            return await _stream_chat_response(
-                dispatcher, internal_request, body.model, ctx
-            )
-
-        # Non-streaming: dispatch and wait
-        with metrics.track_request("dispatch"):
-            result = await dispatcher.dispatch(internal_request)
-
-        # Record metrics
-        ctx.record_complete(
-            prompt_tokens=result.response.usage.prompt_tokens,
-            completion_tokens=result.response.usage.completion_tokens,
-        )
-        metrics.record_request(
-            provider=result.provider_used,
-            model=result.response.model,
-            task="chat",
-            status="success",
-            latency_ms=ctx.total_latency_ms or 0,
-            prompt_tokens=result.response.usage.prompt_tokens,
-            completion_tokens=result.response.usage.completion_tokens,
-            tokens_per_second=ctx.tokens_per_second,
+    # Handle streaming
+    if body.stream:
+        return await _stream_chat_response(
+            dispatcher, internal_request, body.model, ctx
         )
 
-        # Convert to OpenAI format
-        return OpenAIChatResponse.from_internal(result.response)
+    # Non-streaming: dispatch and wait
+    # DispatchError propagates to exception handler
+    with metrics.track_request("dispatch"):
+        result = await dispatcher.dispatch(internal_request)
 
-    except DispatchError as e:
-        ctx.record_error("dispatch_error", str(e))
-        metrics.record_error(e.provider or "unknown", e.code)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={"error": e.code, "message": str(e)},
-        )
-    except ValidationError as e:
-        ctx.record_error("validation_error", str(e))
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail={"error": "validation_error", "message": str(e)},
-        )
-    except (RateLimitError, PolicyError):
-        raise
-    except Exception as e:
-        ctx.record_error("internal_error", str(e))
-        logger.exception("Unexpected error in chat_completions")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={"error": "internal_error", "message": "An unexpected error occurred"},
-        )
-    finally:
-        clear_request_context()
+    # Record metrics
+    ctx.record_complete(
+        prompt_tokens=result.response.usage.prompt_tokens,
+        completion_tokens=result.response.usage.completion_tokens,
+    )
+    metrics.record_request(
+        provider=result.provider_used,
+        model=result.response.model,
+        task="chat",
+        status="success",
+        latency_ms=ctx.total_latency_ms or 0,
+        prompt_tokens=result.response.usage.prompt_tokens,
+        completion_tokens=result.response.usage.completion_tokens,
+        tokens_per_second=ctx.tokens_per_second,
+    )
+
+    # Convert to OpenAI format
+    return OpenAIChatResponse.from_internal(result.response)
 
 
 async def _stream_chat_response(
@@ -150,7 +128,11 @@ async def _stream_chat_response(
     model: str,
     ctx,
 ) -> StreamingResponse:
-    """Create streaming response for chat completions."""
+    """Create streaming response for chat completions.
+
+    Note: Streaming errors are sent as SSE error events rather than
+    raising exceptions, since the HTTP response has already started.
+    """
 
     async def generate() -> AsyncGenerator[bytes, None]:
         try:
@@ -186,14 +168,16 @@ async def _stream_chat_response(
             yield b"data: [DONE]\n\n"
 
         except DispatchError as e:
-            ctx.record_error("dispatch_error", str(e))
-            error_response = {"error": {"code": e.code, "message": str(e)}}
+            # For streaming, send error as SSE event
+            ctx.record_error(e.code.value, str(e))
+            error_response = e.to_dict()
             yield f"data: {json.dumps(error_response)}\n\n".encode()
         except Exception as e:
+            # Wrap unexpected errors
             ctx.record_error("stream_error", str(e))
             logger.exception("Error in chat stream")
-            error_response = {"error": {"code": "stream_error", "message": "Stream interrupted"}}
-            yield f"data: {json.dumps(error_response)}\n\n".encode()
+            stream_error = StreamError(message="Stream interrupted")
+            yield f"data: {json.dumps(stream_error.to_dict())}\n\n".encode()
         finally:
             clear_request_context()
 
@@ -224,6 +208,7 @@ async def completions(
     """Create a text completion.
 
     OpenAI-compatible endpoint for completion-based interactions.
+    Domain errors propagate to exception handler middleware.
     """
     ctx = setup_request_context(
         client_id=client_id,
@@ -232,58 +217,36 @@ async def completions(
         task="completion",
     )
 
+    # Convert to internal format
+    internal_request = body.to_internal(client_id=client_id, task=TaskType.COMPLETION)
+
+    # Check policies - raises domain errors on violation
     try:
-        # Convert to internal format
-        internal_request = body.to_internal(client_id=client_id, task=TaskType.COMPLETION)
+        enforcer.enforce(internal_request)
+    except PolicyViolation as e:
+        translate_policy_violation(e)
 
-        # Check policies
-        try:
-            enforcer.enforce(internal_request)
-        except PolicyViolation as e:
-            if e.policy_type == "rate_limit":
-                raise RateLimitError(str(e), retry_after=e.retry_after)
-            raise PolicyError(str(e), code=e.code)
+    # Dispatch request - DispatchError propagates to exception handler
+    with metrics.track_request("dispatch"):
+        result = await dispatcher.dispatch(internal_request)
 
-        # Dispatch request
-        with metrics.track_request("dispatch"):
-            result = await dispatcher.dispatch(internal_request)
+    # Record metrics
+    ctx.record_complete(
+        prompt_tokens=result.response.usage.prompt_tokens,
+        completion_tokens=result.response.usage.completion_tokens,
+    )
+    metrics.record_request(
+        provider=result.provider_used,
+        model=result.response.model,
+        task="completion",
+        status="success",
+        latency_ms=ctx.total_latency_ms or 0,
+        prompt_tokens=result.response.usage.prompt_tokens,
+        completion_tokens=result.response.usage.completion_tokens,
+        tokens_per_second=ctx.tokens_per_second,
+    )
 
-        # Record metrics
-        ctx.record_complete(
-            prompt_tokens=result.response.usage.prompt_tokens,
-            completion_tokens=result.response.usage.completion_tokens,
-        )
-        metrics.record_request(
-            provider=result.provider_used,
-            model=result.response.model,
-            task="completion",
-            status="success",
-            latency_ms=ctx.total_latency_ms or 0,
-            prompt_tokens=result.response.usage.prompt_tokens,
-            completion_tokens=result.response.usage.completion_tokens,
-            tokens_per_second=ctx.tokens_per_second,
-        )
-
-        return OpenAICompletionResponse.from_internal(result.response)
-
-    except DispatchError as e:
-        ctx.record_error("dispatch_error", str(e))
-        metrics.record_error(e.provider or "unknown", e.code)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={"error": e.code, "message": str(e)},
-        )
-    except (RateLimitError, PolicyError):
-        raise
-    except Exception as e:
-        ctx.record_error("internal_error", str(e))
-        logger.exception("Unexpected error in completions")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={"error": "internal_error", "message": "An unexpected error occurred"},
-        )
-    finally:
-        clear_request_context()
+    return OpenAICompletionResponse.from_internal(result.response)
 
 
 # =============================================================================
@@ -302,6 +265,7 @@ async def embeddings(
     """Create embeddings for the input text.
 
     OpenAI-compatible endpoint for generating text embeddings.
+    Domain errors propagate to exception handler middleware.
     """
     ctx = setup_request_context(
         client_id=client_id,
@@ -310,53 +274,31 @@ async def embeddings(
         task="embeddings",
     )
 
+    # Convert to internal format
+    internal_request = body.to_internal(client_id=client_id)
+
+    # Check policies - raises domain errors on violation
     try:
-        # Convert to internal format
-        internal_request = body.to_internal(client_id=client_id)
+        enforcer.enforce(internal_request)
+    except PolicyViolation as e:
+        translate_policy_violation(e)
 
-        # Check policies
-        try:
-            enforcer.enforce(internal_request)
-        except PolicyViolation as e:
-            if e.policy_type == "rate_limit":
-                raise RateLimitError(str(e), retry_after=e.retry_after)
-            raise PolicyError(str(e), code=e.code)
+    # Dispatch request - DispatchError propagates to exception handler
+    with metrics.track_request("dispatch"):
+        result = await dispatcher.dispatch(internal_request)
 
-        # Dispatch request
-        with metrics.track_request("dispatch"):
-            result = await dispatcher.dispatch(internal_request)
+    # Record metrics
+    ctx.record_complete(
+        prompt_tokens=result.response.usage.prompt_tokens,
+        completion_tokens=0,
+    )
+    metrics.record_request(
+        provider=result.provider_used,
+        model=result.response.model,
+        task="embeddings",
+        status="success",
+        latency_ms=ctx.total_latency_ms or 0,
+        prompt_tokens=result.response.usage.prompt_tokens,
+    )
 
-        # Record metrics
-        ctx.record_complete(
-            prompt_tokens=result.response.usage.prompt_tokens,
-            completion_tokens=0,
-        )
-        metrics.record_request(
-            provider=result.provider_used,
-            model=result.response.model,
-            task="embeddings",
-            status="success",
-            latency_ms=ctx.total_latency_ms or 0,
-            prompt_tokens=result.response.usage.prompt_tokens,
-        )
-
-        return OpenAIEmbeddingResponse.from_internal(result.response)
-
-    except DispatchError as e:
-        ctx.record_error("dispatch_error", str(e))
-        metrics.record_error(e.provider or "unknown", e.code)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={"error": e.code, "message": str(e)},
-        )
-    except (RateLimitError, PolicyError):
-        raise
-    except Exception as e:
-        ctx.record_error("internal_error", str(e))
-        logger.exception("Unexpected error in embeddings")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={"error": "internal_error", "message": "An unexpected error occurred"},
-        )
-    finally:
-        clear_request_context()
+    return OpenAIEmbeddingResponse.from_internal(result.response)
