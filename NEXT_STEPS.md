@@ -239,27 +239,59 @@ python -m gateway.cli dashboard
 
 ---
 
-## 4. Immediate Action Items
+## 4. Implementation Roadmap (Prioritized)
 
-### This Week
+### Phase 1: Cloud Provider Support (OpenAI Adapter)
+**Priority: HIGH | Effort: 2-4 hours**
 
-- [ ] **Create `openai` adapter** for cloud providers
-- [ ] **Add docker-compose.yaml** with Prometheus + Grafana
-- [ ] **Create Grafana dashboard JSON** for gateway metrics
-- [ ] **Test with real OpenAI/Anthropic keys**
-- [ ] **Document VM deployment steps**
+- [ ] Create `src/gateway/providers/openai.py` adapter
+- [ ] Support OpenAI, Anthropic, Groq, Together AI (all OpenAI-compatible)
+- [ ] Handle API key forwarding and custom headers
+- [ ] Test with real cloud API keys
+- [ ] Update config examples
 
-### Next 2 Weeks
+**Why first**: Unlocks hybrid local/cloud routing, essential for production use.
 
-- [ ] **Hybrid routing**: Route cheap tasks to local, expensive to cloud
-- [ ] **Cost tracking**: Estimate costs per request
-- [ ] **Request logging UI**: View recent requests/errors
-- [ ] **API key management UI**: Create/revoke keys
+### Phase 2: Custom Frontend Dashboard
+**Priority: HIGH | Effort: 1-2 weeks**
 
-### v1.0 Roadmap
+- [ ] React + TypeScript + TailwindCSS
+- [ ] Real-time request monitoring (WebSocket or polling)
+- [ ] Provider health status
+- [ ] Usage metrics and charts (Recharts/Tremor)
+- [ ] Error log viewer
+- [ ] API key management UI
+- [ ] Cost tracking display
 
+**Why custom over Grafana**: Simpler deployment, better UX for non-technical users, branded experience, single deployable unit.
+
+### Phase 3: Database & Audit Logging
+**Priority: HIGH | Effort: 8-10 hours**
+
+- [ ] SQLAlchemy Core schema (database-agnostic)
+- [ ] Audit log table (every request)
+- [ ] Usage aggregates table (daily rollups)
+- [ ] API keys table (DB-managed keys)
+- [ ] SQLite default, PostgreSQL/MySQL optional
+- [ ] AuditLogger integration with routes
+- [ ] Migration support (Alembic)
+
+**Why third**: Frontend needs data to display; database provides persistence for dashboard.
+
+### Phase 4: Production Hardening
+**Priority: MEDIUM | Effort: 4-8 hours**
+
+- [ ] Docker Compose (gateway + frontend + db)
+- [ ] TLS termination guide (nginx/caddy)
+- [ ] Request body size limits
+- [ ] Prompt redaction option
+- [ ] Health check improvements
+
+### Future (v1.0+)
+
+- [ ] Hybrid routing (cheap tasks → local, expensive → cloud)
+- [ ] Cost estimation per request
 - [ ] Multi-tenant support
-- [ ] Custom React dashboard
 - [ ] Webhook notifications
 - [ ] Request/response caching
 - [ ] Model evaluation harness
@@ -693,13 +725,12 @@ services:
 
 ## Summary
 
-| Task | Effort | Priority |
-|------|--------|----------|
-| OpenAI adapter | 2-4 hrs | High |
-| Docker Compose + monitoring | 1-2 hrs | High |
-| Grafana dashboard | 1-2 hrs | High |
-| VM deployment | 30 min | High |
-| Open WebUI integration | 15 min | High |
-| Custom React dashboard | 1-2 weeks | Medium |
-| Cost tracking | 4-8 hrs | Medium |
-| Multi-tenant | 1-2 weeks | Low (v1) |
+| Phase | Task | Effort | Priority |
+|-------|------|--------|----------|
+| **1** | OpenAI adapter (cloud providers) | 2-4 hrs | **HIGH** |
+| **2** | Custom React frontend | 1-2 weeks | **HIGH** |
+| **3** | Database + audit logging | 8-10 hrs | **HIGH** |
+| **4** | Docker Compose + production hardening | 4-8 hrs | Medium |
+| - | Open WebUI / LibreChat integration | 15 min | As needed |
+| - | Hybrid routing | 4-8 hrs | Future |
+| - | Multi-tenant | 1-2 weeks | v1.0 |
