@@ -289,6 +289,13 @@ python -m gateway.cli dashboard
 
 ### Future (v1.0+)
 
+- [ ] **Plugin architecture** for request/response transformation
+  - PII scrubbing (SSN, credit cards, emails, names, phone numbers)
+  - NER detection and redaction
+  - Prompt injection detection
+  - Content filtering
+  - Response validation
+  - Config-driven plugin chain
 - [ ] Hybrid routing (cheap tasks → local, expensive → cloud)
 - [ ] Cost estimation per request
 - [ ] Multi-tenant support
