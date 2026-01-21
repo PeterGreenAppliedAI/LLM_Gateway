@@ -7,6 +7,9 @@ Per rule.md:
 
 Per PRD Section 14:
 - API key authentication
+
+Per Endpoints/Environments Architecture:
+- Environment resolution from API key or header
 """
 
 import re
@@ -16,7 +19,7 @@ from uuid import uuid4
 
 from fastapi import Depends, Header, Request
 
-from gateway.config import GatewayConfig
+from gateway.config import GatewayConfig, EnvironmentConfig
 from gateway.dispatch import Dispatcher, ProviderRegistry
 from gateway.errors import (
     AuthenticationError,
@@ -67,10 +70,12 @@ async def get_registry(request: Request) -> ProviderRegistry:
 
 
 def get_dispatcher(
+    request: Request,
     registry: Annotated[ProviderRegistry, Depends(get_registry)]
 ) -> Dispatcher:
-    """Get dispatcher instance."""
-    return Dispatcher(registry)
+    """Get dispatcher instance with resolution config."""
+    config = get_config(request)
+    return Dispatcher(registry, resolution_config=config.resolution)
 
 
 def get_enforcer(request: Request) -> PolicyEnforcer:
@@ -88,8 +93,8 @@ def get_enforcer(request: Request) -> PolicyEnforcer:
     return enforcer
 
 
-def validate_api_key(api_key: str, config: GatewayConfig) -> str:
-    """Validate API key and return client_id.
+def validate_api_key(api_key: str, config: GatewayConfig) -> tuple[str, str | None]:
+    """Validate API key and return client_id and environment.
 
     Security:
     - Validates key format to prevent injection
@@ -101,7 +106,8 @@ def validate_api_key(api_key: str, config: GatewayConfig) -> str:
         config: Gateway configuration
 
     Returns:
-        client_id associated with the key
+        Tuple of (client_id, environment) associated with the key.
+        Environment may be None if not configured.
 
     Raises:
         InvalidApiKeyFormatError: If key format is invalid
@@ -114,15 +120,23 @@ def validate_api_key(api_key: str, config: GatewayConfig) -> str:
     # Check if auth is enabled
     if not config.auth.enabled:
         # Auth disabled - return default client
-        return "default"
+        return "default", None
 
     # Look up key in configured keys
     for key_config in config.auth.api_keys:
         # Security: Constant-time comparison
         if secrets.compare_digest(api_key, key_config.key):
-            return key_config.client_id
+            return key_config.client_id, key_config.environment
 
     raise InvalidApiKeyError()
+
+
+class AuthResult:
+    """Result of authentication containing client_id and environment."""
+
+    def __init__(self, client_id: str, environment: str | None = None):
+        self.client_id = client_id
+        self.environment = environment
 
 
 async def authenticate(
@@ -146,6 +160,31 @@ async def authenticate(
     Raises:
         AuthenticationError: If authentication fails
     """
+    result = await authenticate_with_environment(request, authorization, x_api_key)
+    return result.client_id
+
+
+async def authenticate_with_environment(
+    request: Request,
+    authorization: Annotated[Optional[str], Header()] = None,
+    x_api_key: Annotated[Optional[str], Header(alias="X-API-Key")] = None,
+) -> AuthResult:
+    """Authenticate request and return client_id with environment.
+
+    Supports:
+    - Bearer token: Authorization: Bearer <api_key>
+    - API key header: X-API-Key: <api_key>
+
+    Security:
+    - Validates input format
+    - Logs authentication attempts
+
+    Returns:
+        AuthResult with client_id and optional environment
+
+    Raises:
+        AuthenticationError: If authentication fails
+    """
     config = get_config(request)
 
     # Extract API key from headers
@@ -162,7 +201,7 @@ async def authenticate(
 
     # If no auth configured and no key provided, use default
     if not config.auth.enabled and not api_key:
-        return "default"
+        return AuthResult("default", None)
 
     # If auth enabled but no key provided
     if config.auth.enabled and not api_key:
@@ -170,9 +209,64 @@ async def authenticate(
 
     # Validate key
     if api_key:
-        return validate_api_key(api_key, config)
+        client_id, environment = validate_api_key(api_key, config)
+        return AuthResult(client_id, environment)
 
-    return "default"
+    return AuthResult("default", None)
+
+
+async def get_environment(
+    request: Request,
+    x_environment: Annotated[Optional[str], Header(alias="X-Environment")] = None,
+    authorization: Annotated[Optional[str], Header()] = None,
+    x_api_key: Annotated[Optional[str], Header(alias="X-API-Key")] = None,
+) -> EnvironmentConfig | None:
+    """Get environment configuration for the request.
+
+    Resolution order:
+    1. X-Environment header (explicit override)
+    2. Environment from API key configuration
+    3. Default environment from config
+
+    Args:
+        request: FastAPI request
+        x_environment: Optional explicit environment header
+        authorization: Optional auth header (for env lookup)
+        x_api_key: Optional API key header (for env lookup)
+
+    Returns:
+        EnvironmentConfig if environment is configured, None otherwise
+    """
+    config = get_config(request)
+
+    # If no environments configured, return None
+    if not config.environments:
+        return None
+
+    env_name: str | None = None
+
+    # Priority 1: Explicit header
+    if x_environment:
+        env_name = x_environment
+
+    # Priority 2: From API key
+    if not env_name:
+        try:
+            auth_result = await authenticate_with_environment(
+                request, authorization, x_api_key
+            )
+            env_name = auth_result.environment
+        except AuthenticationError:
+            # Auth failed, will use default
+            pass
+
+    # Priority 3: Default environment
+    if not env_name:
+        default_env = config.get_default_environment()
+        return default_env
+
+    # Look up environment by name
+    return config.get_environment(env_name)
 
 
 def setup_request_context(

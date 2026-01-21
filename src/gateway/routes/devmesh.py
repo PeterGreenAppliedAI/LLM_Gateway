@@ -358,3 +358,121 @@ async def check_provider_health(
         "status": status_enum.value,
         "healthy": status_enum == HealthStatus.HEALTHY,
     }
+
+
+# =============================================================================
+# Model Catalog
+# =============================================================================
+
+
+class CatalogModel(BaseModel):
+    """Model discovered from an endpoint."""
+    name: str
+    endpoint: str
+    discovered_at: str
+    size_bytes: Optional[int] = None
+    family: Optional[str] = None
+    parameter_size: Optional[str] = None
+    quantization: Optional[str] = None
+
+
+class CatalogEndpoint(BaseModel):
+    """Endpoint with its discovered models."""
+    name: str
+    type: str
+    url: str
+    enabled: bool
+    healthy: bool
+    labels: dict[str, str] = Field(default_factory=dict)
+    models: list[str] = Field(default_factory=list)
+
+
+class CatalogResponse(BaseModel):
+    """Response for catalog endpoint."""
+    last_discovery: Optional[str] = None
+    endpoints: list[CatalogEndpoint]
+    models: list[CatalogModel]
+    total_models: int
+    total_endpoints: int
+
+
+@router.get("/v1/devmesh/catalog", response_model=CatalogResponse)
+async def get_catalog(
+    request: Request,
+    client_id: Annotated[str, Depends(authenticate)],
+    registry: Annotated[ProviderRegistry, Depends(get_registry)],
+    config: Annotated[GatewayConfig, Depends(get_config)],
+) -> CatalogResponse:
+    """Get the model catalog with discovered models per endpoint.
+
+    Returns discovered models and their availability across endpoints.
+    Useful for debugging routing and checking model availability.
+    """
+    catalog = registry.catalog
+
+    # Build endpoint info
+    endpoints = []
+    for endpoint_config in config.get_enabled_endpoints():
+        health = registry.get_health(endpoint_config.name)
+        status_enum = health.status if health else HealthStatus.UNKNOWN
+
+        models = catalog.get_models_for_endpoint(endpoint_config.name)
+
+        endpoints.append(CatalogEndpoint(
+            name=endpoint_config.name,
+            type=endpoint_config.type.value,
+            url=endpoint_config.url,
+            enabled=endpoint_config.enabled,
+            healthy=status_enum == HealthStatus.HEALTHY,
+            labels=endpoint_config.labels,
+            models=models,
+        ))
+
+    # Build model info
+    models = []
+    for discovered in catalog.discovered:
+        models.append(CatalogModel(
+            name=discovered.name,
+            endpoint=discovered.endpoint,
+            discovered_at=discovered.discovered_at.isoformat(),
+            size_bytes=discovered.size_bytes,
+            family=discovered.family,
+            parameter_size=discovered.parameter_size,
+            quantization=discovered.quantization,
+        ))
+
+    return CatalogResponse(
+        last_discovery=catalog.last_discovery.isoformat() if catalog.last_discovery else None,
+        endpoints=endpoints,
+        models=models,
+        total_models=len(models),
+        total_endpoints=len(endpoints),
+    )
+
+
+@router.post("/v1/devmesh/catalog/refresh")
+async def refresh_catalog(
+    request: Request,
+    client_id: Annotated[str, Depends(authenticate)],
+) -> dict[str, Any]:
+    """Trigger immediate model discovery.
+
+    Forces a refresh of the model catalog by querying all endpoints.
+
+    Returns:
+        Discovery results with models found per endpoint
+    """
+    discovery = getattr(request.app.state, "discovery_service", None)
+    if discovery is None:
+        return {
+            "status": "error",
+            "message": "Discovery service not configured",
+        }
+
+    results = await discovery.discover_all()
+
+    return {
+        "status": "success",
+        "discovered": results,
+        "total_models": sum(len(models) for models in results.values()),
+    }

@@ -1,10 +1,11 @@
 """Dispatcher - routes requests to providers with health-aware fallback.
 
-NOT smart routing. Just:
-1. Parse provider hint from request
-2. Look up provider
-3. Check health
-4. Forward or fallback
+Implements the resolution policy for model→endpoint mapping:
+1. Explicit override: endpoint/model syntax
+2. Environment filter: only consider env-approved endpoints
+3. Per-model default: config-specified model→endpoint mapping
+4. Endpoint priority: first in priority list that has the model
+5. Ambiguous → error: when no resolution strategy applies
 
 Per rule.md:
 - Single Responsibility: Dispatcher only handles request dispatch
@@ -16,11 +17,16 @@ Per API Error Handling Architecture:
 - Errors propagate to exception handler middleware
 """
 
+import fnmatch
 import re
 from dataclasses import dataclass, field
 from typing import Optional, List, AsyncIterator
 
-from gateway.config import SAFE_IDENTIFIER_PATTERN
+from gateway.config import (
+    SAFE_IDENTIFIER_PATTERN,
+    EnvironmentConfig,
+    ResolutionConfig,
+)
 from gateway.dispatch.registry import ProviderRegistry
 from gateway.errors import (
     DispatchError,
@@ -28,6 +34,9 @@ from gateway.errors import (
     ProviderNotFoundError,
     ProviderUnavailableError,
     AllProvidersUnavailableError,
+    AmbiguousModelError,
+    ModelNotFoundError,
+    EndpointNotFoundError,
 )
 from gateway.models.common import HealthStatus
 from gateway.models.internal import InternalRequest, InternalResponse, StreamChunk
@@ -56,7 +65,14 @@ class DispatchResult:
 class Dispatcher:
     """Routes requests to providers with fallback support.
 
-    Dispatch logic:
+    Resolution logic (5 steps):
+    1. Explicit override: endpoint/model syntax
+    2. Environment filter: only consider env-approved endpoints
+    3. Per-model default: config-specified model→endpoint mapping
+    4. Endpoint priority: first in priority list that has the model
+    5. Ambiguous → error: when no resolution strategy applies
+
+    Legacy dispatch logic (backward compatible):
     1. Parse provider from model string (e.g., "ollama/llama3.2" → "ollama")
     2. Or use preferred_provider from request
     3. Or use default provider from config
@@ -64,16 +80,22 @@ class Dispatcher:
     5. On failure, try fallback providers if allowed
     """
 
-    # Pattern to parse "provider/model" format
+    # Pattern to parse "provider/model" or "endpoint/model" format
     MODEL_PROVIDER_PATTERN = re.compile(r"^([a-zA-Z][a-zA-Z0-9_-]*)/(.+)$")
 
-    def __init__(self, registry: ProviderRegistry):
+    def __init__(
+        self,
+        registry: ProviderRegistry,
+        resolution_config: ResolutionConfig | None = None,
+    ):
         """Initialize dispatcher with provider registry.
 
         Args:
             registry: Initialized provider registry with health tracking
+            resolution_config: Optional resolution configuration for endpoint selection
         """
         self._registry = registry
+        self._resolution_config = resolution_config or ResolutionConfig()
 
     def parse_provider_from_model(self, model: Optional[str]) -> tuple[Optional[str], Optional[str]]:
         """Parse provider and model from model string.
@@ -144,6 +166,155 @@ class Dispatcher:
             return default, request.model
 
         raise NoProviderError()
+
+    def resolve_endpoint(
+        self,
+        request: InternalRequest,
+        environment: EnvironmentConfig | None = None,
+        available_endpoints: list[str] | None = None,
+    ) -> tuple[str, str]:
+        """Resolve which endpoint and model to use for a request.
+
+        Implements the 5-step resolution policy:
+        1. Explicit override: endpoint/model syntax
+        2. Environment filter: only consider env-approved endpoints
+        3. Per-model default: config-specified model→endpoint mapping
+        4. Endpoint priority: first in priority list that has the model
+        5. Ambiguous → error: when no resolution strategy applies
+
+        Args:
+            request: The internal request
+            environment: Optional environment config for filtering
+            available_endpoints: Optional list of endpoints that have the model
+                               (from catalog discovery). If None, uses registry.
+
+        Returns:
+            Tuple of (endpoint_name, model_name)
+
+        Raises:
+            EndpointNotFoundError: If explicitly requested endpoint doesn't exist
+            ModelNotFoundError: If model not found on any available endpoint
+            AmbiguousModelError: If model on multiple endpoints with no default
+            NoProviderError: If no endpoint can be resolved
+        """
+        # Step 1: Check for explicit endpoint/model syntax
+        endpoint_hint, model_name = self.parse_provider_from_model(request.model)
+
+        if endpoint_hint:
+            # Validate the endpoint exists
+            if not self._registry.get(endpoint_hint):
+                raise EndpointNotFoundError(endpoint=endpoint_hint)
+            return endpoint_hint, model_name or request.model
+
+        # Use raw model name from here
+        model_name = request.model or ""
+
+        # Step 2: Filter endpoints by environment
+        candidate_endpoints = self._filter_endpoints_by_environment(
+            available_endpoints or self._registry.list_providers(),
+            environment,
+        )
+
+        if not candidate_endpoints:
+            raise NoProviderError(
+                message="No endpoints available for this environment"
+            )
+
+        # If only one endpoint, use it
+        if len(candidate_endpoints) == 1:
+            return candidate_endpoints[0], model_name
+
+        # Step 3: Check per-model defaults
+        default_endpoint = self._find_model_default(model_name)
+        if default_endpoint and default_endpoint in candidate_endpoints:
+            return default_endpoint, model_name
+
+        # Step 4: Use endpoint priority
+        for priority_endpoint in self._resolution_config.endpoint_priority:
+            if priority_endpoint in candidate_endpoints:
+                return priority_endpoint, model_name
+
+        # Step 5: Handle ambiguity
+        if self._resolution_config.ambiguous_behavior == "first_priority":
+            # Use first available endpoint
+            return candidate_endpoints[0], model_name
+
+        # Default: error on ambiguity
+        if len(candidate_endpoints) > 1:
+            raise AmbiguousModelError(model=model_name, endpoints=candidate_endpoints)
+
+        # Single endpoint remaining
+        if candidate_endpoints:
+            return candidate_endpoints[0], model_name
+
+        raise NoProviderError()
+
+    def _filter_endpoints_by_environment(
+        self,
+        endpoints: list[str],
+        environment: EnvironmentConfig | None,
+    ) -> list[str]:
+        """Filter endpoints based on environment configuration.
+
+        Args:
+            endpoints: List of endpoint names to filter
+            environment: Environment configuration (None = allow all)
+
+        Returns:
+            Filtered list of endpoint names
+        """
+        if environment is None:
+            return endpoints
+
+        filtered = []
+        for ep_name in endpoints:
+            # Check allowed_endpoints
+            if environment.allowed_endpoints:
+                if ep_name not in environment.allowed_endpoints:
+                    continue
+
+            # Check endpoint_filter labels
+            if environment.endpoint_filter:
+                endpoint_config = self._registry.get_endpoint_config(ep_name)
+                if endpoint_config:
+                    labels = getattr(endpoint_config, 'labels', {})
+                    if not self._labels_match(labels, environment.endpoint_filter):
+                        continue
+
+            filtered.append(ep_name)
+
+        return filtered
+
+    def _labels_match(
+        self,
+        labels: dict[str, str],
+        required: dict[str, str],
+    ) -> bool:
+        """Check if labels match required filter."""
+        for key, value in required.items():
+            if labels.get(key) != value:
+                return False
+        return True
+
+    def _find_model_default(self, model: str) -> str | None:
+        """Find default endpoint for a model from config.
+
+        Supports glob patterns (e.g., "phi4:*" matches "phi4:14b").
+
+        Args:
+            model: Model name to look up
+
+        Returns:
+            Endpoint name if a default is configured, None otherwise
+        """
+        for model_default in self._resolution_config.model_defaults:
+            # Check exact match first
+            if model_default.model == model:
+                return model_default.endpoint
+            # Check glob pattern
+            if fnmatch.fnmatch(model, model_default.model):
+                return model_default.endpoint
+        return None
 
     async def dispatch(self, request: InternalRequest) -> DispatchResult:
         """Dispatch a request to the appropriate provider.

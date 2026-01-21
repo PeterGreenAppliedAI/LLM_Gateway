@@ -122,6 +122,7 @@ class InternalRequest(BaseModel):
     # Routing hints
     preferred_provider: str | None = Field(default=None, max_length=64)
     fallback_allowed: bool = True
+    environment: str | None = Field(default=None, max_length=64)  # dev, prod, etc.
 
     # Advanced options
     response_format: dict[str, Any] | None = None  # JSON schema for structured output

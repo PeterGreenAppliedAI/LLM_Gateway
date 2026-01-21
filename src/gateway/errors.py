@@ -46,6 +46,9 @@ class ErrorCode(str, Enum):
     PROVIDER_UNAVAILABLE = "provider_unavailable"
     ALL_PROVIDERS_UNAVAILABLE = "all_providers_unavailable"
     DISPATCH_ERROR = "dispatch_error"
+    AMBIGUOUS_MODEL = "ambiguous_model"
+    MODEL_NOT_FOUND = "model_not_found"
+    ENDPOINT_NOT_FOUND = "endpoint_not_found"
 
     # Validation
     VALIDATION_ERROR = "validation_error"
@@ -305,6 +308,43 @@ class AllProvidersUnavailableError(DispatchError):
             message=f"All providers unavailable. Tried: {', '.join(attempted)}",
             code=ErrorCode.ALL_PROVIDERS_UNAVAILABLE,
             details={"attempted_providers": attempted},
+        )
+
+
+class AmbiguousModelError(DispatchError):
+    """Model is available on multiple endpoints with no default configured."""
+
+    def __init__(self, model: str, endpoints: list[str]):
+        super().__init__(
+            message=f"Model '{model}' is available on multiple endpoints: {endpoints}. "
+            "Configure a model_default or use explicit endpoint/model syntax.",
+            code=ErrorCode.AMBIGUOUS_MODEL,
+            details={"model": model, "available_endpoints": endpoints},
+        )
+
+
+class ModelNotFoundError(DispatchError):
+    """Model not found on any endpoint."""
+
+    def __init__(self, model: str, searched_endpoints: list[str] | None = None):
+        details: dict = {"model": model}
+        if searched_endpoints:
+            details["searched_endpoints"] = searched_endpoints
+        super().__init__(
+            message=f"Model '{model}' not found on any available endpoint",
+            code=ErrorCode.MODEL_NOT_FOUND,
+            details=details,
+        )
+
+
+class EndpointNotFoundError(DispatchError):
+    """Explicitly requested endpoint not found."""
+
+    def __init__(self, endpoint: str):
+        super().__init__(
+            message=f"Endpoint '{endpoint}' not found",
+            code=ErrorCode.ENDPOINT_NOT_FOUND,
+            details={"endpoint": endpoint},
         )
 
 

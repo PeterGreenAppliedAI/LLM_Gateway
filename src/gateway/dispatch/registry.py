@@ -3,13 +3,17 @@
 Per rule.md:
 - Single Responsibility: Registry only manages provider lifecycle and health
 - Contracts: Clear interface for provider lookup and health queries
+
+Supports both legacy ProviderConfig and new EndpointConfig for
+backward compatibility during the migration period.
 """
 
 import asyncio
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
-from gateway.config import GatewayConfig, ProviderConfig
+from gateway.catalog.models import ModelCatalog
+from gateway.config import GatewayConfig, ProviderConfig, EndpointConfig
 from gateway.models.common import HealthStatus
 from gateway.providers import ProviderAdapter, create_adapter
 
@@ -59,6 +63,7 @@ class ProviderRegistry:
     - Tracking health state per provider
     - Background health monitoring
     - Provider lookup and listing
+    - Model catalog integration
     """
 
     def __init__(self, config: GatewayConfig):
@@ -70,27 +75,55 @@ class ProviderRegistry:
         self._config = config
         self._adapters: Dict[str, ProviderAdapter] = {}
         self._health: Dict[str, ProviderHealth] = {}
+        self._endpoint_configs: Dict[str, EndpointConfig] = {}
         self._health_task: Optional[asyncio.Task] = None
         self._shutdown = False
+        self._catalog: ModelCatalog = ModelCatalog()
 
         # Health check settings
         self._health_interval_seconds: float = 30.0
         self._health_timeout_seconds: float = 10.0
 
+    @property
+    def catalog(self) -> ModelCatalog:
+        """Get the model catalog."""
+        return self._catalog
+
     async def initialize(self) -> None:
         """Initialize all configured providers.
 
-        Creates adapter instances for all enabled providers.
+        Creates adapter instances for all enabled providers/endpoints.
         Does NOT start health monitoring - call start_health_monitoring() for that.
         """
-        for provider_config in self._config.get_enabled_providers():
-            await self._register_provider(provider_config)
+        # Initialize from endpoints if available, otherwise from providers
+        if self._config.endpoints:
+            for endpoint_config in self._config.get_enabled_endpoints():
+                await self._register_endpoint(endpoint_config)
+        else:
+            for provider_config in self._config.get_enabled_providers():
+                await self._register_provider(provider_config)
 
     async def _register_provider(self, config: ProviderConfig) -> None:
         """Create and register a single provider adapter."""
         adapter = create_adapter(config)
         self._adapters[config.name] = adapter
         self._health[config.name] = ProviderHealth(config.name)
+
+    async def _register_endpoint(self, config: EndpointConfig) -> None:
+        """Create and register an adapter from endpoint config."""
+        # Convert EndpointConfig to ProviderConfig for adapter creation
+        provider_config = ProviderConfig(
+            name=config.name,
+            type=config.type,
+            base_url=config.url,
+            enabled=config.enabled,
+            timeout=config.timeout,
+            max_retries=config.max_retries,
+        )
+        adapter = create_adapter(provider_config)
+        self._adapters[config.name] = adapter
+        self._health[config.name] = ProviderHealth(config.name)
+        self._endpoint_configs[config.name] = config
 
     def get(self, name: str) -> Optional[ProviderAdapter]:
         """Get provider adapter by name.
@@ -162,6 +195,67 @@ class ProviderRegistry:
             if provider_config.name != exclude:
                 chain.append(provider_config.name)
         return chain
+
+    def get_endpoint_config(self, name: str) -> Optional[EndpointConfig]:
+        """Get endpoint configuration by name.
+
+        Args:
+            name: Endpoint name
+
+        Returns:
+            EndpointConfig if found, None otherwise
+        """
+        return self._endpoint_configs.get(name)
+
+    def get_endpoints_with_model(
+        self,
+        model: str,
+        environment_filter: Optional[Dict[str, str]] = None,
+    ) -> List[str]:
+        """Get endpoints that have a specific model.
+
+        Uses the catalog to find which endpoints have the model.
+
+        Args:
+            model: Model name to search for
+            environment_filter: Optional label filter for endpoints
+
+        Returns:
+            List of endpoint names that have the model
+        """
+        endpoints = self._catalog.get_endpoints_for_model(model)
+
+        if environment_filter:
+            filtered = []
+            for ep_name in endpoints:
+                config = self._endpoint_configs.get(ep_name)
+                if config and self._matches_filter(config.labels, environment_filter):
+                    filtered.append(ep_name)
+            return filtered
+
+        return endpoints
+
+    def _matches_filter(
+        self,
+        labels: Dict[str, str],
+        required: Dict[str, str],
+    ) -> bool:
+        """Check if labels match required filter."""
+        for key, value in required.items():
+            if labels.get(key) != value:
+                return False
+        return True
+
+    def get_endpoint_labels(self) -> Dict[str, Dict[str, str]]:
+        """Get all endpoint labels as a dict.
+
+        Returns:
+            Dict mapping endpoint name to its labels dict
+        """
+        return {
+            name: config.labels
+            for name, config in self._endpoint_configs.items()
+        }
 
     # =========================================================================
     # Health Monitoring
