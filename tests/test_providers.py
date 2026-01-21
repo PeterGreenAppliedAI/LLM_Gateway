@@ -243,7 +243,8 @@ class TestProviderFactory:
         assert "vllm" in types
         assert "trtllm" in types
         assert "sglang" in types
-        assert len(types) == 4
+        assert "openai" in types
+        assert len(types) == 5
 
 
 # =============================================================================

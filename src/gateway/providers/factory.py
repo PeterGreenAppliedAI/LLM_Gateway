@@ -11,6 +11,7 @@ from gateway.providers.ollama import OllamaAdapter
 from gateway.providers.vllm import VLLMAdapter
 from gateway.providers.trtllm import TRTLLMAdapter
 from gateway.providers.sglang import SGLangAdapter
+from gateway.providers.openai import OpenAIAdapter
 
 
 # Registry mapping ProviderType enum to adapter classes
@@ -19,6 +20,7 @@ _ADAPTER_REGISTRY: dict[ProviderType, type[ProviderAdapter]] = {
     ProviderType.VLLM: VLLMAdapter,
     ProviderType.TRTLLM: TRTLLMAdapter,
     ProviderType.SGLANG: SGLangAdapter,
+    ProviderType.OPENAI: OpenAIAdapter,
 }
 
 

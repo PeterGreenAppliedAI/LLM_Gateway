@@ -82,6 +82,10 @@ class ProviderConfig(BaseModel):
     capabilities: list[str] = Field(default_factory=list, max_length=20)
     models: list[str] = Field(default_factory=list, max_length=100)
     default_model: str | None = None  # Default model for this provider
+    # API key authentication (for cloud providers)
+    api_key: str | None = None  # Direct key or ${ENV_VAR} syntax
+    api_key_env: str | None = None  # Environment variable name for API key
+    headers: dict[str, str] = Field(default_factory=dict)  # Custom headers (e.g., anthropic-version)
 
 
 # =============================================================================

@@ -62,6 +62,7 @@ class ProviderType(str, Enum):
     VLLM = "vllm"
     TRTLLM = "trtllm"
     SGLANG = "sglang"
+    OPENAI = "openai"  # OpenAI-compatible APIs (OpenAI, Anthropic, Groq, etc.)
 
 
 class HealthStatus(str, Enum):

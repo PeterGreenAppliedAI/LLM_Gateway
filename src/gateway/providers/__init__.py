@@ -12,6 +12,7 @@ from gateway.providers.ollama import OllamaAdapter
 from gateway.providers.vllm import VLLMAdapter
 from gateway.providers.trtllm import TRTLLMAdapter
 from gateway.providers.sglang import SGLangAdapter
+from gateway.providers.openai import OpenAIAdapter
 
 __all__ = [
     # Base class
@@ -25,4 +26,5 @@ __all__ = [
     "VLLMAdapter",
     "TRTLLMAdapter",
     "SGLangAdapter",
+    "OpenAIAdapter",
 ]
