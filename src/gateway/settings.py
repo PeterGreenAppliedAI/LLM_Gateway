@@ -1,10 +1,53 @@
 """Application settings using Pydantic Settings."""
 
 from functools import lru_cache
-from typing import Literal
+from typing import Literal, Optional
 
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class DatabaseSettings(BaseSettings):
+    """Database configuration settings.
+
+    Supports SQLite (default, zero config) and PostgreSQL (production).
+    Configure via environment variables with GATEWAY_DB_ prefix.
+    """
+
+    model_config = SettingsConfigDict(
+        env_prefix="GATEWAY_DB_",
+        extra="ignore",
+    )
+
+    # Connection URL
+    # SQLite: sqlite:///./data/gateway.db (default)
+    # PostgreSQL: postgresql://user:pass@localhost:5432/gateway
+    url: str = Field(
+        default="sqlite:///./data/gateway.db",
+        description="Database connection URL",
+    )
+
+    # Connection pool settings (ignored for SQLite)
+    pool_size: int = Field(default=5, ge=1, le=50, description="Connection pool size")
+    max_overflow: int = Field(default=10, ge=0, le=100, description="Max pool overflow")
+    pool_timeout: int = Field(default=30, ge=1, le=300, description="Pool timeout seconds")
+    pool_recycle: int = Field(default=3600, ge=60, description="Connection recycle seconds")
+
+    # Privacy controls - what to store
+    store_request_body: bool = Field(
+        default=False,
+        description="Store request bodies (prompts) - privacy sensitive",
+    )
+    store_response_body: bool = Field(
+        default=False,
+        description="Store response bodies (completions) - privacy sensitive",
+    )
+
+    # Table creation
+    create_tables: bool = Field(default=True, description="Auto-create tables on startup")
+
+    # Debug
+    echo: bool = Field(default=False, description="Echo SQL statements (debug only)")
 
 
 class Settings(BaseSettings):
@@ -51,6 +94,9 @@ class Settings(BaseSettings):
     log_format: Literal["json", "text"] = Field(default="json", description="Log format")
     log_requests: bool = Field(default=True, description="Log all requests")
     redact_prompts: bool = Field(default=True, description="Redact prompts from logs")
+
+    # Database (nested settings)
+    db: DatabaseSettings = Field(default_factory=DatabaseSettings)
 
     def __repr__(self) -> str:
         """Safe repr that doesn't expose secrets."""

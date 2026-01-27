@@ -34,6 +34,7 @@ from gateway.errors import (
 from gateway.observability import get_logger, get_metrics, RequestContext
 from gateway.observability.logging import set_request_context, clear_request_context
 from gateway.policy import PolicyEnforcer, PolicyViolation
+from gateway.storage import AuditLogger
 
 logger = get_logger(__name__)
 
@@ -91,6 +92,15 @@ def get_enforcer(request: Request) -> PolicyEnforcer:
         enforcer = PolicyEnforcer(policy_config)
         request.app.state.enforcer = enforcer
     return enforcer
+
+
+def get_audit_logger(request: Request) -> Optional[AuditLogger]:
+    """Get audit logger from app state.
+
+    Returns None if database is not configured or failed to initialize.
+    Callers should handle None gracefully (audit logging is optional).
+    """
+    return getattr(request.app.state, "audit_logger", None)
 
 
 def validate_api_key(api_key: str, config: GatewayConfig) -> tuple[str, str | None]:

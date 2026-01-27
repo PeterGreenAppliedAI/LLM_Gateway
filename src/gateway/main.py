@@ -7,6 +7,10 @@ Per API Error Handling Architecture:
 Per Endpoints/Environments Architecture:
 - Starts model discovery service on startup
 - Integrates catalog with registry
+
+Per Database Architecture:
+- Initializes database engine and AuditLogger on startup
+- SQLite default, PostgreSQL production-ready
 """
 
 from contextlib import asynccontextmanager
@@ -14,13 +18,18 @@ from pathlib import Path
 from typing import AsyncGenerator
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from gateway.catalog import ModelCatalog, ModelDiscoveryService
 from gateway.config import GatewayConfig, load_config
 from gateway.dispatch import ProviderRegistry
 from gateway.exception_handlers import register_exception_handlers
+from gateway.observability import get_logger
 from gateway.settings import Settings, get_settings
-from gateway.routes import openai_router, devmesh_router
+from gateway.storage import AuditLogger, DatabaseConfig, create_db_engine
+from gateway.routes import openai_router, devmesh_router, ollama_router
+
+logger = get_logger(__name__)
 
 
 @asynccontextmanager
@@ -40,10 +49,41 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     app.state.settings = settings
 
+    # Initialize database and audit logger
+    db_config = DatabaseConfig(
+        url=settings.db.url,
+        pool_size=settings.db.pool_size,
+        max_overflow=settings.db.max_overflow,
+        pool_timeout=settings.db.pool_timeout,
+        pool_recycle=settings.db.pool_recycle,
+        store_request_body=settings.db.store_request_body,
+        store_response_body=settings.db.store_response_body,
+        create_tables=settings.db.create_tables,
+        echo=settings.db.echo,
+    )
+
+    try:
+        db_engine = create_db_engine(db_config)
+        app.state.db_engine = db_engine
+
+        audit_logger = AuditLogger(
+            engine=db_engine,
+            store_request_body=settings.db.store_request_body,
+            store_response_body=settings.db.store_response_body,
+        )
+        app.state.audit_logger = audit_logger
+        logger.info(f"Database initialized: {settings.db.url.split('://')[0]}")
+    except Exception as e:
+        logger.error(f"Failed to initialize database: {e}")
+        # Continue without database - audit logging will be disabled
+        app.state.db_engine = None
+        app.state.audit_logger = None
+
     # Initialize registry and discovery service if endpoints are configured
     if app.state.config and app.state.config.endpoints:
         registry = ProviderRegistry(app.state.config)
         await registry.initialize()
+        await registry.start_health_monitoring()
         app.state.registry = registry
 
         # Start model discovery service
@@ -64,6 +104,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     if hasattr(app.state, "registry"):
         await app.state.registry.close()
 
+    # Close audit logger thread pool
+    if hasattr(app.state, "audit_logger") and app.state.audit_logger:
+        app.state.audit_logger.close()
+        logger.info("Audit logger shutdown complete")
+
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     """Create and configure the FastAPI application."""
@@ -77,6 +122,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
 
+    # Add CORS middleware for dashboard
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],  # Configure for production
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
     # Register centralized exception handlers
     # Per API Error Handling Architecture: single choke point for error translation
     register_exception_handlers(app)
@@ -84,6 +138,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Include routers
     app.include_router(openai_router)
     app.include_router(devmesh_router)
+    app.include_router(ollama_router)
 
     return app
 

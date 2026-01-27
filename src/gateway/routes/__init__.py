@@ -8,12 +8,20 @@ Per PRD Section 7:
 - GET /metrics (DevMesh - Prometheus)
 - GET /v1/models (DevMesh)
 - POST /v1/devmesh/route (DevMesh - debug routing)
+
+Ollama-compatible endpoints:
+- POST /api/chat
+- POST /api/generate
+- GET /api/tags
+- POST /api/embeddings
 """
 
 from gateway.routes.openai import router as openai_router
 from gateway.routes.devmesh import router as devmesh_router
+from gateway.routes.ollama import router as ollama_router
 
 __all__ = [
     "openai_router",
     "devmesh_router",
+    "ollama_router",
 ]

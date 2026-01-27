@@ -42,11 +42,13 @@ from gateway.observability.logging import clear_request_context
 from gateway.policy import PolicyEnforcer, PolicyViolation
 from gateway.routes.dependencies import (
     authenticate,
+    get_audit_logger,
     get_dispatcher,
     get_enforcer,
     setup_request_context,
     translate_policy_violation,
 )
+from gateway.storage import AuditLogger
 
 logger = get_logger(__name__)
 metrics = get_metrics()
@@ -66,6 +68,7 @@ async def chat_completions(
     client_id: Annotated[str, Depends(authenticate)],
     dispatcher: Annotated[Dispatcher, Depends(get_dispatcher)],
     enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
+    audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
 ):
     """Create a chat completion.
 
@@ -94,7 +97,7 @@ async def chat_completions(
     # Handle streaming
     if body.stream:
         return await _stream_chat_response(
-            dispatcher, internal_request, body.model, ctx
+            dispatcher, internal_request, body.model, ctx, audit_logger
         )
 
     # Non-streaming: dispatch and wait
@@ -118,6 +121,25 @@ async def chat_completions(
         tokens_per_second=ctx.tokens_per_second,
     )
 
+    # Audit log the request
+    if audit_logger:
+        await audit_logger.log_request(
+            request_id=ctx.request_id,
+            client_id=client_id,
+            task="chat",
+            model=result.response.model,
+            endpoint=result.provider_used,
+            status="success",
+            user_id=body.user,
+            stream=False,
+            max_tokens=body.max_tokens,
+            temperature=body.temperature,
+            latency_ms=ctx.total_latency_ms,
+            tokens_per_second=ctx.tokens_per_second,
+            prompt_tokens=result.response.usage.prompt_tokens,
+            completion_tokens=result.response.usage.completion_tokens,
+        )
+
     # Convert to OpenAI format
     return OpenAIChatResponse.from_internal(result.response)
 
@@ -127,6 +149,7 @@ async def _stream_chat_response(
     internal_request,
     model: str,
     ctx,
+    audit_logger: AuditLogger | None,
 ) -> StreamingResponse:
     """Create streaming response for chat completions.
 
@@ -135,6 +158,10 @@ async def _stream_chat_response(
     """
 
     async def generate() -> AsyncGenerator[bytes, None]:
+        provider_name = None
+        final_prompt_tokens = 0
+        final_completion_tokens = 0
+
         try:
             provider_name, stream = await dispatcher.dispatch_stream(internal_request)
 
@@ -150,9 +177,11 @@ async def _stream_chat_response(
 
                 # If this is the final chunk, record completion
                 if chunk.finish_reason:
+                    final_prompt_tokens = chunk.usage.prompt_tokens if chunk.usage else 0
+                    final_completion_tokens = chunk.usage.completion_tokens if chunk.usage else 0
                     ctx.record_complete(
-                        prompt_tokens=chunk.usage.prompt_tokens if chunk.usage else 0,
-                        completion_tokens=chunk.usage.completion_tokens if chunk.usage else 0,
+                        prompt_tokens=final_prompt_tokens,
+                        completion_tokens=final_completion_tokens,
                     )
                     metrics.record_request(
                         provider=provider_name,
@@ -164,6 +193,26 @@ async def _stream_chat_response(
                         tokens_per_second=ctx.tokens_per_second,
                     )
 
+                    # Audit log for streaming
+                    if audit_logger and provider_name:
+                        await audit_logger.log_request(
+                            request_id=ctx.request_id,
+                            client_id=internal_request.client_id,
+                            task="chat",
+                            model=model,
+                            endpoint=provider_name,
+                            status="success",
+                            user_id=internal_request.user_id,
+                            stream=True,
+                            max_tokens=internal_request.max_tokens,
+                            temperature=internal_request.temperature,
+                            latency_ms=ctx.total_latency_ms,
+                            time_to_first_token_ms=ctx.time_to_first_token_ms,
+                            tokens_per_second=ctx.tokens_per_second,
+                            prompt_tokens=final_prompt_tokens,
+                            completion_tokens=final_completion_tokens,
+                        )
+
             # Send [DONE] marker
             yield b"data: [DONE]\n\n"
 
@@ -172,12 +221,41 @@ async def _stream_chat_response(
             ctx.record_error(e.code.value, str(e))
             error_response = e.to_dict()
             yield f"data: {json.dumps(error_response)}\n\n".encode()
+
+            # Audit log error
+            if audit_logger:
+                await audit_logger.log_request(
+                    request_id=ctx.request_id,
+                    client_id=internal_request.client_id,
+                    task="chat",
+                    model=model,
+                    endpoint=provider_name or "unknown",
+                    status="error",
+                    stream=True,
+                    error_code=e.code.value,
+                    error_message=str(e),
+                )
+
         except Exception as e:
             # Wrap unexpected errors
             ctx.record_error("stream_error", str(e))
             logger.exception("Error in chat stream")
             stream_error = StreamError(message="Stream interrupted")
             yield f"data: {json.dumps(stream_error.to_dict())}\n\n".encode()
+
+            # Audit log error
+            if audit_logger:
+                await audit_logger.log_request(
+                    request_id=ctx.request_id,
+                    client_id=internal_request.client_id,
+                    task="chat",
+                    model=model,
+                    endpoint=provider_name or "unknown",
+                    status="error",
+                    stream=True,
+                    error_code="stream_error",
+                    error_message=str(e),
+                )
         finally:
             clear_request_context()
 
@@ -204,6 +282,7 @@ async def completions(
     client_id: Annotated[str, Depends(authenticate)],
     dispatcher: Annotated[Dispatcher, Depends(get_dispatcher)],
     enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
+    audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
 ) -> OpenAICompletionResponse:
     """Create a text completion.
 
@@ -246,6 +325,25 @@ async def completions(
         tokens_per_second=ctx.tokens_per_second,
     )
 
+    # Audit log the request
+    if audit_logger:
+        await audit_logger.log_request(
+            request_id=ctx.request_id,
+            client_id=client_id,
+            task="completion",
+            model=result.response.model,
+            endpoint=result.provider_used,
+            status="success",
+            user_id=body.user,
+            stream=False,
+            max_tokens=body.max_tokens,
+            temperature=body.temperature,
+            latency_ms=ctx.total_latency_ms,
+            tokens_per_second=ctx.tokens_per_second,
+            prompt_tokens=result.response.usage.prompt_tokens,
+            completion_tokens=result.response.usage.completion_tokens,
+        )
+
     return OpenAICompletionResponse.from_internal(result.response)
 
 
@@ -261,6 +359,7 @@ async def embeddings(
     client_id: Annotated[str, Depends(authenticate)],
     dispatcher: Annotated[Dispatcher, Depends(get_dispatcher)],
     enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
+    audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
 ) -> OpenAIEmbeddingResponse:
     """Create embeddings for the input text.
 
@@ -300,5 +399,21 @@ async def embeddings(
         latency_ms=ctx.total_latency_ms or 0,
         prompt_tokens=result.response.usage.prompt_tokens,
     )
+
+    # Audit log the request
+    if audit_logger:
+        await audit_logger.log_request(
+            request_id=ctx.request_id,
+            client_id=client_id,
+            task="embeddings",
+            model=result.response.model,
+            endpoint=result.provider_used,
+            status="success",
+            user_id=body.user,
+            stream=False,
+            latency_ms=ctx.total_latency_ms,
+            prompt_tokens=result.response.usage.prompt_tokens,
+            completion_tokens=0,
+        )
 
     return OpenAIEmbeddingResponse.from_internal(result.response)

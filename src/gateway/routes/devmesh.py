@@ -26,10 +26,12 @@ from gateway.models.internal import InternalRequest, Message, MessageRole
 from gateway.observability import get_logger, get_metrics
 from gateway.routes.dependencies import (
     authenticate,
+    get_audit_logger,
     get_config,
     get_dispatcher,
     get_registry,
 )
+from gateway.storage import AuditLogger
 
 try:
     from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
@@ -475,4 +477,419 @@ async def refresh_catalog(
         "status": "success",
         "discovered": results,
         "total_models": sum(len(models) for models in results.values()),
+    }
+
+
+# =============================================================================
+# Dashboard APIs
+# =============================================================================
+
+
+class StatsResponse(BaseModel):
+    """Usage statistics response."""
+    period_hours: int
+    total_requests: int
+    success_count: int
+    error_count: int
+    success_rate: float
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    avg_latency_ms: Optional[float] = None
+    min_latency_ms: Optional[float] = None
+    max_latency_ms: Optional[float] = None
+    total_cost_usd: float = 0.0
+    requests_by_endpoint: dict[str, int] = Field(default_factory=dict)
+    top_models: dict[str, int] = Field(default_factory=dict)
+
+
+@router.get("/api/stats", response_model=StatsResponse)
+async def get_stats(
+    request: Request,
+    client_id: Annotated[str, Depends(authenticate)],
+    audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
+    hours: int = 24,
+    filter_client: Optional[str] = None,
+) -> StatsResponse:
+    """Get usage statistics for the dashboard.
+
+    Args:
+        hours: Number of hours to look back (default 24)
+        filter_client: Optional client ID to filter by
+
+    Returns:
+        Aggregated usage statistics
+    """
+    if audit_logger is None:
+        return StatsResponse(
+            period_hours=hours,
+            total_requests=0,
+            success_count=0,
+            error_count=0,
+            success_rate=0.0,
+            prompt_tokens=0,
+            completion_tokens=0,
+            total_tokens=0,
+        )
+
+    stats = await audit_logger.get_stats(hours=hours, client_id=filter_client)
+    return StatsResponse(**stats)
+
+
+class AuditRequestSummary(BaseModel):
+    """Summary of an audit log entry."""
+    id: int
+    request_id: str
+    timestamp: str
+    client_id: str
+    user_id: Optional[str] = None
+    environment: Optional[str] = None
+    task: str
+    model: str
+    endpoint: str
+    status: str
+    latency_ms: Optional[float] = None
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    error_code: Optional[str] = None
+
+
+class RequestsListResponse(BaseModel):
+    """Response for listing requests."""
+    requests: list[AuditRequestSummary]
+    total: int
+    limit: int
+    offset: int
+
+
+@router.get("/api/requests", response_model=RequestsListResponse)
+async def list_requests(
+    request: Request,
+    client_id: Annotated[str, Depends(authenticate)],
+    audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
+    limit: int = 50,
+    offset: int = 0,
+    filter_client: Optional[str] = None,
+    filter_status: Optional[str] = None,
+    filter_environment: Optional[str] = None,
+) -> RequestsListResponse:
+    """Get recent requests from the audit log.
+
+    Args:
+        limit: Maximum number of records (default 50, max 500)
+        offset: Number of records to skip (for pagination)
+        filter_client: Filter by client ID
+        filter_status: Filter by status (success, error)
+        filter_environment: Filter by environment
+
+    Returns:
+        List of recent requests with metadata
+    """
+    if audit_logger is None:
+        return RequestsListResponse(requests=[], total=0, limit=limit, offset=offset)
+
+    # Clamp limit
+    limit = min(limit, 500)
+
+    # Get requests (offset handling done in query)
+    requests = await audit_logger.get_recent_requests(
+        limit=limit + offset,  # Fetch enough to skip offset
+        client_id=filter_client,
+        environment=filter_environment,
+        status=filter_status,
+    )
+
+    # Apply offset
+    requests = requests[offset:offset + limit]
+
+    # Convert to response format
+    summaries = []
+    for req in requests:
+        summaries.append(AuditRequestSummary(
+            id=req.get("id", 0),
+            request_id=req["request_id"],
+            timestamp=req["timestamp"].isoformat() if req.get("timestamp") else "",
+            client_id=req["client_id"],
+            user_id=req.get("user_id"),
+            environment=req.get("environment"),
+            task=req["task"],
+            model=req["model"],
+            endpoint=req["endpoint"],
+            status=req["status"],
+            latency_ms=req.get("latency_ms"),
+            prompt_tokens=req.get("prompt_tokens", 0),
+            completion_tokens=req.get("completion_tokens", 0),
+            total_tokens=req.get("total_tokens", 0),
+            error_code=req.get("error_code"),
+        ))
+
+    return RequestsListResponse(
+        requests=summaries,
+        total=len(requests),
+        limit=limit,
+        offset=offset,
+    )
+
+
+class RequestDetailResponse(BaseModel):
+    """Detailed information about a single request."""
+    id: int
+    request_id: str
+    timestamp: str
+    client_id: str
+    user_id: Optional[str] = None
+    environment: Optional[str] = None
+    task: str
+    model: str
+    endpoint: str
+    provider_type: Optional[str] = None
+    stream: bool = False
+    max_tokens: Optional[int] = None
+    temperature: Optional[float] = None
+    status: str
+    error_code: Optional[str] = None
+    error_message: Optional[str] = None
+    latency_ms: Optional[float] = None
+    time_to_first_token_ms: Optional[float] = None
+    tokens_per_second: Optional[float] = None
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    estimated_cost_usd: Optional[float] = None
+    request_body: Optional[dict] = None
+    response_body: Optional[dict] = None
+
+
+@router.get("/api/requests/{request_id}", response_model=RequestDetailResponse)
+async def get_request_detail(
+    request: Request,
+    request_id: str,
+    client_id: Annotated[str, Depends(authenticate)],
+    audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
+) -> RequestDetailResponse:
+    """Get detailed information about a specific request.
+
+    Args:
+        request_id: The request ID to look up
+
+    Returns:
+        Full request details including bodies if stored
+
+    Raises:
+        404 if request not found
+    """
+    from gateway.errors import GatewayError, ErrorCode, ErrorCategory
+
+    if audit_logger is None:
+        raise GatewayError(
+            message="Audit logging not configured",
+            code=ErrorCode.CONFIGURATION_ERROR,
+            category=ErrorCategory.INTERNAL,
+        )
+
+    result = await audit_logger.get_request_by_id(request_id)
+
+    if result is None:
+        raise GatewayError(
+            message=f"Request not found: {request_id}",
+            code=ErrorCode.NOT_FOUND,
+            category=ErrorCategory.VALIDATION,
+        )
+
+    return RequestDetailResponse(
+        id=result.get("id", 0),
+        request_id=result["request_id"],
+        timestamp=result["timestamp"].isoformat() if result.get("timestamp") else "",
+        client_id=result["client_id"],
+        user_id=result.get("user_id"),
+        environment=result.get("environment"),
+        task=result["task"],
+        model=result["model"],
+        endpoint=result["endpoint"],
+        provider_type=result.get("provider_type"),
+        stream=bool(result.get("stream", False)),
+        max_tokens=result.get("max_tokens"),
+        temperature=result.get("temperature"),
+        status=result["status"],
+        error_code=result.get("error_code"),
+        error_message=result.get("error_message"),
+        latency_ms=result.get("latency_ms"),
+        time_to_first_token_ms=result.get("time_to_first_token_ms"),
+        tokens_per_second=result.get("tokens_per_second"),
+        prompt_tokens=result.get("prompt_tokens", 0),
+        completion_tokens=result.get("completion_tokens", 0),
+        total_tokens=result.get("total_tokens", 0),
+        estimated_cost_usd=result.get("estimated_cost_usd"),
+        request_body=result.get("request_body"),
+        response_body=result.get("response_body"),
+    )
+
+
+class ModelUsageItem(BaseModel):
+    """Usage statistics for a single model."""
+    model: str
+    request_count: int
+    success_count: int
+    error_count: int
+    total_tokens: int
+    avg_latency_ms: Optional[float] = None
+
+
+class ModelsUsageResponse(BaseModel):
+    """Response for model usage breakdown."""
+    period_hours: int
+    models: list[ModelUsageItem]
+
+
+@router.get("/api/models/usage", response_model=ModelsUsageResponse)
+async def get_models_usage(
+    request: Request,
+    client_id: Annotated[str, Depends(authenticate)],
+    audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
+    hours: int = 24,
+) -> ModelsUsageResponse:
+    """Get usage breakdown by model.
+
+    Args:
+        hours: Number of hours to look back (default 24)
+
+    Returns:
+        Per-model usage statistics
+    """
+    if audit_logger is None:
+        return ModelsUsageResponse(period_hours=hours, models=[])
+
+    models = await audit_logger.get_models_usage(hours=hours)
+
+    return ModelsUsageResponse(
+        period_hours=hours,
+        models=[ModelUsageItem(**m) for m in models],
+    )
+
+
+class EndpointUsageItem(BaseModel):
+    """Usage statistics for a single endpoint."""
+    endpoint: str
+    request_count: int
+    success_count: int
+    error_count: int
+    total_tokens: int
+    avg_latency_ms: Optional[float] = None
+
+
+class EndpointsUsageResponse(BaseModel):
+    """Response for endpoint usage breakdown."""
+    period_hours: int
+    endpoints: list[EndpointUsageItem]
+
+
+@router.get("/api/endpoints/usage", response_model=EndpointsUsageResponse)
+async def get_endpoints_usage(
+    request: Request,
+    client_id: Annotated[str, Depends(authenticate)],
+    audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
+    hours: int = 24,
+) -> EndpointsUsageResponse:
+    """Get usage breakdown by endpoint.
+
+    Args:
+        hours: Number of hours to look back (default 24)
+
+    Returns:
+        Per-endpoint usage statistics
+    """
+    if audit_logger is None:
+        return EndpointsUsageResponse(period_hours=hours, endpoints=[])
+
+    endpoints = await audit_logger.get_endpoints_usage(hours=hours)
+
+    return EndpointsUsageResponse(
+        period_hours=hours,
+        endpoints=[EndpointUsageItem(**e) for e in endpoints],
+    )
+
+
+class DailyUsageItem(BaseModel):
+    """Usage statistics for a single day."""
+    date: str
+    request_count: int
+    success_count: int
+    total_tokens: int
+    total_cost_usd: float
+
+
+class DailyUsageResponse(BaseModel):
+    """Response for daily usage breakdown."""
+    days: int
+    usage: list[DailyUsageItem]
+
+
+@router.get("/api/usage/daily", response_model=DailyUsageResponse)
+async def get_daily_usage(
+    request: Request,
+    client_id: Annotated[str, Depends(authenticate)],
+    audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
+    days: int = 30,
+    filter_client: Optional[str] = None,
+) -> DailyUsageResponse:
+    """Get daily usage from aggregated data.
+
+    Note: Requires aggregation to have been run. Use /api/usage/aggregate
+    to manually trigger aggregation.
+
+    Args:
+        days: Number of days to look back (default 30)
+        filter_client: Filter by client ID
+
+    Returns:
+        Daily usage statistics
+    """
+    if audit_logger is None:
+        return DailyUsageResponse(days=days, usage=[])
+
+    usage = await audit_logger.get_daily_usage(days=days, client_id=filter_client)
+
+    return DailyUsageResponse(
+        days=days,
+        usage=[DailyUsageItem(**u) for u in usage],
+    )
+
+
+@router.post("/api/usage/aggregate")
+async def trigger_aggregation(
+    request: Request,
+    client_id: Annotated[str, Depends(authenticate)],
+    audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
+    date: Optional[str] = None,
+) -> dict[str, Any]:
+    """Manually trigger usage aggregation for a specific date.
+
+    Aggregates audit_log data into usage_daily table for faster queries.
+    Default is to aggregate yesterday's data.
+
+    Args:
+        date: Date to aggregate (YYYY-MM-DD format, default: yesterday)
+
+    Returns:
+        Aggregation results
+    """
+    from datetime import datetime as dt
+
+    if audit_logger is None:
+        return {"status": "error", "message": "Audit logging not configured"}
+
+    # Parse date if provided
+    target_date = None
+    if date:
+        try:
+            target_date = dt.fromisoformat(date)
+        except ValueError:
+            return {"status": "error", "message": f"Invalid date format: {date}"}
+
+    result = await audit_logger.aggregate_daily_usage(date=target_date)
+
+    return {
+        "status": "success",
+        **result,
     }

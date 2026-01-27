@@ -50,6 +50,7 @@ CATEGORY_STATUS_MAP: dict[ErrorCategory, int] = {
 CODE_STATUS_OVERRIDES: dict[ErrorCode, int] = {
     ErrorCode.NO_PROVIDER: status.HTTP_400_BAD_REQUEST,
     ErrorCode.PROVIDER_NOT_FOUND: status.HTTP_404_NOT_FOUND,
+    ErrorCode.NOT_FOUND: status.HTTP_404_NOT_FOUND,
     ErrorCode.INVALID_REQUEST: status.HTTP_400_BAD_REQUEST,
 }
 

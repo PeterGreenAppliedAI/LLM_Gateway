@@ -61,6 +61,10 @@ class ErrorCode(str, Enum):
     # Internal
     INTERNAL_ERROR = "internal_error"
     STREAM_ERROR = "stream_error"
+    CONFIGURATION_ERROR = "configuration_error"
+
+    # Resource
+    NOT_FOUND = "not_found"
 
 
 class ErrorCategory(str, Enum):

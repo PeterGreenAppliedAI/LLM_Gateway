@@ -1,42 +1,29 @@
-# DevMesh Gateway Endpoints Configuration
-#
-# This file demonstrates the new endpoints/environments architecture.
-# For backward compatibility, the gateway also supports the legacy
-# providers.yaml format.
+# LLM Gateway Endpoints Configuration
+# Your actual GPU nodes running Ollama
 
-# Endpoints represent physical inference runtimes
 endpoints:
-  - name: gpunode-ollama
+  # Primary GPU node (10.0.0.19)
+  - name: gpu-node
     type: ollama
-    url: http://192.168.1.216:11434
+    url: http://10.0.0.19:11434
     enabled: true
-    timeout: 60.0
+    timeout: 120.0  # 2 min for large models
     max_retries: 3
     labels:
-      cold_flexible: "true"
-      prod_eligible: "true"
-      datacenter: main
+      tier: primary
+      location: local
 
-  - name: dgxspark-ollama
+  # GPU node with 3060 (10.0.0.14)
+  - name: gpu-node-3060
     type: ollama
-    url: http://dgxspark1:11434
+    url: http://10.0.0.14:11434
     enabled: true
-    timeout: 60.0
-    max_retries: 3
-    labels:
-      cold_flexible: "true"
-      # NOT prod_eligible - experimental endpoint
-      datacenter: spark
-
-  - name: local-vllm
-    type: vllm
-    url: http://localhost:8001
-    enabled: false
     timeout: 120.0
-    max_retries: 2
+    max_retries: 3
     labels:
-      prod_eligible: "false"
-      datacenter: local
+      tier: primary
+      gpu: "3060"
+      location: local
 
 # Environments control which endpoints and models are available
 environments:
@@ -45,41 +32,18 @@ environments:
     allow_all_discovered: true
 
   - name: prod
-    # In prod, only use endpoints with prod_eligible label
-    endpoint_filter:
-      prod_eligible: "true"
-    # And only allow approved models
+    # In prod, only approved models
     approved_models:
       - phi4:14b
-      - devstral:24b
-      - qwen2.5:72b
-
-  - name: staging
-    # Staging uses specific endpoints
-    allowed_endpoints:
-      - gpunode-ollama
-      - dgxspark-ollama
-    # Allow all models on those endpoints
-    allow_all_discovered: true
+      - llama3.2:*
+      - qwen2.5:*
 
 # Resolution configuration for model→endpoint mapping
 resolution:
-  # Per-model defaults: which endpoint to use for specific models
-  model_defaults:
-    - model: "phi4:14b"
-      endpoint: gpunode-ollama
-    - model: "nemotron*"  # Glob pattern for all nemotron variants
-      endpoint: dgxspark-ollama
-    - model: "devstral:*"
-      endpoint: gpunode-ollama
-
   # When multiple endpoints have a model, prefer this order
   endpoint_priority:
-    - gpunode-ollama
-    - dgxspark-ollama
-    - local-vllm
+    - gpu-node        # Try gpu-node first
+    - gpu-node-3060   # Then fall back to 3060
 
-  # What to do when model is on multiple endpoints with no default
-  # "error" - fail with AmbiguousModelError (default, safer)
-  # "first_priority" - use first from endpoint_priority
-  ambiguous_behavior: error
+  # When model is on multiple endpoints, just pick first by priority
+  ambiguous_behavior: first_priority
