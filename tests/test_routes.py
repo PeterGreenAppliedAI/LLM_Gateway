@@ -225,12 +225,15 @@ class TestAuthentication:
         response = client.get("/v1/models")
         assert response.status_code == 200
 
-    def test_auth_required_when_enabled(self, auth_client: TestClient):
-        """Auth required when enabled."""
+    def test_auth_optional_uses_default_client(self, auth_client: TestClient, app_with_auth: FastAPI):
+        """Auth is optional - requests without key use 'default' client."""
+        mock_registry = MagicMock(spec=ProviderRegistry)
+        mock_registry.list_providers.return_value = []
+        app_with_auth.state.registry = mock_registry
+
+        # Should succeed without API key, using default client
         response = auth_client.get("/v1/models")
-        assert response.status_code == 401
-        # New error format: {"error": {"code": "...", "message": "..."}}
-        assert "API key required" in response.json()["error"]["message"]
+        assert response.status_code == 200
 
     def test_auth_with_bearer_token(self, auth_client: TestClient, app_with_auth: FastAPI):
         """Auth with Bearer token works."""
