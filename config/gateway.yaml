@@ -78,3 +78,27 @@ resolution:
 
   # When model is on multiple endpoints, just pick first by priority
   ambiguous_behavior: first_priority
+
+# =============================================================================
+# Authentication
+# API keys with per-client routing
+# =============================================================================
+
+auth:
+  enabled: true
+  api_keys:
+    # Electrical Estimator - always routes to gpu-node-3060
+    - key: "est-electrical-estimator-key-2024"
+      client_id: electrical-estimator
+      description: "Electrical estimation application"
+      target_endpoint: gpu-node-3060
+
+    # Discord bot - uses default resolution
+    - key: "discord-bot-api-key-2024"
+      client_id: discord-bot
+      description: "Discord bot integration"
+
+    # Default dev key - no restrictions
+    - key: "dev-default-key-12345678"
+      client_id: dev-user
+      description: "Development testing"

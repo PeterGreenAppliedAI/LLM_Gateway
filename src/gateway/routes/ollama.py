@@ -34,7 +34,8 @@ from gateway.models.ollama import (
 )
 from gateway.observability import get_logger
 from gateway.routes.dependencies import (
-    authenticate,
+    AuthResult,
+    get_auth,
     get_audit_logger,
     get_dispatcher,
     setup_request_context,
@@ -60,7 +61,7 @@ def _now_iso() -> str:
 async def ollama_chat(
     request: Request,
     body: OllamaChatRequest,
-    client_id: Annotated[str, Depends(authenticate)],
+    auth: Annotated[AuthResult, Depends(get_auth)],
     dispatcher: Annotated[Dispatcher, Depends(get_dispatcher)],
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
 ):
@@ -68,6 +69,8 @@ async def ollama_chat(
 
     Accepts Ollama format requests and returns Ollama format responses.
     """
+    client_id = auth.client_id
+
     ctx = setup_request_context(
         client_id=client_id,
         model=body.model,
@@ -90,6 +93,10 @@ async def ollama_chat(
         "client_id": client_id,
         "stream": body.stream,
     }
+
+    # Apply per-client target endpoint if configured
+    if auth.target_endpoint:
+        request_kwargs["preferred_provider"] = auth.target_endpoint
 
     if options.get("temperature") is not None:
         request_kwargs["temperature"] = options["temperature"]
@@ -220,11 +227,13 @@ async def _stream_ollama_chat(
 async def ollama_generate(
     request: Request,
     body: OllamaGenerateRequest,
-    client_id: Annotated[str, Depends(authenticate)],
+    auth: Annotated[AuthResult, Depends(get_auth)],
     dispatcher: Annotated[Dispatcher, Depends(get_dispatcher)],
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
 ):
     """Ollama-compatible generate endpoint."""
+    client_id = auth.client_id
+
     ctx = setup_request_context(
         client_id=client_id,
         model=body.model,
@@ -247,6 +256,10 @@ async def ollama_generate(
         "client_id": client_id,
         "stream": body.stream,
     }
+
+    # Apply per-client target endpoint if configured
+    if auth.target_endpoint:
+        request_kwargs["preferred_provider"] = auth.target_endpoint
 
     if options.get("temperature") is not None:
         request_kwargs["temperature"] = options["temperature"]
@@ -389,11 +402,13 @@ async def ollama_tags(request: Request):
 async def ollama_embeddings(
     request: Request,
     body: OllamaEmbeddingsRequest,
-    client_id: Annotated[str, Depends(authenticate)],
+    auth: Annotated[AuthResult, Depends(get_auth)],
     dispatcher: Annotated[Dispatcher, Depends(get_dispatcher)],
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
 ):
     """Ollama-compatible embeddings endpoint."""
+    client_id = auth.client_id
+
     ctx = setup_request_context(
         client_id=client_id,
         model=body.model,
@@ -403,12 +418,18 @@ async def ollama_embeddings(
     # Handle both single string and list of strings
     prompts = body.prompt if isinstance(body.prompt, list) else [body.prompt]
 
-    internal_request = InternalRequest(
-        task=TaskType.EMBEDDINGS,
-        model=body.model,
-        prompt=prompts[0] if len(prompts) == 1 else None,
-        client_id=client_id,
-    )
+    request_kwargs = {
+        "task": TaskType.EMBEDDINGS,
+        "model": body.model,
+        "prompt": prompts[0] if len(prompts) == 1 else None,
+        "client_id": client_id,
+    }
+
+    # Apply per-client target endpoint if configured
+    if auth.target_endpoint:
+        request_kwargs["preferred_provider"] = auth.target_endpoint
+
+    internal_request = InternalRequest(**request_kwargs)
 
     result = await dispatcher.dispatch(internal_request)
 

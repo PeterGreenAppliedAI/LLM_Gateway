@@ -41,7 +41,8 @@ from gateway.observability import get_logger, get_metrics
 from gateway.observability.logging import clear_request_context
 from gateway.policy import PolicyEnforcer, PolicyViolation
 from gateway.routes.dependencies import (
-    authenticate,
+    AuthResult,
+    get_auth,
     get_audit_logger,
     get_dispatcher,
     get_enforcer,
@@ -65,7 +66,7 @@ router = APIRouter(prefix="/v1", tags=["openai"])
 async def chat_completions(
     request: Request,
     body: OpenAIChatRequest,
-    client_id: Annotated[str, Depends(authenticate)],
+    auth: Annotated[AuthResult, Depends(get_auth)],
     dispatcher: Annotated[Dispatcher, Depends(get_dispatcher)],
     enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
@@ -77,6 +78,8 @@ async def chat_completions(
     Supports both streaming and non-streaming responses.
     Domain errors propagate to exception handler middleware.
     """
+    client_id = auth.client_id
+
     # Setup request context for logging
     ctx = setup_request_context(
         client_id=client_id,
@@ -87,6 +90,12 @@ async def chat_completions(
 
     # Convert to internal format
     internal_request = body.to_internal(client_id=client_id, task=TaskType.CHAT)
+
+    # Apply per-client target endpoint if configured
+    if auth.target_endpoint:
+        internal_request = internal_request.model_copy(
+            update={"preferred_provider": auth.target_endpoint}
+        )
 
     # Check policies - raises domain errors on violation
     try:
@@ -279,7 +288,7 @@ async def _stream_chat_response(
 async def completions(
     request: Request,
     body: OpenAICompletionRequest,
-    client_id: Annotated[str, Depends(authenticate)],
+    auth: Annotated[AuthResult, Depends(get_auth)],
     dispatcher: Annotated[Dispatcher, Depends(get_dispatcher)],
     enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
@@ -289,6 +298,8 @@ async def completions(
     OpenAI-compatible endpoint for completion-based interactions.
     Domain errors propagate to exception handler middleware.
     """
+    client_id = auth.client_id
+
     ctx = setup_request_context(
         client_id=client_id,
         user_id=body.user,
@@ -298,6 +309,12 @@ async def completions(
 
     # Convert to internal format
     internal_request = body.to_internal(client_id=client_id, task=TaskType.COMPLETION)
+
+    # Apply per-client target endpoint if configured
+    if auth.target_endpoint:
+        internal_request = internal_request.model_copy(
+            update={"preferred_provider": auth.target_endpoint}
+        )
 
     # Check policies - raises domain errors on violation
     try:
@@ -356,7 +373,7 @@ async def completions(
 async def embeddings(
     request: Request,
     body: OpenAIEmbeddingRequest,
-    client_id: Annotated[str, Depends(authenticate)],
+    auth: Annotated[AuthResult, Depends(get_auth)],
     dispatcher: Annotated[Dispatcher, Depends(get_dispatcher)],
     enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
@@ -366,6 +383,8 @@ async def embeddings(
     OpenAI-compatible endpoint for generating text embeddings.
     Domain errors propagate to exception handler middleware.
     """
+    client_id = auth.client_id
+
     ctx = setup_request_context(
         client_id=client_id,
         user_id=body.user,
@@ -375,6 +394,12 @@ async def embeddings(
 
     # Convert to internal format
     internal_request = body.to_internal(client_id=client_id)
+
+    # Apply per-client target endpoint if configured
+    if auth.target_endpoint:
+        internal_request = internal_request.model_copy(
+            update={"preferred_provider": auth.target_endpoint}
+        )
 
     # Check policies - raises domain errors on violation
     try:

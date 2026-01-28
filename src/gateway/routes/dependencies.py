@@ -103,8 +103,8 @@ def get_audit_logger(request: Request) -> Optional[AuditLogger]:
     return getattr(request.app.state, "audit_logger", None)
 
 
-def validate_api_key(api_key: str, config: GatewayConfig) -> tuple[str, str | None]:
-    """Validate API key and return client_id and environment.
+def validate_api_key(api_key: str, config: GatewayConfig) -> tuple[str, str | None, str | None]:
+    """Validate API key and return client_id, environment, and target_endpoint.
 
     Security:
     - Validates key format to prevent injection
@@ -116,8 +116,8 @@ def validate_api_key(api_key: str, config: GatewayConfig) -> tuple[str, str | No
         config: Gateway configuration
 
     Returns:
-        Tuple of (client_id, environment) associated with the key.
-        Environment may be None if not configured.
+        Tuple of (client_id, environment, target_endpoint) associated with the key.
+        Environment and target_endpoint may be None if not configured.
 
     Raises:
         InvalidApiKeyFormatError: If key format is invalid
@@ -130,23 +130,29 @@ def validate_api_key(api_key: str, config: GatewayConfig) -> tuple[str, str | No
     # Check if auth is enabled
     if not config.auth.enabled:
         # Auth disabled - return default client
-        return "default", None
+        return "default", None, None
 
     # Look up key in configured keys
     for key_config in config.auth.api_keys:
         # Security: Constant-time comparison
         if secrets.compare_digest(api_key, key_config.key):
-            return key_config.client_id, key_config.environment
+            return key_config.client_id, key_config.environment, key_config.target_endpoint
 
     raise InvalidApiKeyError()
 
 
 class AuthResult:
-    """Result of authentication containing client_id and environment."""
+    """Result of authentication containing client_id, environment, and target_endpoint."""
 
-    def __init__(self, client_id: str, environment: str | None = None):
+    def __init__(
+        self,
+        client_id: str,
+        environment: str | None = None,
+        target_endpoint: str | None = None,
+    ):
         self.client_id = client_id
         self.environment = environment
+        self.target_endpoint = target_endpoint
 
 
 async def authenticate(
@@ -172,6 +178,24 @@ async def authenticate(
     """
     result = await authenticate_with_environment(request, authorization, x_api_key)
     return result.client_id
+
+
+async def get_auth(
+    request: Request,
+    authorization: Annotated[Optional[str], Header()] = None,
+    x_api_key: Annotated[Optional[str], Header(alias="X-API-Key")] = None,
+) -> AuthResult:
+    """Authenticate request and return full AuthResult.
+
+    Returns AuthResult containing:
+    - client_id: Identifier for the client
+    - environment: Optional environment (dev/prod)
+    - target_endpoint: Optional forced endpoint for this client
+
+    Raises:
+        AuthenticationError: If authentication fails
+    """
+    return await authenticate_with_environment(request, authorization, x_api_key)
 
 
 async def authenticate_with_environment(
@@ -209,20 +233,13 @@ async def authenticate_with_environment(
     elif x_api_key:
         api_key = x_api_key
 
-    # If no auth configured and no key provided, use default
-    if not config.auth.enabled and not api_key:
-        return AuthResult("default", None)
+    # If no key provided, use default (auth is optional - keys enable features like target_endpoint)
+    if not api_key:
+        return AuthResult("default", None, None)
 
-    # If auth enabled but no key provided
-    if config.auth.enabled and not api_key:
-        raise AuthenticationError(message="API key required")
-
-    # Validate key
-    if api_key:
-        client_id, environment = validate_api_key(api_key, config)
-        return AuthResult(client_id, environment)
-
-    return AuthResult("default", None)
+    # Validate key if provided
+    client_id, environment, target_endpoint = validate_api_key(api_key, config)
+    return AuthResult(client_id, environment, target_endpoint)
 
 
 async def get_environment(

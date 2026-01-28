@@ -268,18 +268,51 @@ python -m gateway.cli dashboard
 
 **Completed**: Full REST API for dashboard with filtering, pagination, and aggregation.
 
-### Phase 2b: Custom Frontend Dashboard
+### Phase 2b: Custom Frontend Dashboard ✅ PARTIAL
 **Priority: HIGH | Effort: 1-2 weeks**
 
-- [ ] React + TypeScript + TailwindCSS
-- [ ] Real-time request monitoring (WebSocket or polling)
-- [ ] Provider health status
-- [ ] Usage metrics and charts (Recharts/Tremor)
+- [x] React + TypeScript + TailwindCSS + Vite
+- [x] Real-time request monitoring (polling)
+- [x] Provider health status
+- [x] Usage metrics display
+- [x] Request detail viewer (clickable rows with TTFT, tokens/sec)
 - [ ] Error log viewer
-- [ ] API key management UI
+- [ ] **API Key Management UI** (see below)
 - [ ] Cost tracking display
+- [ ] Usage charts (Recharts/Tremor)
 
 **Why custom over Grafana**: Simpler deployment, better UX for non-technical users, branded experience, single deployable unit.
+
+#### API Key Management UI (Priority Feature)
+
+**Goal**: Generate API keys from the dashboard that route to specific endpoints/models with auto-generated usage instructions.
+
+**User Flow**:
+1. Click "Create API Key" in dashboard
+2. Configure:
+   - Application name (client_id): e.g., "electrical-estimator"
+   - Target endpoint (optional): e.g., "gpu-node-3060"
+   - Allowed models (optional): e.g., "phi4:*", "llama3.2:*"
+   - Rate limits / quotas (optional)
+3. Generate key
+4. Display usage instructions with copy buttons:
+   - Environment variable setup
+   - cURL example
+   - Python OpenAI SDK snippet
+   - Shows which endpoint/models this key routes to
+
+**Backend Requirements**:
+- [ ] `POST /api/keys` - Create new API key (returns key + instructions)
+- [ ] `GET /api/keys` - List keys (key masked, shows client_id, target_endpoint)
+- [ ] `DELETE /api/keys/{key_id}` - Revoke key
+- [ ] `PATCH /api/keys/{key_id}` - Update key config (not the key itself)
+- [ ] Keys stored in `api_keys` table (schema exists)
+
+**Frontend Requirements**:
+- [ ] Key creation modal with form
+- [ ] Key list table with actions
+- [ ] Usage instructions generator (templated based on key config)
+- [ ] Copy-to-clipboard for all code snippets
 
 ### Phase 3: Database & Audit Logging ✅ COMPLETE
 **Priority: HIGH | Effort: 8-10 hours**

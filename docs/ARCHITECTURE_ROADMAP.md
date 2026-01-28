@@ -412,6 +412,16 @@ class HookPoint(str, Enum):
 - TypeScript SDK
 - CLI improvements
 
+### Phase 10: Dashboard Self-Service
+- **API Key Management UI**
+  - Create keys with target endpoint, allowed models, quotas
+  - Auto-generate usage instructions (cURL, Python, env vars)
+  - Copy-to-clipboard for easy onboarding
+  - Key rotation and revocation
+- Config editor (endpoints, environments, resolution)
+- Real-time endpoint health visualization
+- Usage analytics and cost projections
+
 ---
 
 ## File Structure (Target)

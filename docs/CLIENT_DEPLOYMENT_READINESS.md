@@ -203,8 +203,69 @@ These must be declarative and auditable. Currently hardcoded in Python.
 - Dashboards
 - Request explorer
 - Config editor (eventually)
+- **API Key Management** (see below)
 
 Many clients will run **headless** and only care about metrics + logs.
+
+---
+
+## Future: Dashboard API Key Management
+
+### Vision
+Generate and manage API keys directly from the dashboard with:
+- Point-and-click key creation
+- Per-key configuration (target endpoint, allowed models, quotas)
+- Auto-generated usage instructions for each key
+
+### Key Creation Flow
+```
+1. Click "Create API Key"
+2. Select:
+   - Application name (client_id)
+   - Target endpoint (optional, e.g., gpu-node-3060)
+   - Allowed models (optional, e.g., phi4:*, llama3.2:*)
+   - Rate limits / quotas
+3. Generate key
+4. Show usage instructions:
+   - cURL example with the key
+   - Python code snippet
+   - Environment variable setup
+   - Copy-to-clipboard for each
+```
+
+### Generated Instructions Example
+```
+# Your API Key: est-xxxxxxxxxxxxxxxx
+
+# Environment Variable
+export LLM_GATEWAY_API_KEY="est-xxxxxxxxxxxxxxxx"
+
+# cURL
+curl http://192.168.1.184:8001/v1/chat/completions \
+  -H "Authorization: Bearer est-xxxxxxxxxxxxxxxx" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "phi4:latest", "messages": [...]}'
+
+# Python
+import openai
+client = openai.OpenAI(
+    base_url="http://192.168.1.184:8001/v1",
+    api_key="est-xxxxxxxxxxxxxxxx"
+)
+
+# This key routes to: gpu-node-3060
+# Allowed models: phi4:*
+```
+
+### Implementation Requirements
+- [ ] Backend: `POST /api/keys` - Create new API key
+- [ ] Backend: `GET /api/keys` - List keys (masked)
+- [ ] Backend: `DELETE /api/keys/{key_id}` - Revoke key
+- [ ] Backend: `PATCH /api/keys/{key_id}` - Update key config
+- [ ] DB: Store keys in `api_keys` table (already exists)
+- [ ] Dashboard: Key management UI component
+- [ ] Dashboard: Usage instructions generator
+- [ ] Dashboard: Copy-to-clipboard functionality
 
 ---
 

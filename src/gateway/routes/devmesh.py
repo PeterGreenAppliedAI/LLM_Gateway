@@ -506,7 +506,6 @@ class StatsResponse(BaseModel):
 @router.get("/api/stats", response_model=StatsResponse)
 async def get_stats(
     request: Request,
-    client_id: Annotated[str, Depends(authenticate)],
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
     hours: int = 24,
     filter_client: Optional[str] = None,
@@ -566,7 +565,6 @@ class RequestsListResponse(BaseModel):
 @router.get("/api/requests", response_model=RequestsListResponse)
 async def list_requests(
     request: Request,
-    client_id: Annotated[str, Depends(authenticate)],
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
     limit: int = 50,
     offset: int = 0,
@@ -665,7 +663,6 @@ class RequestDetailResponse(BaseModel):
 async def get_request_detail(
     request: Request,
     request_id: str,
-    client_id: Annotated[str, Depends(authenticate)],
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
 ) -> RequestDetailResponse:
     """Get detailed information about a specific request.

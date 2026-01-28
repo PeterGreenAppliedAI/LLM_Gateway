@@ -153,6 +153,7 @@ class ApiKeyConfig(BaseModel):
     client_id: SafeIdentifier
     description: str = ""
     environment: SafeIdentifier | None = None  # dev, prod - determines which env this key uses
+    target_endpoint: SafeIdentifier | None = None  # Force all requests from this key to a specific endpoint
 
 
 class AuthConfig(BaseModel):
