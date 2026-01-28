@@ -397,10 +397,40 @@ class HookPoint(str, Enum):
 - Overage policies
 
 ### Phase 7: Advanced Security
+
+**Prompt Injection Defense (Partially Complete):**
+
+| Layer | Status | Latency | Description |
+|-------|--------|---------|-------------|
+| Unicode sanitization | ✅ Done | ~0ms | Strip invisible chars |
+| Content wrapping | ✅ Done | ~0ms | Trust-level tags |
+| Pattern logging | ✅ Done | ~1ms | Detect & log (not block) |
+| Async analysis | ✅ Done | 0ms* | Background alerting |
+| Guard LLM | ❌ Future | +500ms | Semantic detection (opt-in) |
+| Fast classifier | ❌ Future | +10ms | Trained ML model |
+
+*Async doesn't block requests
+
+**Why Pattern Matching Alone Fails:**
+- Attackers rephrase: "ignore instructions" → "let's start fresh"
+- Use other languages, roleplay scenarios, encoding tricks
+- Useful for **logging**, not as primary defense
+
+**Future Guard LLM (Opt-in per API key):**
+```yaml
+api_keys:
+  - key: "pr-reviewer-key"
+    policies:
+      injection_guard: true
+      guard_model: "llama3.2:3b"
+```
+Adds ~500ms but provides semantic understanding.
+
+**Infrastructure Security (TODO):**
 - Request signing
 - mTLS between gateway and endpoints
-- Secrets management integration
-- Audit log encryption
+- Secrets management integration (Vault/KMS)
+- Audit log encryption at rest
 
 ### Phase 8: Multi-Region / Federation
 - Cross-datacenter routing
@@ -456,6 +486,11 @@ src/gateway/
 │   ├── executor.py         # Pipeline execution
 │   ├── hooks.py            # Hook interface
 │   └── context.py          # RequestContext
+├── security/               # ✅ EXISTS
+│   ├── __init__.py         # Module exports
+│   ├── sanitizer.py        # Unicode sanitization
+│   ├── injection.py        # Pattern detection + content wrapping
+│   └── analyzer.py         # Async background analysis
 ├── catalog/                # (exists)
 ├── dispatch/               # (exists, will integrate with resolution)
 ├── routes/                 # (exists)

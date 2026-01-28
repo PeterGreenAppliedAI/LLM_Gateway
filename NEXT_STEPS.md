@@ -342,6 +342,165 @@ python -m gateway.cli dashboard
 - [ ] Prompt redaction option
 - [ ] Health check improvements
 
+### Phase 5: Prompt Injection Defense ✅ PARTIAL
+**Priority: HIGH | Effort: Ongoing**
+
+Security module implemented in `src/gateway/security/`:
+
+**Completed (Zero-Latency Defenses):**
+- [x] Unicode sanitization - strips invisible chars (zero-width, directional, BOM)
+- [x] Content wrapping - marks untrusted content with trust-level tags
+- [x] Pattern detection - logs suspicious injection patterns
+- [x] Async analyzer - background analysis without blocking requests
+- [x] 31 tests in `tests/test_security.py`
+
+**Not Yet Integrated:**
+- [ ] Wire sanitization into request pipeline
+- [ ] Wire async analyzer into routes
+- [ ] Add security alerts API endpoint
+- [ ] Dashboard security alerts view
+
+---
+
+## 5. Prompt Injection Defense - Design Decisions
+
+### The Problem
+
+Attackers hide malicious instructions in:
+- PR diffs and code reviews
+- Documents being summarized
+- User-provided content
+- External API responses
+
+### Defense Options Comparison
+
+| Approach | Latency | Effectiveness | Bypass Difficulty | Implemented |
+|----------|---------|---------------|-------------------|-------------|
+| Pattern blocklist | ~1ms | Low | Easy (rephrase) | ✅ Logging only |
+| Unicode sanitization | ~0ms | Low | Medium | ✅ Yes |
+| Content wrapping | ~0ms | Medium | Medium | ✅ Yes |
+| Fast classifier | ~10ms | Medium-High | Hard | ❌ Future |
+| Guard LLM | ~500ms | High | Very Hard | ❌ Future |
+| Async analysis | 0ms* | Visibility | N/A | ✅ Yes |
+
+*Async = doesn't block request
+
+### Why Pattern Matching Alone Fails
+
+| You Block | Attacker Uses |
+|-----------|---------------|
+| "ignore previous instructions" | "let's start fresh with new context" |
+| "disregard" | "pretend the above was a test" |
+| English patterns | Instructions in other languages |
+| Direct commands | Roleplay scenarios, fictional framing |
+
+**Conclusion**: Pattern matching is whack-a-mole. It's useful for **logging/alerting** but not as primary defense.
+
+### Recommended Layered Approach
+
+```
+┌─────────────────────────────────────────────────────┐
+│  Layer 1: Unicode Sanitization (0ms)                │
+│  - Strip zero-width, directional, control chars     │
+│  - Catches encoding tricks                          │
+├─────────────────────────────────────────────────────┤
+│  Layer 2: Content Wrapping (0ms)                    │
+│  - Mark untrusted content with trust-level tags     │
+│  - Structural defense, relies on model compliance   │
+├─────────────────────────────────────────────────────┤
+│  Layer 3: Pattern Logging (1ms)                     │
+│  - Detect known patterns, LOG don't block           │
+│  - Build dataset of attack attempts                 │
+├─────────────────────────────────────────────────────┤
+│  Layer 4: Async Analysis (0ms request latency)      │
+│  - Background scanning after request completes      │
+│  - Alert on suspicious patterns                     │
+├─────────────────────────────────────────────────────┤
+│  Layer 5: Guard LLM (optional, +500ms)              │
+│  - Semantic injection detection                     │
+│  - Opt-in for high-risk use cases only              │
+└─────────────────────────────────────────────────────┘
+```
+
+### Future: Guard LLM Integration
+
+For high-security use cases (processing untrusted PRs, external documents):
+
+```python
+# Opt-in via API key policy
+api_keys:
+  - key: "pr-reviewer-key"
+    client_id: pr-reviewer
+    policies:
+      injection_guard: true  # Enable guard LLM
+      guard_model: "llama3.2:3b"  # Fast local model
+```
+
+**Pros:**
+- Understands semantic meaning, not just patterns
+- Much harder to bypass
+- Can use small, fast local model
+
+**Cons:**
+- Adds ~200-500ms latency per request
+- Consumes GPU resources
+- Not foolproof (guard can be fooled too)
+
+**Recommendation**: Make it opt-in per API key, not global.
+
+### Future: Fast Classifier
+
+Train a small BERT-style classifier specifically for injection detection:
+
+```python
+from transformers import pipeline
+classifier = pipeline("text-classification", model="injection-detector")
+result = classifier("Ignore previous instructions")
+# {"label": "INJECTION", "score": 0.97} in ~10ms
+```
+
+**Pros:**
+- Much faster than LLM (~10ms vs ~500ms)
+- Purpose-built for the task
+- Can run on CPU
+
+**Cons:**
+- Requires training data (attack examples)
+- May need periodic retraining as attacks evolve
+- Less flexible than LLM
+
+### Current Implementation Details
+
+**Files:**
+- `src/gateway/security/sanitizer.py` - Unicode sanitization
+- `src/gateway/security/injection.py` - Pattern detection + content wrapping
+- `src/gateway/security/analyzer.py` - Async background analysis
+
+**Pattern Categories Detected:**
+- `instruction_override` - "ignore previous instructions"
+- `delimiter_attack` - fake `<|system|>` tags
+- `roleplay_escape` - "you are now DAN"
+- `encoding_tricks` - base64/rot13 indicators
+- `context_manipulation` - "real instructions are..."
+
+**Content Wrapper Usage:**
+```python
+from gateway.security import ContentWrapper
+
+wrapper = ContentWrapper()
+
+# For PR diffs
+safe = wrapper.wrap_pr_diff(diff, pr_info={"number": 123})
+
+# For documents
+safe = wrapper.wrap_document(doc, source="external-api")
+
+# Generic
+safe = wrapper.wrap(content, trust_level="UNTRUSTED")
+```
+
+---
+
 ### Future (v1.0+)
 
 - [ ] **Plugin architecture** for request/response transformation
