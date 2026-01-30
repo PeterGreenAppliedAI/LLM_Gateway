@@ -25,6 +25,7 @@ from gateway.config import GatewayConfig, load_config
 from gateway.dispatch import ProviderRegistry
 from gateway.exception_handlers import register_exception_handlers
 from gateway.observability import get_logger
+from gateway.security import AsyncSecurityAnalyzer
 from gateway.settings import Settings, get_settings
 from gateway.storage import AuditLogger, DatabaseConfig, create_db_engine
 from gateway.routes import openai_router, devmesh_router, ollama_router
@@ -95,9 +96,19 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await discovery.start()
         app.state.discovery_service = discovery
 
+    # Start security analyzer (async background analysis)
+    security_analyzer = AsyncSecurityAnalyzer()
+    await security_analyzer.start()
+    app.state.security_analyzer = security_analyzer
+    logger.info("Security analyzer started")
+
     yield
 
     # Shutdown
+    if hasattr(app.state, "security_analyzer"):
+        await app.state.security_analyzer.stop()
+        logger.info("Security analyzer stopped")
+
     if hasattr(app.state, "discovery_service"):
         await app.state.discovery_service.stop()
 
@@ -125,7 +136,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Add CORS middleware for dashboard
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],  # Configure for production
+        allow_origins=[
+            "http://192.168.1.184:5174",   # Dashboard dev server
+            "http://192.168.1.184:5173",   # Dashboard alt port
+            "http://localhost:5174",        # Local dev
+            "http://localhost:5173",        # Local dev alt
+        ],
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

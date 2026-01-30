@@ -23,6 +23,22 @@ services:
     networks:
       - gateway-network
 
+  dashboard:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.dashboard
+      args:
+        VITE_API_URL: http://gateway:8000
+    ports:
+      - "5174:5174"
+    environment:
+      - VITE_API_URL=http://gateway:8000
+    restart: unless-stopped
+    networks:
+      - gateway-network
+    depends_on:
+      - gateway
+
   prometheus:
     image: prom/prometheus:v2.47.0
     ports:

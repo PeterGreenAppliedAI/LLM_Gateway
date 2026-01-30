@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Optional
 
 from pydantic import BaseModel, Field
-from sqlalchemy import create_engine, Engine
+from sqlalchemy import create_engine, Engine, text
 from sqlalchemy.pool import QueuePool, NullPool, StaticPool
 
 from gateway.storage.schema import metadata
@@ -87,12 +87,17 @@ def _create_sqlite_engine(url: str, config: DatabaseConfig) -> Engine:
             db_path = db_path[2:]
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
 
-        return create_engine(
+        engine = create_engine(
             url,
             connect_args={"check_same_thread": False},
             poolclass=NullPool,  # SQLite doesn't benefit from pooling
             echo=config.echo,
         )
+        # Enable WAL mode for better concurrent read/write performance
+        with engine.connect() as conn:
+            conn.execute(text("PRAGMA journal_mode=WAL"))
+            conn.commit()
+        return engine
     else:
         # In-memory SQLite (for testing)
         return create_engine(

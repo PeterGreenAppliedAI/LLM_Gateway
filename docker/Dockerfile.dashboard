@@ -1,0 +1,36 @@
+# Dashboard Dockerfile - Multi-stage build
+# Stage 1: Build the Vite React app
+FROM node:20-slim AS build
+
+WORKDIR /app
+
+# Copy package files first for layer caching
+COPY dashboard/package.json dashboard/package-lock.json* ./
+RUN npm install
+
+# Copy source and build
+COPY dashboard/ .
+ARG VITE_API_URL=http://localhost:8000
+ENV VITE_API_URL=$VITE_API_URL
+RUN npm run build
+
+# Stage 2: Serve static files
+FROM node:20-slim
+
+WORKDIR /app
+
+RUN npm install -g serve
+
+# Copy built assets
+COPY --from=build /app/dist ./dist
+
+# Non-root user
+RUN useradd -m -u 1000 dashboard && chown -R dashboard:dashboard /app
+USER dashboard
+
+EXPOSE 5174
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+    CMD node -e "fetch('http://localhost:5174').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+
+CMD ["serve", "-s", "dist", "-l", "5174"]

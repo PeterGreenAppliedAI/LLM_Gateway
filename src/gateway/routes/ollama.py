@@ -38,8 +38,11 @@ from gateway.routes.dependencies import (
     get_auth,
     get_audit_logger,
     get_dispatcher,
+    get_sanitizer,
+    get_security_analyzer,
     setup_request_context,
 )
+from gateway.security import AsyncSecurityAnalyzer, Sanitizer
 from gateway.storage import AuditLogger
 
 logger = get_logger(__name__)
@@ -64,6 +67,8 @@ async def ollama_chat(
     auth: Annotated[AuthResult, Depends(get_auth)],
     dispatcher: Annotated[Dispatcher, Depends(get_dispatcher)],
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
+    sanitizer: Annotated[Sanitizer, Depends(get_sanitizer)],
+    security_analyzer: Annotated[AsyncSecurityAnalyzer | None, Depends(get_security_analyzer)],
 ):
     """Ollama-compatible chat endpoint.
 
@@ -77,10 +82,28 @@ async def ollama_chat(
         task="chat",
     )
 
-    # Convert Ollama messages to internal format
+    # Security: Sanitize message content
+    sanitized_messages = []
+    for m in body.messages:
+        if m.content:
+            result = sanitizer.sanitize(m.content)
+            sanitized_messages.append({"role": m.role, "content": result.sanitized})
+        else:
+            sanitized_messages.append({"role": m.role, "content": m.content or ""})
+
+    # Queue for async security analysis
+    if security_analyzer:
+        security_analyzer.queue_request(
+            request_id=ctx.request_id,
+            client_id=client_id,
+            model=body.model,
+            messages=sanitized_messages,
+        )
+
+    # Convert Ollama messages to internal format (using sanitized content)
     messages = [
-        Message(role=m.role, content=m.content)
-        for m in body.messages
+        Message(role=m["role"], content=m["content"])
+        for m in sanitized_messages
     ]
 
     # Extract options - only include if actually set
@@ -230,6 +253,8 @@ async def ollama_generate(
     auth: Annotated[AuthResult, Depends(get_auth)],
     dispatcher: Annotated[Dispatcher, Depends(get_dispatcher)],
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
+    sanitizer: Annotated[Sanitizer, Depends(get_sanitizer)],
+    security_analyzer: Annotated[AsyncSecurityAnalyzer | None, Depends(get_security_analyzer)],
 ):
     """Ollama-compatible generate endpoint."""
     client_id = auth.client_id
@@ -240,11 +265,29 @@ async def ollama_generate(
         task="generate",
     )
 
-    # Build messages from prompt and optional system
+    # Security: Sanitize prompt and system content
+    sanitized_prompt = sanitizer.sanitize(body.prompt).sanitized
+    sanitized_system = sanitizer.sanitize(body.system).sanitized if body.system else None
+
+    # Queue for async security analysis
+    analysis_messages = []
+    if sanitized_system:
+        analysis_messages.append({"role": "system", "content": sanitized_system})
+    analysis_messages.append({"role": "user", "content": sanitized_prompt})
+
+    if security_analyzer:
+        security_analyzer.queue_request(
+            request_id=ctx.request_id,
+            client_id=client_id,
+            model=body.model,
+            messages=analysis_messages,
+        )
+
+    # Build messages from sanitized prompt and optional system
     messages = []
-    if body.system:
-        messages.append(Message(role="system", content=body.system))
-    messages.append(Message(role="user", content=body.prompt))
+    if sanitized_system:
+        messages.append(Message(role="system", content=sanitized_system))
+    messages.append(Message(role="user", content=sanitized_prompt))
 
     options = body.options or {}
 
@@ -405,6 +448,8 @@ async def ollama_embeddings(
     auth: Annotated[AuthResult, Depends(get_auth)],
     dispatcher: Annotated[Dispatcher, Depends(get_dispatcher)],
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
+    sanitizer: Annotated[Sanitizer, Depends(get_sanitizer)],
+    security_analyzer: Annotated[AsyncSecurityAnalyzer | None, Depends(get_security_analyzer)],
 ):
     """Ollama-compatible embeddings endpoint."""
     client_id = auth.client_id
@@ -418,10 +463,22 @@ async def ollama_embeddings(
     # Handle both single string and list of strings
     prompts = body.prompt if isinstance(body.prompt, list) else [body.prompt]
 
+    # Security: Sanitize prompts
+    sanitized_prompts = [sanitizer.sanitize(p).sanitized for p in prompts]
+
+    # Queue for async security analysis
+    if security_analyzer:
+        security_analyzer.queue_request(
+            request_id=ctx.request_id,
+            client_id=client_id,
+            model=body.model,
+            messages=[{"role": "user", "content": "\n".join(sanitized_prompts)}],
+        )
+
     request_kwargs = {
         "task": TaskType.EMBEDDINGS,
         "model": body.model,
-        "prompt": prompts[0] if len(prompts) == 1 else None,
+        "prompt": sanitized_prompts[0] if len(sanitized_prompts) == 1 else None,
         "client_id": client_id,
     }
 

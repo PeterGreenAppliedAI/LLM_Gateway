@@ -12,6 +12,7 @@ Production: PostgreSQL recommended
 from gateway.storage.schema import metadata, audit_log, usage_daily, api_keys
 from gateway.storage.engine import create_db_engine, DatabaseConfig
 from gateway.storage.audit import AuditLogger
+from gateway.storage.keys import KeyManager
 
 __all__ = [
     # Schema
@@ -24,4 +25,6 @@ __all__ = [
     "DatabaseConfig",
     # Audit
     "AuditLogger",
+    # Keys
+    "KeyManager",
 ]

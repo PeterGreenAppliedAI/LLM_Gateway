@@ -342,7 +342,7 @@ python -m gateway.cli dashboard
 - [ ] Prompt redaction option
 - [ ] Health check improvements
 
-### Phase 5: Prompt Injection Defense ✅ PARTIAL
+### Phase 5: Prompt Injection Defense ✅ COMPLETE
 **Priority: HIGH | Effort: Ongoing**
 
 Security module implemented in `src/gateway/security/`:
@@ -354,11 +354,23 @@ Security module implemented in `src/gateway/security/`:
 - [x] Async analyzer - background analysis without blocking requests
 - [x] 31 tests in `tests/test_security.py`
 
-**Not Yet Integrated:**
-- [ ] Wire sanitization into request pipeline
-- [ ] Wire async analyzer into routes
-- [ ] Add security alerts API endpoint
-- [ ] Dashboard security alerts view
+**Completed (Route Integration):**
+- [x] Sanitization wired into all OpenAI routes (`/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`)
+- [x] Sanitization wired into all Ollama routes (`/api/chat`, `/api/generate`, `/api/embeddings`)
+- [x] Async analyzer queues every request for background analysis
+- [x] Analyzer lifecycle managed in `main.py` (start on boot, stop on shutdown)
+- [x] Security API endpoints: `GET /api/security/alerts`, `GET /api/security/stats`, `DELETE /api/security/alerts`
+- [x] Dashboard security monitor section (alerts list, stats, severity colors, expandable details)
+
+**Current Mode: Observe Only** - No requests are blocked. All detections are logged and surfaced in the dashboard for visibility. Actions (blocking, webhooks, rate limiting) to be added once patterns are understood.
+
+**Future Enhancements:**
+- [ ] Block CRITICAL threats (configurable per-client)
+- [ ] Webhook notifications for alerts (Slack/Discord/PagerDuty)
+- [ ] Rate limit clients with repeated alerts
+- [ ] Guard LLM integration (opt-in, +500ms)
+- [ ] Fast classifier model (trained ML, +10ms)
+- [ ] Auto-ban repeat offenders (temporary block by client_id)
 
 ---
 
@@ -950,9 +962,11 @@ services:
 |-------|------|--------|----------|--------|
 | **1** | OpenAI adapter (cloud providers) | 2-4 hrs | **HIGH** | ✅ DONE |
 | **2a** | Dashboard REST APIs | 4-6 hrs | **HIGH** | ✅ DONE |
-| **2b** | Custom React frontend | 1-2 weeks | **HIGH** | ⏳ Pending |
+| **2b** | Custom React frontend | 1-2 weeks | **HIGH** | ⏳ Partial |
 | **3** | Database + audit logging | 8-10 hrs | **HIGH** | ✅ DONE |
 | **4** | Docker Compose + production hardening | 4-8 hrs | Medium | ⏳ Pending |
+| **5** | Prompt injection defense | Ongoing | **HIGH** | ✅ DONE (observe mode) |
+| - | Security actions (blocking, webhooks) | 4-8 hrs | Medium | ⏳ Future |
 | - | Open WebUI / LibreChat integration | 15 min | As needed | Ready to use |
 | - | Hybrid routing | 4-8 hrs | Future | ⏳ Pending |
 | - | Multi-tenant | 1-2 weeks | v1.0 | ⏳ Pending |

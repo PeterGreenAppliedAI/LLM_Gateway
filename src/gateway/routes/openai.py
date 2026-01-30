@@ -46,9 +46,12 @@ from gateway.routes.dependencies import (
     get_audit_logger,
     get_dispatcher,
     get_enforcer,
+    get_sanitizer,
+    get_security_analyzer,
     setup_request_context,
     translate_policy_violation,
 )
+from gateway.security import AsyncSecurityAnalyzer, Sanitizer
 from gateway.storage import AuditLogger
 
 logger = get_logger(__name__)
@@ -70,6 +73,8 @@ async def chat_completions(
     dispatcher: Annotated[Dispatcher, Depends(get_dispatcher)],
     enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
+    sanitizer: Annotated[Sanitizer, Depends(get_sanitizer)],
+    security_analyzer: Annotated[AsyncSecurityAnalyzer | None, Depends(get_security_analyzer)],
 ):
     """Create a chat completion.
 
@@ -87,6 +92,24 @@ async def chat_completions(
         model=body.model,
         task="chat",
     )
+
+    # Security: Sanitize message content (removes invisible Unicode chars)
+    sanitized_messages = []
+    for msg in body.messages:
+        if msg.content:
+            result = sanitizer.sanitize(msg.content)
+            sanitized_messages.append({"role": msg.role, "content": result.sanitized})
+        else:
+            sanitized_messages.append({"role": msg.role, "content": msg.content or ""})
+
+    # Queue for async security analysis (non-blocking)
+    if security_analyzer:
+        security_analyzer.queue_request(
+            request_id=ctx.request_id,
+            client_id=client_id,
+            model=body.model,
+            messages=sanitized_messages,
+        )
 
     # Convert to internal format
     internal_request = body.to_internal(client_id=client_id, task=TaskType.CHAT)
@@ -292,6 +315,8 @@ async def completions(
     dispatcher: Annotated[Dispatcher, Depends(get_dispatcher)],
     enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
+    sanitizer: Annotated[Sanitizer, Depends(get_sanitizer)],
+    security_analyzer: Annotated[AsyncSecurityAnalyzer | None, Depends(get_security_analyzer)],
 ) -> OpenAICompletionResponse:
     """Create a text completion.
 
@@ -306,6 +331,24 @@ async def completions(
         model=body.model,
         task="completion",
     )
+
+    # Security: Sanitize prompt content
+    sanitized_prompt = body.prompt
+    if isinstance(body.prompt, str):
+        result = sanitizer.sanitize(body.prompt)
+        sanitized_prompt = result.sanitized
+    elif isinstance(body.prompt, list):
+        sanitized_prompt = [sanitizer.sanitize(p).sanitized for p in body.prompt]
+
+    # Queue for async security analysis
+    if security_analyzer:
+        prompt_content = sanitized_prompt if isinstance(sanitized_prompt, str) else "\n".join(sanitized_prompt)
+        security_analyzer.queue_request(
+            request_id=ctx.request_id,
+            client_id=client_id,
+            model=body.model,
+            messages=[{"role": "user", "content": prompt_content}],
+        )
 
     # Convert to internal format
     internal_request = body.to_internal(client_id=client_id, task=TaskType.COMPLETION)
@@ -377,6 +420,8 @@ async def embeddings(
     dispatcher: Annotated[Dispatcher, Depends(get_dispatcher)],
     enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
+    sanitizer: Annotated[Sanitizer, Depends(get_sanitizer)],
+    security_analyzer: Annotated[AsyncSecurityAnalyzer | None, Depends(get_security_analyzer)],
 ) -> OpenAIEmbeddingResponse:
     """Create embeddings for the input text.
 
@@ -391,6 +436,23 @@ async def embeddings(
         model=body.model,
         task="embeddings",
     )
+
+    # Security: Sanitize input content
+    sanitized_input = body.input
+    if isinstance(body.input, str):
+        sanitized_input = sanitizer.sanitize(body.input).sanitized
+    elif isinstance(body.input, list):
+        sanitized_input = [sanitizer.sanitize(i).sanitized if isinstance(i, str) else i for i in body.input]
+
+    # Queue for async security analysis
+    if security_analyzer:
+        input_content = sanitized_input if isinstance(sanitized_input, str) else "\n".join(str(i) for i in sanitized_input)
+        security_analyzer.queue_request(
+            request_id=ctx.request_id,
+            client_id=client_id,
+            model=body.model,
+            messages=[{"role": "user", "content": input_content}],
+        )
 
     # Convert to internal format
     internal_request = body.to_internal(client_id=client_id)

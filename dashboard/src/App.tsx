@@ -2,13 +2,22 @@ import { useEffect, useState } from 'react'
 
 // Helper to format UTC timestamp to local time
 function formatTimestamp(utcTimestamp: string): string {
-  // Ensure the timestamp is treated as UTC
-  const timestamp = utcTimestamp.endsWith('Z') ? utcTimestamp : utcTimestamp + 'Z'
+  // Handle various timestamp formats
+  // - Already has Z suffix: use as-is
+  // - Has timezone offset (+00:00): use as-is
+  // - No timezone info: append Z to treat as UTC
+  let timestamp = utcTimestamp
+  if (!utcTimestamp.endsWith('Z') && !utcTimestamp.match(/[+-]\d{2}:\d{2}$/)) {
+    timestamp = utcTimestamp + 'Z'
+  }
   return new Date(timestamp).toLocaleString()
 }
 
 function formatTime(utcTimestamp: string): string {
-  const timestamp = utcTimestamp.endsWith('Z') ? utcTimestamp : utcTimestamp + 'Z'
+  let timestamp = utcTimestamp
+  if (!utcTimestamp.endsWith('Z') && !utcTimestamp.match(/[+-]\d{2}:\d{2}$/)) {
+    timestamp = utcTimestamp + 'Z'
+  }
   return new Date(timestamp).toLocaleTimeString()
 }
 
@@ -84,6 +93,39 @@ interface HealthResponse {
   providers: { name: string; status: string; healthy: boolean }[]
 }
 
+interface SecurityAlert {
+  timestamp: string
+  request_id: string
+  client_id: string
+  severity: string
+  alert_type: string
+  description: string
+  details: Record<string, unknown>
+}
+
+interface SecurityStats {
+  requests_analyzed: number
+  alerts_generated: number
+  requests_dropped: number
+  queue_size: number
+  alerts_in_memory: number
+}
+
+interface ApiKeyInfo {
+  id: number
+  prefix: string
+  name: string
+  client_id: string
+  environment: string | null
+  created_at: string | null
+  last_used_at: string | null
+  is_active: boolean
+  allowed_endpoints: string[] | null
+  allowed_models: string[] | null
+  rate_limit_rpm: number | null
+  description: string | null
+}
+
 // API base URL - gateway server
 const API_BASE = import.meta.env.VITE_API_URL || 'http://192.168.1.184:8001'
 
@@ -111,6 +153,37 @@ async function fetchCatalog(): Promise<Catalog> {
 async function fetchHealth(): Promise<HealthResponse> {
   const res = await fetch(`${API_BASE}/health`)
   return res.json()
+}
+
+async function fetchSecurityAlerts(limit = 50): Promise<{ alerts: SecurityAlert[]; total: number }> {
+  const res = await fetch(`${API_BASE}/api/security/alerts?limit=${limit}`)
+  return res.json()
+}
+
+async function fetchSecurityStats(): Promise<SecurityStats> {
+  const res = await fetch(`${API_BASE}/api/security/stats`)
+  return res.json()
+}
+
+async function fetchApiKeys(): Promise<{ keys: ApiKeyInfo[]; total: number }> {
+  const res = await fetch(`${API_BASE}/api/keys`)
+  if (!res.ok) return { keys: [], total: 0 }
+  return res.json()
+}
+
+async function createApiKey(body: { name: string; client_id: string; description?: string }): Promise<{ key: string; key_id: number; prefix: string }> {
+  const res = await fetch(`${API_BASE}/api/keys`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) throw new Error(`Failed to create key: ${res.statusText}`)
+  return res.json()
+}
+
+async function revokeApiKey(keyId: number): Promise<void> {
+  const res = await fetch(`${API_BASE}/api/keys/${keyId}`, { method: 'DELETE' })
+  if (!res.ok) throw new Error(`Failed to revoke key: ${res.statusText}`)
 }
 
 // Components
@@ -299,11 +372,312 @@ function RequestRow({ request, onClick }: { request: Request; onClick: () => voi
   )
 }
 
+function getSeverityColor(severity: string): string {
+  switch (severity) {
+    case 'critical': return 'bg-red-900 text-red-300 border-red-700'
+    case 'warning': return 'bg-yellow-900 text-yellow-300 border-yellow-700'
+    case 'info': return 'bg-blue-900 text-blue-300 border-blue-700'
+    default: return 'bg-gray-900 text-gray-300 border-gray-700'
+  }
+}
+
+function SecurityAlertRow({ alert }: { alert: SecurityAlert }) {
+  const datetime = formatTimestamp(alert.timestamp)
+  const [expanded, setExpanded] = useState(false)
+
+  return (
+    <div className={`border rounded mb-2 ${getSeverityColor(alert.severity)}`}>
+      <div
+        className="p-3 cursor-pointer flex items-center justify-between"
+        onClick={() => setExpanded(!expanded)}
+      >
+        <div className="flex items-center gap-3">
+          <span className={`px-2 py-0.5 rounded text-xs uppercase font-bold ${getSeverityColor(alert.severity)}`}>
+            {alert.severity}
+          </span>
+          <span className="font-medium">{alert.alert_type}</span>
+          <span className="text-sm opacity-75">{alert.description}</span>
+        </div>
+        <div className="flex items-center gap-3 text-sm opacity-75">
+          <span>{alert.client_id}</span>
+          <span>{datetime}</span>
+          <span>{expanded ? '▼' : '▶'}</span>
+        </div>
+      </div>
+      {expanded && (
+        <div className="p-3 border-t border-current opacity-50">
+          <div className="text-xs font-mono">
+            <div><strong>Request ID:</strong> {alert.request_id}</div>
+            {alert.details && Object.keys(alert.details).length > 0 && (
+              <div className="mt-2">
+                <strong>Details:</strong>
+                <pre className="mt-1 overflow-auto max-h-40 bg-black/20 p-2 rounded">
+                  {JSON.stringify(alert.details, null, 2)}
+                </pre>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function SecuritySection({ alerts, stats }: { alerts: SecurityAlert[]; stats: SecurityStats | null }) {
+  const criticalCount = alerts.filter(a => a.severity === 'critical').length
+  const warningCount = alerts.filter(a => a.severity === 'warning').length
+
+  return (
+    <div className="mb-6">
+      <h2 className="text-lg font-semibold mb-3 flex items-center gap-2">
+        🛡️ Security Monitor
+        {criticalCount > 0 && (
+          <span className="bg-red-600 text-white px-2 py-0.5 rounded-full text-xs animate-pulse">
+            {criticalCount} Critical
+          </span>
+        )}
+      </h2>
+
+      {/* Security Stats */}
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4">
+        <div className="bg-gray-800 rounded-lg p-3 border border-gray-700">
+          <div className="text-gray-400 text-xs">Analyzed</div>
+          <div className="text-xl font-bold">{stats?.requests_analyzed || 0}</div>
+        </div>
+        <div className="bg-gray-800 rounded-lg p-3 border border-gray-700">
+          <div className="text-gray-400 text-xs">Alerts</div>
+          <div className="text-xl font-bold text-yellow-400">{stats?.alerts_generated || 0}</div>
+        </div>
+        <div className="bg-gray-800 rounded-lg p-3 border border-gray-700">
+          <div className="text-gray-400 text-xs">Critical</div>
+          <div className="text-xl font-bold text-red-400">{criticalCount}</div>
+        </div>
+        <div className="bg-gray-800 rounded-lg p-3 border border-gray-700">
+          <div className="text-gray-400 text-xs">Warnings</div>
+          <div className="text-xl font-bold text-yellow-400">{warningCount}</div>
+        </div>
+        <div className="bg-gray-800 rounded-lg p-3 border border-gray-700">
+          <div className="text-gray-400 text-xs">Queue</div>
+          <div className="text-xl font-bold">{stats?.queue_size || 0}</div>
+        </div>
+      </div>
+
+      {/* Alerts List */}
+      {alerts.length > 0 ? (
+        <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
+          <h3 className="text-sm font-semibold text-gray-300 mb-3">Recent Alerts</h3>
+          <div className="max-h-64 overflow-auto">
+            {alerts.map((alert, idx) => (
+              <SecurityAlertRow key={`${alert.request_id}-${idx}`} alert={alert} />
+            ))}
+          </div>
+        </div>
+      ) : (
+        <div className="bg-gray-800 rounded-lg p-8 border border-gray-700 text-center text-gray-500">
+          <div className="text-4xl mb-2">✓</div>
+          <div>No security alerts</div>
+          <div className="text-sm">All requests clean</div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function ApiKeysSection({ keys, onRefresh }: { keys: ApiKeyInfo[]; onRefresh: () => void }) {
+  const [showCreate, setShowCreate] = useState(false)
+  const [newKeyName, setNewKeyName] = useState('')
+  const [newKeyClientId, setNewKeyClientId] = useState('')
+  const [newKeyDescription, setNewKeyDescription] = useState('')
+  const [createdKey, setCreatedKey] = useState<string | null>(null)
+  const [creating, setCreating] = useState(false)
+  const [copied, setCopied] = useState(false)
+
+  const handleCreate = async () => {
+    if (!newKeyName || !newKeyClientId) return
+    setCreating(true)
+    try {
+      const result = await createApiKey({
+        name: newKeyName,
+        client_id: newKeyClientId,
+        description: newKeyDescription || undefined,
+      })
+      setCreatedKey(result.key)
+      setNewKeyName('')
+      setNewKeyClientId('')
+      setNewKeyDescription('')
+      onRefresh()
+    } catch (e) {
+      console.error('Failed to create key:', e)
+    } finally {
+      setCreating(false)
+    }
+  }
+
+  const handleRevoke = async (keyId: number) => {
+    try {
+      await revokeApiKey(keyId)
+      onRefresh()
+    } catch (e) {
+      console.error('Failed to revoke key:', e)
+    }
+  }
+
+  const handleCopy = () => {
+    if (createdKey) {
+      navigator.clipboard.writeText(createdKey)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    }
+  }
+
+  return (
+    <div className="mb-6">
+      <div className="flex items-center justify-between mb-3">
+        <h2 className="text-lg font-semibold">API Keys</h2>
+        <button
+          onClick={() => { setShowCreate(!showCreate); setCreatedKey(null) }}
+          className="bg-blue-600 hover:bg-blue-700 px-3 py-1.5 rounded text-sm"
+        >
+          {showCreate ? 'Cancel' : 'Create Key'}
+        </button>
+      </div>
+
+      {/* Create Key Form */}
+      {showCreate && (
+        <div className="bg-gray-800 rounded-lg p-4 border border-gray-700 mb-4">
+          {createdKey ? (
+            <div>
+              <div className="text-green-400 font-semibold mb-2">Key Created Successfully</div>
+              <p className="text-yellow-400 text-sm mb-3">
+                Copy this key now - it will not be shown again.
+              </p>
+              <div className="flex items-center gap-2 mb-3">
+                <code className="bg-gray-900 px-3 py-2 rounded font-mono text-sm flex-1 break-all">
+                  {createdKey}
+                </code>
+                <button
+                  onClick={handleCopy}
+                  className="bg-gray-700 hover:bg-gray-600 px-3 py-2 rounded text-sm whitespace-nowrap"
+                >
+                  {copied ? 'Copied!' : 'Copy'}
+                </button>
+              </div>
+              <button
+                onClick={() => { setCreatedKey(null); setShowCreate(false) }}
+                className="text-gray-400 hover:text-white text-sm"
+              >
+                Done
+              </button>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <div>
+                <label className="text-gray-400 text-sm block mb-1">Name</label>
+                <input
+                  type="text"
+                  value={newKeyName}
+                  onChange={e => setNewKeyName(e.target.value)}
+                  placeholder="e.g. my-app-key"
+                  className="bg-gray-900 border border-gray-600 rounded px-3 py-2 w-full text-sm"
+                />
+              </div>
+              <div>
+                <label className="text-gray-400 text-sm block mb-1">Client ID</label>
+                <input
+                  type="text"
+                  value={newKeyClientId}
+                  onChange={e => setNewKeyClientId(e.target.value)}
+                  placeholder="e.g. my-app"
+                  className="bg-gray-900 border border-gray-600 rounded px-3 py-2 w-full text-sm"
+                />
+              </div>
+              <div>
+                <label className="text-gray-400 text-sm block mb-1">Description (optional)</label>
+                <input
+                  type="text"
+                  value={newKeyDescription}
+                  onChange={e => setNewKeyDescription(e.target.value)}
+                  placeholder="What is this key for?"
+                  className="bg-gray-900 border border-gray-600 rounded px-3 py-2 w-full text-sm"
+                />
+              </div>
+              <button
+                onClick={handleCreate}
+                disabled={creating || !newKeyName || !newKeyClientId}
+                className="bg-green-600 hover:bg-green-700 disabled:opacity-50 px-4 py-2 rounded text-sm"
+              >
+                {creating ? 'Creating...' : 'Generate Key'}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Keys Table */}
+      <div className="bg-gray-800 rounded-lg border border-gray-700 overflow-hidden">
+        <table className="w-full">
+          <thead className="bg-gray-750 border-b border-gray-700">
+            <tr className="text-left text-gray-400 text-sm">
+              <th className="py-2 px-3">Prefix</th>
+              <th className="py-2 px-3">Name</th>
+              <th className="py-2 px-3">Client ID</th>
+              <th className="py-2 px-3">Created</th>
+              <th className="py-2 px-3">Last Used</th>
+              <th className="py-2 px-3">Status</th>
+              <th className="py-2 px-3"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {keys.map(k => (
+              <tr key={k.id} className="border-b border-gray-700">
+                <td className="py-2 px-3 font-mono text-sm">{k.prefix}...</td>
+                <td className="py-2 px-3 text-sm">{k.name}</td>
+                <td className="py-2 px-3 text-gray-400 text-sm">{k.client_id}</td>
+                <td className="py-2 px-3 text-gray-400 text-sm">
+                  {k.created_at ? formatTimestamp(k.created_at) : '-'}
+                </td>
+                <td className="py-2 px-3 text-gray-400 text-sm">
+                  {k.last_used_at ? formatTimestamp(k.last_used_at) : 'Never'}
+                </td>
+                <td className="py-2 px-3">
+                  <span className={`px-2 py-0.5 rounded text-xs ${k.is_active ? 'bg-green-900 text-green-300' : 'bg-red-900 text-red-300'}`}>
+                    {k.is_active ? 'Active' : 'Revoked'}
+                  </span>
+                </td>
+                <td className="py-2 px-3">
+                  {k.is_active && (
+                    <button
+                      onClick={() => handleRevoke(k.id)}
+                      className="text-red-400 hover:text-red-300 text-sm"
+                    >
+                      Revoke
+                    </button>
+                  )}
+                </td>
+              </tr>
+            ))}
+            {keys.length === 0 && (
+              <tr>
+                <td colSpan={7} className="py-8 text-center text-gray-500">
+                  No API keys created yet
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
 function App() {
   const [stats, setStats] = useState<Stats | null>(null)
   const [requests, setRequests] = useState<Request[]>([])
   const [catalog, setCatalog] = useState<Catalog | null>(null)
   const [health, setHealth] = useState<HealthResponse | null>(null)
+  const [securityAlerts, setSecurityAlerts] = useState<SecurityAlert[]>([])
+  const [securityStats, setSecurityStats] = useState<SecurityStats | null>(null)
+  const [apiKeys, setApiKeys] = useState<ApiKeyInfo[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [selectedRequest, setSelectedRequest] = useState<RequestDetail | null>(null)
@@ -311,16 +685,22 @@ function App() {
 
   const refresh = async () => {
     try {
-      const [statsData, requestsData, catalogData, healthData] = await Promise.all([
+      const [statsData, requestsData, catalogData, healthData, secAlertsData, secStatsData, apiKeysData] = await Promise.all([
         fetchStats(),
         fetchRequests(),
         fetchCatalog(),
         fetchHealth(),
+        fetchSecurityAlerts(),
+        fetchSecurityStats(),
+        fetchApiKeys(),
       ])
       setStats(statsData)
       setRequests(requestsData.requests)
       setCatalog(catalogData)
       setHealth(healthData)
+      setSecurityAlerts(secAlertsData.alerts)
+      setSecurityStats(secStatsData)
+      setApiKeys(apiKeysData.keys)
       setError(null)
     } catch (e) {
       setError(`Failed to fetch data: ${e}`)
@@ -400,6 +780,12 @@ function App() {
         <StatCard label="Models" value={catalog?.total_models || 0} />
         <StatCard label="Endpoints" value={catalog?.total_endpoints || 0} />
       </div>
+
+      {/* Security Monitor */}
+      <SecuritySection alerts={securityAlerts} stats={securityStats} />
+
+      {/* API Keys */}
+      <ApiKeysSection keys={apiKeys} onRefresh={refresh} />
 
       {/* Endpoints */}
       <div className="mb-6">

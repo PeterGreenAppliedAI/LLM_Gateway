@@ -5,6 +5,7 @@ Ollama API reference: https://github.com/ollama/ollama/blob/main/docs/api.md
 Per PRD Section 6: Ollama is a required local runtime with full support.
 """
 
+import asyncio
 import time
 from typing import Any, AsyncIterator
 
@@ -131,7 +132,7 @@ class OllamaAdapter(ProviderAdapter):
             return self._error_response(request, f"Timeout: {e}", "timeout")
         except httpx.HTTPStatusError as e:
             return self._error_response(
-                request, f"HTTP {e.response.status_code}: {e.response.text}", "http_error"
+                request, f"HTTP {e.response.status_code}: {e.response.text[:200]}", "http_error"
             )
         except Exception as e:
             return self._error_response(request, str(e), "unknown_error")
@@ -162,7 +163,7 @@ class OllamaAdapter(ProviderAdapter):
             return self._error_response(request, f"Timeout: {e}", "timeout")
         except httpx.HTTPStatusError as e:
             return self._error_response(
-                request, f"HTTP {e.response.status_code}: {e.response.text}", "http_error"
+                request, f"HTTP {e.response.status_code}: {e.response.text[:200]}", "http_error"
             )
         except Exception as e:
             return self._error_response(request, str(e), "unknown_error")
@@ -205,7 +206,7 @@ class OllamaAdapter(ProviderAdapter):
             return self._error_response(request, f"Timeout: {e}", "timeout")
         except httpx.HTTPStatusError as e:
             return self._error_response(
-                request, f"HTTP {e.response.status_code}: {e.response.text}", "http_error"
+                request, f"HTTP {e.response.status_code}: {e.response.text[:200]}", "http_error"
             )
         except Exception as e:
             return self._error_response(request, str(e), "unknown_error")
@@ -213,6 +214,9 @@ class OllamaAdapter(ProviderAdapter):
     # =========================================================================
     # Streaming
     # =========================================================================
+
+    # Per-chunk timeout: if no chunk arrives within this window, the stream is dead
+    STREAM_CHUNK_TIMEOUT = 120.0  # seconds between chunks
 
     async def chat_stream(
         self, request: InternalRequest
@@ -226,7 +230,7 @@ class OllamaAdapter(ProviderAdapter):
             async with client.stream("POST", "/api/chat", json=ollama_request) as response:
                 response.raise_for_status()
                 index = 0
-                async for line in response.aiter_lines():
+                async for line in self._iter_lines_with_timeout(response):
                     if not line:
                         continue
                     import json
@@ -258,6 +262,13 @@ class OllamaAdapter(ProviderAdapter):
                     )
                     index += 1
 
+        except asyncio.TimeoutError:
+            yield StreamChunk(
+                request_id=request.request_id,
+                index=0,
+                delta="",
+                finish_reason=FinishReason.ERROR,
+            )
         except Exception as e:
             yield StreamChunk(
                 request_id=request.request_id,
@@ -265,6 +276,23 @@ class OllamaAdapter(ProviderAdapter):
                 delta="",
                 finish_reason=FinishReason.ERROR,
             )
+
+    async def _iter_lines_with_timeout(self, response: httpx.Response) -> AsyncIterator[str]:
+        """Iterate response lines with a per-chunk timeout.
+
+        If no data arrives within STREAM_CHUNK_TIMEOUT seconds,
+        raises asyncio.TimeoutError to prevent hanging connections.
+        """
+        aiter = response.aiter_lines().__aiter__()
+        while True:
+            try:
+                line = await asyncio.wait_for(
+                    aiter.__anext__(),
+                    timeout=self.STREAM_CHUNK_TIMEOUT,
+                )
+                yield line
+            except StopAsyncIteration:
+                break
 
     # =========================================================================
     # Provider Metadata

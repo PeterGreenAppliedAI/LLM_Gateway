@@ -30,8 +30,10 @@ from gateway.routes.dependencies import (
     get_config,
     get_dispatcher,
     get_registry,
+    get_security_analyzer,
 )
-from gateway.storage import AuditLogger
+from gateway.security import AsyncSecurityAnalyzer
+from gateway.storage import AuditLogger, KeyManager
 
 try:
     from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
@@ -890,3 +892,271 @@ async def trigger_aggregation(
         "status": "success",
         **result,
     }
+
+
+# =============================================================================
+# Security APIs
+# =============================================================================
+
+
+class SecurityAlertResponse(BaseModel):
+    """A security alert."""
+    timestamp: str
+    request_id: str
+    client_id: str
+    severity: str
+    alert_type: str
+    description: str
+    details: dict = Field(default_factory=dict)
+
+
+class SecurityAlertsResponse(BaseModel):
+    """Response for security alerts."""
+    alerts: list[SecurityAlertResponse]
+    total: int
+
+
+@router.get("/api/security/alerts", response_model=SecurityAlertsResponse)
+async def get_security_alerts(
+    request: Request,
+    security_analyzer: Annotated[AsyncSecurityAnalyzer | None, Depends(get_security_analyzer)],
+    limit: int = 100,
+) -> SecurityAlertsResponse:
+    """Get recent security alerts.
+
+    Args:
+        limit: Maximum number of alerts to return (default 100)
+
+    Returns:
+        List of recent security alerts
+    """
+    if security_analyzer is None:
+        return SecurityAlertsResponse(alerts=[], total=0)
+
+    alerts = security_analyzer.get_recent_alerts(limit=limit)
+
+    return SecurityAlertsResponse(
+        alerts=[
+            SecurityAlertResponse(
+                timestamp=a.timestamp,
+                request_id=a.request_id,
+                client_id=a.client_id,
+                severity=a.severity.value,
+                alert_type=a.alert_type,
+                description=a.description,
+                details=a.details,
+            )
+            for a in alerts
+        ],
+        total=len(alerts),
+    )
+
+
+class SecurityStatsResponse(BaseModel):
+    """Security analyzer statistics."""
+    requests_analyzed: int
+    alerts_generated: int
+    requests_dropped: int
+    queue_size: int
+    alerts_in_memory: int
+
+
+@router.get("/api/security/stats", response_model=SecurityStatsResponse)
+async def get_security_stats(
+    request: Request,
+    security_analyzer: Annotated[AsyncSecurityAnalyzer | None, Depends(get_security_analyzer)],
+) -> SecurityStatsResponse:
+    """Get security analyzer statistics.
+
+    Returns:
+        Statistics about security analysis activity
+    """
+    if security_analyzer is None:
+        return SecurityStatsResponse(
+            requests_analyzed=0,
+            alerts_generated=0,
+            requests_dropped=0,
+            queue_size=0,
+            alerts_in_memory=0,
+        )
+
+    stats = security_analyzer.get_stats()
+
+    return SecurityStatsResponse(**stats)
+
+
+@router.delete("/api/security/alerts")
+async def clear_security_alerts(
+    request: Request,
+    client_id: Annotated[str, Depends(authenticate)],
+    security_analyzer: Annotated[AsyncSecurityAnalyzer | None, Depends(get_security_analyzer)],
+) -> dict[str, Any]:
+    """Clear all security alerts from memory.
+
+    Requires authentication.
+
+    Returns:
+        Number of alerts cleared
+    """
+    if security_analyzer is None:
+        return {"status": "error", "message": "Security analyzer not configured"}
+
+    count = security_analyzer.clear_alerts()
+
+    return {
+        "status": "success",
+        "alerts_cleared": count,
+    }
+
+
+# =============================================================================
+# API Key Management
+# =============================================================================
+
+
+def get_key_manager(request: Request) -> KeyManager | None:
+    """Get KeyManager from app state, or None if DB not configured."""
+    engine = getattr(request.app.state, "db_engine", None)
+    if engine is None:
+        return None
+    return KeyManager(engine)
+
+
+class CreateKeyRequest(BaseModel):
+    """Request to create a new API key."""
+    name: str = Field(..., min_length=1, max_length=128)
+    client_id: str = Field(..., min_length=1, max_length=128)
+    environment: Optional[str] = None
+    description: Optional[str] = None
+    allowed_endpoints: Optional[list[str]] = None
+    allowed_models: Optional[list[str]] = None
+    rate_limit_rpm: Optional[int] = Field(default=None, ge=1)
+
+
+class CreateKeyResponse(BaseModel):
+    """Response after creating an API key. Contains plaintext key shown once."""
+    key: str
+    key_id: int
+    prefix: str
+    name: str
+    client_id: str
+    created_at: str
+
+
+class KeyInfo(BaseModel):
+    """API key info (no secret data)."""
+    id: int
+    prefix: str
+    name: str
+    client_id: str
+    environment: Optional[str] = None
+    created_at: Optional[str] = None
+    last_used_at: Optional[str] = None
+    is_active: bool
+    allowed_endpoints: Optional[list[str]] = None
+    allowed_models: Optional[list[str]] = None
+    rate_limit_rpm: Optional[int] = None
+    description: Optional[str] = None
+
+
+class KeyListResponse(BaseModel):
+    """Response for listing API keys."""
+    keys: list[KeyInfo]
+    total: int
+
+
+@router.post("/api/keys", response_model=CreateKeyResponse)
+async def create_api_key(
+    request: Request,
+    body: CreateKeyRequest,
+    client_id: Annotated[str, Depends(authenticate)],
+) -> CreateKeyResponse:
+    """Create a new database-backed API key.
+
+    The plaintext key is returned exactly once in the response.
+    Store it securely - it cannot be retrieved again.
+
+    Requires authentication.
+    """
+    from gateway.errors import GatewayError, ErrorCode, ErrorCategory
+
+    km = get_key_manager(request)
+    if km is None:
+        raise GatewayError(
+            message="Database not configured - cannot manage keys",
+            code=ErrorCode.CONFIGURATION_ERROR,
+            category=ErrorCategory.INTERNAL,
+        )
+
+    result = km.create_key(
+        name=body.name,
+        client_id=body.client_id,
+        environment=body.environment,
+        description=body.description,
+        allowed_endpoints=body.allowed_endpoints,
+        allowed_models=body.allowed_models,
+        rate_limit_rpm=body.rate_limit_rpm,
+    )
+
+    return CreateKeyResponse(**result)
+
+
+@router.get("/api/keys", response_model=KeyListResponse)
+async def list_api_keys(
+    request: Request,
+    client_id: Annotated[str, Depends(authenticate)],
+) -> KeyListResponse:
+    """List all API keys (masked - no secret data).
+
+    Requires authentication.
+    """
+    from gateway.errors import GatewayError, ErrorCode, ErrorCategory
+
+    km = get_key_manager(request)
+    if km is None:
+        raise GatewayError(
+            message="Database not configured - cannot manage keys",
+            code=ErrorCode.CONFIGURATION_ERROR,
+            category=ErrorCategory.INTERNAL,
+        )
+
+    keys = km.list_keys()
+
+    return KeyListResponse(
+        keys=[KeyInfo(**k) for k in keys],
+        total=len(keys),
+    )
+
+
+@router.delete("/api/keys/{key_id}")
+async def revoke_api_key(
+    request: Request,
+    key_id: int,
+    client_id: Annotated[str, Depends(authenticate)],
+) -> dict[str, Any]:
+    """Revoke an API key by ID.
+
+    Sets the key as inactive. It can no longer be used for authentication.
+
+    Requires authentication.
+    """
+    from gateway.errors import GatewayError, ErrorCode, ErrorCategory
+
+    km = get_key_manager(request)
+    if km is None:
+        raise GatewayError(
+            message="Database not configured - cannot manage keys",
+            code=ErrorCode.CONFIGURATION_ERROR,
+            category=ErrorCategory.INTERNAL,
+        )
+
+    revoked = km.revoke_key(key_id)
+
+    if not revoked:
+        raise GatewayError(
+            message=f"Key not found: {key_id}",
+            code=ErrorCode.NOT_FOUND,
+            category=ErrorCategory.VALIDATION,
+        )
+
+    return {"status": "success", "key_id": key_id, "revoked": True}

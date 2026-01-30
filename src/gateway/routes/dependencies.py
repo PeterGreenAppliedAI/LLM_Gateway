@@ -34,9 +34,13 @@ from gateway.errors import (
 from gateway.observability import get_logger, get_metrics, RequestContext
 from gateway.observability.logging import set_request_context, clear_request_context
 from gateway.policy import PolicyEnforcer, PolicyViolation
+from gateway.security import AsyncSecurityAnalyzer, Sanitizer
 from gateway.storage import AuditLogger
 
 logger = get_logger(__name__)
+
+# Shared sanitizer instance (thread-safe, stateless)
+_sanitizer = Sanitizer()
 
 
 # Security: Pattern for valid API keys (prevents injection)
@@ -103,17 +107,27 @@ def get_audit_logger(request: Request) -> Optional[AuditLogger]:
     return getattr(request.app.state, "audit_logger", None)
 
 
-def validate_api_key(api_key: str, config: GatewayConfig) -> tuple[str, str | None, str | None]:
+def validate_api_key(
+    api_key: str,
+    config: GatewayConfig,
+    db_engine=None,
+) -> tuple[str, str | None, str | None]:
     """Validate API key and return client_id, environment, and target_endpoint.
+
+    Checks two sources in order:
+    1. Config-backed keys (fast, constant-time comparison)
+    2. DB-backed keys (hash lookup, if db_engine provided)
 
     Security:
     - Validates key format to prevent injection
-    - Uses constant-time comparison to prevent timing attacks
+    - Uses constant-time comparison for config keys
+    - Uses SHA256 hash lookup for DB keys
     - Returns sanitized client_id
 
     Args:
         api_key: The API key to validate
         config: Gateway configuration
+        db_engine: Optional SQLAlchemy engine for DB key lookup
 
     Returns:
         Tuple of (client_id, environment, target_endpoint) associated with the key.
@@ -132,11 +146,19 @@ def validate_api_key(api_key: str, config: GatewayConfig) -> tuple[str, str | No
         # Auth disabled - return default client
         return "default", None, None
 
-    # Look up key in configured keys
+    # Source 1: Config-backed keys (constant-time comparison)
     for key_config in config.auth.api_keys:
         # Security: Constant-time comparison
         if secrets.compare_digest(api_key, key_config.key):
             return key_config.client_id, key_config.environment, key_config.target_endpoint
+
+    # Source 2: DB-backed keys (hash lookup)
+    if db_engine is not None:
+        from gateway.storage.keys import KeyManager
+        km = KeyManager(db_engine)
+        key_info = km.validate_plaintext_key(api_key)
+        if key_info is not None:
+            return key_info["client_id"], key_info.get("environment"), None
 
     raise InvalidApiKeyError()
 
@@ -237,8 +259,9 @@ async def authenticate_with_environment(
     if not api_key:
         return AuthResult("default", None, None)
 
-    # Validate key if provided
-    client_id, environment, target_endpoint = validate_api_key(api_key, config)
+    # Validate key if provided (pass db_engine for DB-backed key lookup)
+    db_engine = getattr(request.app.state, "db_engine", None)
+    client_id, environment, target_endpoint = validate_api_key(api_key, config, db_engine)
     return AuthResult(client_id, environment, target_endpoint)
 
 
@@ -367,3 +390,26 @@ def translate_policy_violation(e: PolicyViolation) -> None:
         )
     else:
         raise PolicyError(message=str(e))
+
+
+# =============================================================================
+# Security Dependencies
+# =============================================================================
+
+
+def get_sanitizer() -> Sanitizer:
+    """Get the shared sanitizer instance.
+
+    Returns a stateless Sanitizer for Unicode sanitization.
+    Zero-latency operation (~0ms overhead).
+    """
+    return _sanitizer
+
+
+def get_security_analyzer(request: Request) -> Optional[AsyncSecurityAnalyzer]:
+    """Get the security analyzer from app state.
+
+    Returns None if analyzer is not initialized.
+    Callers should handle None gracefully.
+    """
+    return getattr(request.app.state, "security_analyzer", None)

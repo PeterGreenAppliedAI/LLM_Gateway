@@ -41,6 +41,8 @@ Everything else becomes **applications on top of it**, not features inside it.
 - [x] Audit logging with performance metrics
 - [x] Health monitoring
 - [x] Dashboard (observability UI)
+- [x] Per-client endpoint routing (via API key `target_endpoint`)
+- [x] Security: Prompt injection defense (observe mode - sanitize, detect, alert)
 
 **Implicit/Hardcoded:**
 - Policy logic embedded in code
@@ -398,23 +400,35 @@ class HookPoint(str, Enum):
 
 ### Phase 7: Advanced Security
 
-**Prompt Injection Defense (Partially Complete):**
+**Prompt Injection Defense (Integrated):**
 
 | Layer | Status | Latency | Description |
 |-------|--------|---------|-------------|
-| Unicode sanitization | ✅ Done | ~0ms | Strip invisible chars |
-| Content wrapping | ✅ Done | ~0ms | Trust-level tags |
-| Pattern logging | ✅ Done | ~1ms | Detect & log (not block) |
-| Async analysis | ✅ Done | 0ms* | Background alerting |
+| Unicode sanitization | ✅ Integrated | ~0ms | Strip invisible chars on all routes |
+| Content wrapping | ✅ Done | ~0ms | Trust-level tags (available for use) |
+| Pattern logging | ✅ Integrated | ~1ms | Detect & log (not block) on all routes |
+| Async analysis | ✅ Integrated | 0ms* | Background alerting on all routes |
+| Dashboard alerts | ✅ Done | N/A | Security monitor in dashboard UI |
+| Security API | ✅ Done | N/A | `/api/security/alerts`, `/api/security/stats` |
+| Alert actions | ❌ Future | N/A | Block, webhook, rate limit, auto-ban |
 | Guard LLM | ❌ Future | +500ms | Semantic detection (opt-in) |
 | Fast classifier | ❌ Future | +10ms | Trained ML model |
 
 *Async doesn't block requests
 
+**Current Mode: Observe Only** - All requests are scanned in the background. Suspicious patterns generate alerts visible in the dashboard. No requests are blocked. This allows understanding normal vs. suspicious traffic before enabling enforcement.
+
 **Why Pattern Matching Alone Fails:**
 - Attackers rephrase: "ignore instructions" → "let's start fresh"
 - Use other languages, roleplay scenarios, encoding tricks
 - Useful for **logging**, not as primary defense
+
+**Future Alert Actions (When Ready):**
+- Block CRITICAL threats (configurable per-client or globally)
+- Webhook notifications (Slack/Discord/PagerDuty)
+- Rate limit clients with repeated alerts
+- Auto-ban repeat offenders (temporary block by client_id)
+- Quarantine mode (hold request for manual review)
 
 **Future Guard LLM (Opt-in per API key):**
 ```yaml

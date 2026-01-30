@@ -1,5 +1,6 @@
 """Configuration loading from YAML files."""
 
+import os
 import re
 from pathlib import Path
 from typing import Annotated, Any
@@ -78,7 +79,7 @@ class ProviderConfig(BaseModel):
     base_url: ProviderUrl
     enabled: bool = True
     timeout: float = Field(default=30.0, gt=0, le=300.0)  # Max 5 minutes
-    max_retries: int = Field(default=3, ge=0, le=10)  # Bounded retries
+    max_retries: int = Field(default=3, ge=0, le=10)  # TODO: Not yet used in dispatcher - reserved for retry+backoff implementation
     capabilities: list[str] = Field(default_factory=list, max_length=20)
     models: list[str] = Field(default_factory=list, max_length=100)
     default_model: str | None = None  # Default model for this provider
@@ -342,8 +343,36 @@ class ConfigLoader:
         self.config_path = Path(config_path)
         self.providers_path = Path(providers_path) if providers_path else None
 
+    @staticmethod
+    def _resolve_env_vars(data: Any) -> Any:
+        """Recursively resolve ${ENV_VAR} references in config values.
+
+        Supports:
+        - ${VAR} - required, raises if not set
+        - ${VAR:-default} - optional, uses default if not set
+        """
+        if isinstance(data, str):
+            import re
+            pattern = re.compile(r'\$\{([^}]+)\}')
+            def replacer(match: re.Match) -> str:
+                expr = match.group(1)
+                if ":-" in expr:
+                    var_name, default = expr.split(":-", 1)
+                    return os.environ.get(var_name, default)
+                else:
+                    value = os.environ.get(expr)
+                    if value is None:
+                        raise ValueError(f"Environment variable '{expr}' not set (referenced in config)")
+                    return value
+            return pattern.sub(replacer, data)
+        elif isinstance(data, dict):
+            return {k: ConfigLoader._resolve_env_vars(v) for k, v in data.items()}
+        elif isinstance(data, list):
+            return [ConfigLoader._resolve_env_vars(item) for item in data]
+        return data
+
     def _load_yaml(self, path: Path) -> dict[str, Any]:
-        """Load a YAML file."""
+        """Load a YAML file and resolve environment variable references."""
         if not path.exists():
             raise FileNotFoundError(f"Configuration file not found: {path}")
 
@@ -353,7 +382,7 @@ class ConfigLoader:
         if data is None:
             return {}
 
-        return data
+        return self._resolve_env_vars(data)
 
     def load(self) -> GatewayConfig:
         """Load and validate the gateway configuration."""
