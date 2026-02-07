@@ -1088,7 +1088,7 @@ async def create_api_key(
             category=ErrorCategory.INTERNAL,
         )
 
-    result = km.create_key(
+    result = await km.create_key(
         name=body.name,
         client_id=body.client_id,
         environment=body.environment,
@@ -1120,7 +1120,7 @@ async def list_api_keys(
             category=ErrorCategory.INTERNAL,
         )
 
-    keys = km.list_keys()
+    keys = await km.list_keys()
 
     return KeyListResponse(
         keys=[KeyInfo(**k) for k in keys],
@@ -1150,7 +1150,7 @@ async def revoke_api_key(
             category=ErrorCategory.INTERNAL,
         )
 
-    revoked = km.revoke_key(key_id)
+    revoked = await km.revoke_key(key_id)
 
     if not revoked:
         raise GatewayError(

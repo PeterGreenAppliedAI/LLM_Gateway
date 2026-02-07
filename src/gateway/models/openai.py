@@ -22,6 +22,7 @@ from gateway.models.internal import (
     Message,
     MessageRole,
     StreamChunk,
+    ToolCall,
 )
 
 
@@ -30,11 +31,26 @@ from gateway.models.internal import (
 # =============================================================================
 
 
+class OpenAIToolCallFunction(BaseModel):
+    """Function details in an OpenAI tool call."""
+    name: str
+    arguments: str  # JSON string of arguments
+
+
+class OpenAIToolCall(BaseModel):
+    """A tool call in OpenAI format."""
+    id: str
+    type: Literal["function"] = "function"
+    function: OpenAIToolCallFunction
+
+
 class OpenAIChatMessage(BaseModel):
     """OpenAI chat message format."""
     role: Literal["system", "user", "assistant", "tool"]
     content: str | None = None
     name: str | None = None
+    tool_calls: list[OpenAIToolCall] | None = None  # Assistant tool calls
+    tool_call_id: str | None = None  # For tool role responses
 
 
 class OpenAIChatRequest(BaseModel):
@@ -47,6 +63,10 @@ class OpenAIChatRequest(BaseModel):
     stop: str | list[str] | None = None
     stream: bool = False
     user: str | None = None
+    # Tool calling
+    tools: list[dict[str, Any]] | None = None
+    tool_choice: str | dict[str, Any] | None = None
+    parallel_tool_calls: bool | None = None
     # Extended fields
     response_format: dict[str, Any] | None = None
 
@@ -56,14 +76,32 @@ class OpenAIChatRequest(BaseModel):
         task: TaskType = TaskType.CHAT,
     ) -> InternalRequest:
         """Convert to internal request format."""
-        messages = [
-            Message(
-                role=MessageRole(msg.role),
-                content=msg.content or "",
-                name=msg.name,
-            )
-            for msg in self.messages
-        ]
+        import json as _json
+
+        messages = []
+        for msg in self.messages:
+            msg_kwargs: dict[str, Any] = {
+                "role": MessageRole(msg.role),
+                "content": msg.content,
+                "name": msg.name,
+            }
+            if msg.tool_calls:
+                msg_kwargs["tool_calls"] = [
+                    ToolCall(
+                        id=tc.id,
+                        type="function",
+                        function={
+                            "name": tc.function.name,
+                            "arguments": _json.loads(tc.function.arguments)
+                            if isinstance(tc.function.arguments, str)
+                            else tc.function.arguments,
+                        },
+                    )
+                    for tc in msg.tool_calls
+                ]
+            if msg.tool_call_id:
+                msg_kwargs["tool_call_id"] = msg.tool_call_id
+            messages.append(Message(**msg_kwargs))
 
         stop_sequences = None
         if self.stop:
@@ -80,6 +118,8 @@ class OpenAIChatRequest(BaseModel):
             top_p=self.top_p if self.top_p is not None else 1.0,
             stop=stop_sequences,
             stream=self.stream,
+            tools=self.tools,
+            tool_choice=self.tool_choice,
             response_format=self.response_format,
         )
 
@@ -110,11 +150,36 @@ class OpenAIChatResponse(BaseModel):
     @classmethod
     def from_internal(cls, response: InternalResponse) -> "OpenAIChatResponse":
         """Create from internal response format."""
+        import json as _json
+
         content = response.get_output_text()
+
+        # Convert internal tool_calls to OpenAI format
+        openai_tool_calls = None
+        if response.tool_calls:
+            openai_tool_calls = [
+                OpenAIToolCall(
+                    id=tc.id or f"call_{i}",
+                    type="function",
+                    function=OpenAIToolCallFunction(
+                        name=tc.function.get("name", ""),
+                        arguments=_json.dumps(tc.function.get("arguments", {}))
+                        if isinstance(tc.function.get("arguments"), dict)
+                        else str(tc.function.get("arguments", "{}")),
+                    ),
+                )
+                for i, tc in enumerate(response.tool_calls)
+            ]
+
+        msg = OpenAIChatMessage(
+            role="assistant",
+            content=content or None,
+            tool_calls=openai_tool_calls,
+        )
 
         choice = OpenAIChatChoice(
             index=0,
-            message=OpenAIChatMessage(role="assistant", content=content),
+            message=msg,
             finish_reason=_map_finish_reason(response.finish_reason),
         )
 

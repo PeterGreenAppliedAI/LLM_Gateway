@@ -12,34 +12,32 @@ Tests cover:
 
 import pytest
 from datetime import datetime, timedelta
-from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient
 
 from gateway.main import create_app
 from gateway.settings import Settings
-from gateway.storage import AuditLogger, DatabaseConfig, create_db_engine
+from gateway.storage import AuditLogger, DatabaseConfig, create_async_db_engine
 
 
 @pytest.fixture
-def db_engine(tmp_path):
-    """Create in-memory database for testing."""
+async def db_engine(tmp_path):
+    """Create file-based database for testing."""
     db_path = tmp_path / "test_dashboard.db"
     config = DatabaseConfig(url=f"sqlite:///{db_path}", create_tables=True)
-    engine = create_db_engine(config)
+    engine = await create_async_db_engine(config)
     yield engine
-    engine.dispose()
+    await engine.dispose()
 
 
 @pytest.fixture
 def audit_logger(db_engine):
     """Create AuditLogger instance."""
-    logger = AuditLogger(engine=db_engine)
-    yield logger
-    logger.close()
+    return AuditLogger(engine=db_engine)
 
 
 @pytest.fixture
-def test_client(db_engine, audit_logger):
-    """Create test client with configured audit logger."""
+async def test_client(db_engine, audit_logger):
+    """Create async test client with configured audit logger."""
     settings = Settings(debug=True)
     app = create_app(settings)
 
@@ -47,15 +45,18 @@ def test_client(db_engine, audit_logger):
     app.state.db_engine = db_engine
     app.state.audit_logger = audit_logger
 
-    return TestClient(app)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        yield client
 
 
 class TestStatsEndpoint:
     """Tests for GET /api/stats."""
 
-    def test_stats_empty(self, test_client):
+    @pytest.mark.asyncio
+    async def test_stats_empty(self, test_client):
         """Returns zero stats when no requests logged."""
-        response = test_client.get("/api/stats")
+        response = await test_client.get("/api/stats")
 
         assert response.status_code == 200
         data = response.json()
@@ -91,7 +92,7 @@ class TestStatsEndpoint:
             status="error",
         )
 
-        response = test_client.get("/api/stats")
+        response = await test_client.get("/api/stats")
 
         assert response.status_code == 200
         data = response.json()
@@ -100,9 +101,10 @@ class TestStatsEndpoint:
         assert data["error_count"] == 1
         assert data["total_tokens"] == 750  # 5 * 150
 
-    def test_stats_with_hours_filter(self, test_client):
+    @pytest.mark.asyncio
+    async def test_stats_with_hours_filter(self, test_client):
         """Respects hours parameter."""
-        response = test_client.get("/api/stats?hours=1")
+        response = await test_client.get("/api/stats?hours=1")
 
         assert response.status_code == 200
         data = response.json()
@@ -112,9 +114,10 @@ class TestStatsEndpoint:
 class TestRequestsListEndpoint:
     """Tests for GET /api/requests."""
 
-    def test_requests_empty(self, test_client):
+    @pytest.mark.asyncio
+    async def test_requests_empty(self, test_client):
         """Returns empty list when no requests."""
-        response = test_client.get("/api/requests")
+        response = await test_client.get("/api/requests")
 
         assert response.status_code == 200
         data = response.json()
@@ -135,7 +138,7 @@ class TestRequestsListEndpoint:
                 status="success",
             )
 
-        response = test_client.get("/api/requests")
+        response = await test_client.get("/api/requests")
 
         assert response.status_code == 200
         data = response.json()
@@ -154,7 +157,7 @@ class TestRequestsListEndpoint:
                 status="success",
             )
 
-        response = test_client.get("/api/requests?limit=5")
+        response = await test_client.get("/api/requests?limit=5")
 
         assert response.status_code == 200
         data = response.json()
@@ -181,7 +184,7 @@ class TestRequestsListEndpoint:
             status="error",
         )
 
-        response = test_client.get("/api/requests?filter_status=error")
+        response = await test_client.get("/api/requests?filter_status=error")
 
         assert response.status_code == 200
         data = response.json()
@@ -207,7 +210,7 @@ class TestRequestDetailEndpoint:
             completion_tokens=50,
         )
 
-        response = test_client.get("/api/requests/detail-test")
+        response = await test_client.get("/api/requests/detail-test")
 
         assert response.status_code == 200
         data = response.json()
@@ -217,9 +220,10 @@ class TestRequestDetailEndpoint:
         assert data["model"] == "phi4:14b"
         assert data["latency_ms"] == 123.45
 
-    def test_request_not_found(self, test_client):
+    @pytest.mark.asyncio
+    async def test_request_not_found(self, test_client):
         """Returns 404 for non-existent request."""
-        response = test_client.get("/api/requests/nonexistent")
+        response = await test_client.get("/api/requests/nonexistent")
 
         assert response.status_code == 404
 
@@ -227,9 +231,10 @@ class TestRequestDetailEndpoint:
 class TestModelsUsageEndpoint:
     """Tests for GET /api/models/usage."""
 
-    def test_models_usage_empty(self, test_client):
+    @pytest.mark.asyncio
+    async def test_models_usage_empty(self, test_client):
         """Returns empty list when no requests."""
-        response = test_client.get("/api/models/usage")
+        response = await test_client.get("/api/models/usage")
 
         assert response.status_code == 200
         data = response.json()
@@ -263,7 +268,7 @@ class TestModelsUsageEndpoint:
                 completion_tokens=25,
             )
 
-        response = test_client.get("/api/models/usage")
+        response = await test_client.get("/api/models/usage")
 
         assert response.status_code == 200
         data = response.json()
@@ -277,9 +282,10 @@ class TestModelsUsageEndpoint:
 class TestEndpointsUsageEndpoint:
     """Tests for GET /api/endpoints/usage."""
 
-    def test_endpoints_usage_empty(self, test_client):
+    @pytest.mark.asyncio
+    async def test_endpoints_usage_empty(self, test_client):
         """Returns empty list when no requests."""
-        response = test_client.get("/api/endpoints/usage")
+        response = await test_client.get("/api/endpoints/usage")
 
         assert response.status_code == 200
         data = response.json()
@@ -308,7 +314,7 @@ class TestEndpointsUsageEndpoint:
             status="success",
         )
 
-        response = test_client.get("/api/endpoints/usage")
+        response = await test_client.get("/api/endpoints/usage")
 
         assert response.status_code == 200
         data = response.json()
@@ -318,9 +324,10 @@ class TestEndpointsUsageEndpoint:
 class TestDailyUsageEndpoint:
     """Tests for GET /api/usage/daily."""
 
-    def test_daily_usage_empty(self, test_client):
+    @pytest.mark.asyncio
+    async def test_daily_usage_empty(self, test_client):
         """Returns empty list when no aggregated data."""
-        response = test_client.get("/api/usage/daily")
+        response = await test_client.get("/api/usage/daily")
 
         assert response.status_code == 200
         data = response.json()
@@ -333,21 +340,17 @@ class TestAggregationEndpoint:
     @pytest.mark.asyncio
     async def test_aggregate_yesterday(self, test_client, audit_logger):
         """Aggregates yesterday's data."""
-        # Log a request for yesterday
-        yesterday = datetime.utcnow() - timedelta(days=1)
-
-        # Note: We can't easily backdate requests without modifying the audit logger
-        # So this test just verifies the endpoint works
-        response = test_client.post("/api/usage/aggregate")
+        response = await test_client.post("/api/usage/aggregate")
 
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "success"
         assert "date" in data
 
-    def test_aggregate_invalid_date(self, test_client):
+    @pytest.mark.asyncio
+    async def test_aggregate_invalid_date(self, test_client):
         """Returns error for invalid date format."""
-        response = test_client.post("/api/usage/aggregate?date=invalid")
+        response = await test_client.post("/api/usage/aggregate?date=invalid")
 
         assert response.status_code == 200
         data = response.json()
@@ -376,24 +379,24 @@ class TestDashboardIntegration:
             )
 
         # 2. Check stats
-        stats = test_client.get("/api/stats").json()
+        stats = (await test_client.get("/api/stats")).json()
         assert stats["total_requests"] == 5
         assert stats["success_rate"] == 80.0  # 4/5
 
         # 3. List requests
-        requests = test_client.get("/api/requests").json()
+        requests = (await test_client.get("/api/requests")).json()
         assert len(requests["requests"]) == 5
 
         # 4. Get request detail
-        detail = test_client.get("/api/requests/workflow-0").json()
+        detail = (await test_client.get("/api/requests/workflow-0")).json()
         assert detail["status"] == "success"
 
         # 5. Check model usage
-        models = test_client.get("/api/models/usage").json()
+        models = (await test_client.get("/api/models/usage")).json()
         assert len(models["models"]) == 1
         assert models["models"][0]["model"] == "phi4:14b"
 
         # 6. Check endpoint usage
-        endpoints = test_client.get("/api/endpoints/usage").json()
+        endpoints = (await test_client.get("/api/endpoints/usage")).json()
         assert len(endpoints["endpoints"]) == 1
         assert endpoints["endpoints"][0]["endpoint"] == "gpunode-ollama"

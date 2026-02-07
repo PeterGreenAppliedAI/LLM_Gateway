@@ -7,17 +7,15 @@ Tests cover:
 - Schema compatibility
 """
 
-import asyncio
 import pytest
 from datetime import datetime, timedelta
-from unittest.mock import patch, MagicMock
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 
 from gateway.storage import (
     AuditLogger,
     DatabaseConfig,
-    create_db_engine,
+    create_async_db_engine,
     metadata,
     audit_log,
     usage_daily,
@@ -74,74 +72,78 @@ class TestDatabaseConfig:
 class TestDatabaseEngine:
     """Tests for database engine creation."""
 
-    def test_create_sqlite_engine(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_create_sqlite_engine(self, tmp_path):
         """Creates SQLite engine with correct settings."""
         db_path = tmp_path / "test.db"
         config = DatabaseConfig(
             url=f"sqlite:///{db_path}",
             create_tables=True,
         )
-        engine = create_db_engine(config)
+        engine = await create_async_db_engine(config)
 
         assert engine is not None
         assert "sqlite" in str(engine.url)
 
         # Tables should be created
-        with engine.connect() as conn:
-            result = conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))
-            tables = {row[0] for row in result}
+        async with engine.connect() as conn:
+            result = await conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))
+            tables = {row[0] for row in result.fetchall()}
             assert "audit_log" in tables
             assert "usage_daily" in tables
             assert "api_keys" in tables
 
-        engine.dispose()
+        await engine.dispose()
 
-    def test_create_inmemory_sqlite_engine(self):
+    @pytest.mark.asyncio
+    async def test_create_inmemory_sqlite_engine(self):
         """Creates in-memory SQLite engine."""
         config = DatabaseConfig(
             url="sqlite:///:memory:",
             create_tables=True,
         )
-        engine = create_db_engine(config)
+        engine = await create_async_db_engine(config)
 
         assert engine is not None
 
         # Should be able to query tables
-        with engine.connect() as conn:
-            result = conn.execute(text("SELECT COUNT(*) FROM audit_log"))
+        async with engine.connect() as conn:
+            result = await conn.execute(text("SELECT COUNT(*) FROM audit_log"))
             assert result.scalar() == 0
 
-        engine.dispose()
+        await engine.dispose()
 
-    def test_engine_without_table_creation(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_engine_without_table_creation(self, tmp_path):
         """Engine can skip table creation."""
         db_path = tmp_path / "empty.db"
         config = DatabaseConfig(
             url=f"sqlite:///{db_path}",
             create_tables=False,
         )
-        engine = create_db_engine(config, create_tables=False)
+        engine = await create_async_db_engine(config, create_tables=False)
 
         assert engine is not None
 
         # No tables should exist
-        with engine.connect() as conn:
-            result = conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))
-            tables = list(result)
+        async with engine.connect() as conn:
+            result = await conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))
+            tables = list(result.fetchall())
             assert len(tables) == 0
 
-        engine.dispose()
+        await engine.dispose()
 
 
 class TestTableStats:
     """Tests for get_table_stats function."""
 
-    def test_get_table_stats_empty(self):
+    @pytest.mark.asyncio
+    async def test_get_table_stats_empty(self):
         """Gets stats for empty tables."""
         config = DatabaseConfig(url="sqlite:///:memory:", create_tables=True)
-        engine = create_db_engine(config)
+        engine = await create_async_db_engine(config)
 
-        stats = get_table_stats(engine)
+        stats = await get_table_stats(engine)
 
         assert "audit_log" in stats
         # May have row_count or error depending on implementation
@@ -150,7 +152,7 @@ class TestTableStats:
         assert "usage_daily" in stats
         assert "api_keys" in stats
 
-        engine.dispose()
+        await engine.dispose()
 
 
 # =============================================================================
@@ -162,24 +164,21 @@ class TestAuditLogger:
     """Tests for AuditLogger class."""
 
     @pytest.fixture
-    def db_engine(self):
+    async def db_engine(self):
         """Create in-memory database for testing."""
         config = DatabaseConfig(url="sqlite:///:memory:", create_tables=True)
-        engine = create_db_engine(config)
+        engine = await create_async_db_engine(config)
         yield engine
-        engine.dispose()
+        await engine.dispose()
 
     @pytest.fixture
     def audit_logger(self, db_engine):
         """Create AuditLogger instance."""
-        logger = AuditLogger(
+        return AuditLogger(
             engine=db_engine,
             store_request_body=True,
             store_response_body=True,
-            max_workers=2,
         )
-        yield logger
-        logger.close()
 
     @pytest.mark.asyncio
     async def test_log_request_basic(self, audit_logger, db_engine):
@@ -196,8 +195,8 @@ class TestAuditLogger:
         )
 
         # Verify the record was inserted
-        with db_engine.connect() as conn:
-            result = conn.execute(
+        async with db_engine.connect() as conn:
+            result = await conn.execute(
                 text("SELECT * FROM audit_log WHERE request_id = 'req-001'")
             )
             row = result.fetchone()
@@ -238,8 +237,8 @@ class TestAuditLogger:
             response_body={"content": "Hi there!"},
         )
 
-        with db_engine.connect() as conn:
-            result = conn.execute(
+        async with db_engine.connect() as conn:
+            result = await conn.execute(
                 text("SELECT * FROM audit_log WHERE request_id = 'req-002'")
             )
             row = result.fetchone()
@@ -269,8 +268,8 @@ class TestAuditLogger:
             error_message="Connection timeout",
         )
 
-        with db_engine.connect() as conn:
-            result = conn.execute(
+        async with db_engine.connect() as conn:
+            result = await conn.execute(
                 text("SELECT * FROM audit_log WHERE request_id = 'req-error'")
             )
             row = result.fetchone()
@@ -294,8 +293,8 @@ class TestAuditLogger:
             error_message=long_error,
         )
 
-        with db_engine.connect() as conn:
-            result = conn.execute(
+        async with db_engine.connect() as conn:
+            result = await conn.execute(
                 text("SELECT error_message FROM audit_log WHERE request_id = 'req-long-error'")
             )
             row = result.fetchone()
@@ -305,13 +304,13 @@ class TestAuditLogger:
     @pytest.mark.asyncio
     async def test_log_request_privacy_disabled(self, db_engine):
         """Request body not stored when disabled."""
-        logger = AuditLogger(
+        audit = AuditLogger(
             engine=db_engine,
             store_request_body=False,
             store_response_body=False,
         )
 
-        await logger.log_request(
+        await audit.log_request(
             request_id="req-private",
             client_id="test-client",
             task="chat",
@@ -322,8 +321,8 @@ class TestAuditLogger:
             response_body={"content": "Response"},
         )
 
-        with db_engine.connect() as conn:
-            result = conn.execute(
+        async with db_engine.connect() as conn:
+            result = await conn.execute(
                 text("SELECT request_body, response_body FROM audit_log WHERE request_id = 'req-private'")
             )
             row = result.fetchone()
@@ -331,26 +330,22 @@ class TestAuditLogger:
         assert row.request_body is None
         assert row.response_body is None
 
-        logger.close()
-
 
 class TestAuditLoggerQueries:
     """Tests for AuditLogger query methods."""
 
     @pytest.fixture
-    def db_engine(self):
+    async def db_engine(self):
         """Create in-memory database for testing."""
         config = DatabaseConfig(url="sqlite:///:memory:", create_tables=True)
-        engine = create_db_engine(config)
+        engine = await create_async_db_engine(config)
         yield engine
-        engine.dispose()
+        await engine.dispose()
 
     @pytest.fixture
     def audit_logger(self, db_engine):
         """Create AuditLogger instance."""
-        logger = AuditLogger(engine=db_engine)
-        yield logger
-        logger.close()
+        return AuditLogger(engine=db_engine)
 
     @pytest.mark.asyncio
     async def test_get_recent_requests_empty(self, audit_logger):
@@ -433,19 +428,17 @@ class TestAuditLoggerStats:
     """Tests for AuditLogger stats methods."""
 
     @pytest.fixture
-    def db_engine(self):
+    async def db_engine(self):
         """Create in-memory database for testing."""
         config = DatabaseConfig(url="sqlite:///:memory:", create_tables=True)
-        engine = create_db_engine(config)
+        engine = await create_async_db_engine(config)
         yield engine
-        engine.dispose()
+        await engine.dispose()
 
     @pytest.fixture
     def audit_logger(self, db_engine):
         """Create AuditLogger instance."""
-        logger = AuditLogger(engine=db_engine)
-        yield logger
-        logger.close()
+        return AuditLogger(engine=db_engine)
 
     @pytest.mark.asyncio
     async def test_get_stats_empty(self, audit_logger):
@@ -651,16 +644,14 @@ class TestDatabaseIntegration:
     @pytest.mark.asyncio
     async def test_concurrent_logging(self, tmp_path):
         """Multiple concurrent log operations succeed."""
-        # Use file-based SQLite for concurrent write support
         db_path = tmp_path / "concurrent_test.db"
         config = DatabaseConfig(url=f"sqlite:///{db_path}", create_tables=True)
-        engine = create_db_engine(config)
-        logger = AuditLogger(engine=engine, max_workers=2)
+        engine = await create_async_db_engine(config)
+        audit = AuditLogger(engine=engine)
 
         # Log requests sequentially to avoid SQLite locking issues
-        # SQLite has limited concurrent write support
         for i in range(10):
-            await logger.log_request(
+            await audit.log_request(
                 request_id=f"concurrent-{i:03d}",
                 client_id="test-client",
                 task="chat",
@@ -670,24 +661,23 @@ class TestDatabaseIntegration:
             )
 
         # All should be logged
-        results = await logger.get_recent_requests(limit=100)
+        results = await audit.get_recent_requests(limit=100)
         assert len(results) == 10
 
-        logger.close()
-        engine.dispose()
+        await engine.dispose()
 
     @pytest.mark.asyncio
     async def test_database_error_handling(self):
         """Handles database errors gracefully."""
         config = DatabaseConfig(url="sqlite:///:memory:", create_tables=True)
-        engine = create_db_engine(config)
-        logger = AuditLogger(engine=engine)
+        engine = await create_async_db_engine(config)
+        audit = AuditLogger(engine=engine)
 
         # Close the engine to simulate database failure
-        engine.dispose()
+        await engine.dispose()
 
         # Should not raise, just log error
-        await logger.log_request(
+        await audit.log_request(
             request_id="should-fail",
             client_id="test-client",
             task="chat",
@@ -695,5 +685,3 @@ class TestDatabaseIntegration:
             endpoint="gpunode-ollama",
             status="success",
         )
-
-        logger.close()

@@ -1,14 +1,15 @@
 """Database engine creation and configuration.
 
 Supports SQLite (default) and PostgreSQL with appropriate connection pooling.
+Uses async SQLAlchemy for non-blocking database I/O.
 """
 
 from pathlib import Path
-from typing import Optional
 
 from pydantic import BaseModel, Field
-from sqlalchemy import create_engine, Engine, text
-from sqlalchemy.pool import QueuePool, NullPool, StaticPool
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.pool import NullPool, StaticPool
+from sqlalchemy import text
 
 from gateway.storage.schema import metadata
 
@@ -38,95 +39,85 @@ class DatabaseConfig(BaseModel):
     echo: bool = False
 
 
-def create_db_engine(
+def _translate_url_for_async(url: str) -> str:
+    """Translate a sync database URL to its async driver equivalent.
+
+    postgresql://  -> postgresql+asyncpg://
+    sqlite:///     -> sqlite+aiosqlite:///
+
+    Already-translated URLs pass through unchanged.
+    """
+    if url.startswith("postgresql://"):
+        return url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    if url.startswith("sqlite:///"):
+        return url.replace("sqlite:///", "sqlite+aiosqlite:///", 1)
+    return url
+
+
+async def create_async_db_engine(
     config: DatabaseConfig,
     create_tables: bool = True,
-) -> Engine:
-    """Create database engine with appropriate pooling.
+) -> AsyncEngine:
+    """Create async database engine with appropriate pooling.
 
     Args:
         config: Database configuration
         create_tables: Whether to create tables if they don't exist
 
     Returns:
-        SQLAlchemy Engine instance
+        SQLAlchemy AsyncEngine instance
     """
-    url = config.url
+    url = _translate_url_for_async(config.url)
 
-    # Determine database type and configure accordingly
-    if url.startswith("sqlite"):
+    if config.url.startswith("sqlite"):
         engine = _create_sqlite_engine(url, config)
-    elif url.startswith("postgresql"):
+    elif config.url.startswith("postgresql"):
         engine = _create_postgresql_engine(url, config)
-    elif url.startswith("mysql"):
-        engine = _create_mysql_engine(url, config)
     else:
-        # Generic fallback
-        engine = create_engine(url, echo=config.echo)
+        engine = create_async_engine(url, echo=config.echo)
 
     # Create tables if requested
     if create_tables and config.create_tables:
-        _ensure_tables(engine)
+        async with engine.begin() as conn:
+            await conn.run_sync(metadata.create_all)
+
+    # Enable WAL mode for file-based SQLite
+    if config.url.startswith("sqlite") and ":memory:" not in config.url:
+        async with engine.connect() as conn:
+            await conn.execute(text("PRAGMA journal_mode=WAL"))
+            await conn.commit()
 
     return engine
 
 
-def _create_sqlite_engine(url: str, config: DatabaseConfig) -> Engine:
-    """Create SQLite engine.
-
-    SQLite specifics:
-    - No connection pooling (use StaticPool for in-memory, NullPool for file)
-    - check_same_thread=False for async compatibility
-    - Ensure data directory exists
-    """
-    # Extract path from URL and ensure directory exists
-    if ":///" in url and not url.endswith(":memory:"):
-        # File-based SQLite
-        db_path = url.split(":///", 1)[1]
+def _create_sqlite_engine(url: str, config: DatabaseConfig) -> AsyncEngine:
+    """Create async SQLite engine."""
+    # Extract path from original URL and ensure directory exists
+    orig_url = config.url
+    if ":///" in orig_url and not orig_url.endswith(":memory:"):
+        db_path = orig_url.split(":///", 1)[1]
         if db_path.startswith("./"):
             db_path = db_path[2:]
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
 
-        engine = create_engine(
+        return create_async_engine(
             url,
-            connect_args={"check_same_thread": False},
-            poolclass=NullPool,  # SQLite doesn't benefit from pooling
+            poolclass=NullPool,
             echo=config.echo,
         )
-        # Enable WAL mode for better concurrent read/write performance
-        with engine.connect() as conn:
-            conn.execute(text("PRAGMA journal_mode=WAL"))
-            conn.commit()
-        return engine
     else:
         # In-memory SQLite (for testing)
-        return create_engine(
+        return create_async_engine(
             url,
-            connect_args={"check_same_thread": False},
-            poolclass=StaticPool,  # Share single connection for in-memory
+            poolclass=StaticPool,
             echo=config.echo,
         )
 
 
-def _create_postgresql_engine(url: str, config: DatabaseConfig) -> Engine:
-    """Create PostgreSQL engine with connection pooling."""
-    return create_engine(
+def _create_postgresql_engine(url: str, config: DatabaseConfig) -> AsyncEngine:
+    """Create async PostgreSQL engine with connection pooling."""
+    return create_async_engine(
         url,
-        poolclass=QueuePool,
-        pool_size=config.pool_size,
-        max_overflow=config.max_overflow,
-        pool_timeout=config.pool_timeout,
-        pool_recycle=config.pool_recycle,
-        pool_pre_ping=True,  # Verify connections before use
-        echo=config.echo,
-    )
-
-
-def _create_mysql_engine(url: str, config: DatabaseConfig) -> Engine:
-    """Create MySQL engine with connection pooling."""
-    return create_engine(
-        url,
-        poolclass=QueuePool,
         pool_size=config.pool_size,
         max_overflow=config.max_overflow,
         pool_timeout=config.pool_timeout,
@@ -136,26 +127,17 @@ def _create_mysql_engine(url: str, config: DatabaseConfig) -> Engine:
     )
 
 
-def _ensure_tables(engine: Engine) -> None:
-    """Create tables if they don't exist.
-
-    Uses SQLAlchemy's create_all which is idempotent.
-    """
-    metadata.create_all(engine)
-
-
-def get_table_stats(engine: Engine) -> dict:
+async def get_table_stats(engine: AsyncEngine) -> dict:
     """Get basic statistics about database tables.
 
     Useful for health checks and debugging.
     """
     stats = {}
 
-    with engine.connect() as conn:
-        # Get row counts for each table
+    async with engine.connect() as conn:
         for table in metadata.tables.values():
             try:
-                result = conn.execute(table.count())
+                result = await conn.execute(table.count())
                 stats[table.name] = {"row_count": result.scalar() or 0}
             except Exception as e:
                 stats[table.name] = {"error": str(e)}

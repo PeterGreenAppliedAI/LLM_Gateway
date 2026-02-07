@@ -27,6 +27,7 @@ from gateway.models.internal import (
     Message,
     MessageRole,
     StreamChunk,
+    ToolCall,
 )
 from gateway.providers.base import ProviderAdapter
 
@@ -238,6 +239,9 @@ class OllamaAdapter(ProviderAdapter):
 
                     message = chunk_data.get("message", {})
                     content = message.get("content", "")
+                    # Reasoning models (e.g., Nemotron) stream thinking tokens
+                    # in a separate field before the content phase
+                    thinking = message.get("thinking", "")
                     done = chunk_data.get("done", False)
 
                     finish_reason = None
@@ -257,6 +261,7 @@ class OllamaAdapter(ProviderAdapter):
                         request_id=request.request_id,
                         index=index,
                         delta=content,
+                        thinking=thinking or None,
                         finish_reason=finish_reason,
                         usage=usage,
                     )
@@ -307,7 +312,7 @@ class OllamaAdapter(ProviderAdapter):
         return [
             "Local inference only",
             "Model must be pulled before use",
-            "No native function calling (model-dependent)",
+            "Tool calling support is model-dependent",
         ]
 
     # =========================================================================
@@ -319,12 +324,19 @@ class OllamaAdapter(ProviderAdapter):
         messages = []
         if request.messages:
             for msg in request.messages:
-                messages.append({
+                m: dict[str, Any] = {
                     "role": msg.role.value,
-                    "content": msg.content,
-                })
+                    "content": msg.content or "",
+                }
+                # Include tool_calls for assistant messages
+                if msg.tool_calls:
+                    m["tool_calls"] = [
+                        {"function": tc.function}
+                        for tc in msg.tool_calls
+                    ]
+                messages.append(m)
 
-        return {
+        result: dict[str, Any] = {
             "model": request.model or "llama3.2",
             "messages": messages,
             "stream": False,
@@ -334,6 +346,11 @@ class OllamaAdapter(ProviderAdapter):
                 "top_p": request.top_p,
             },
         }
+
+        if request.tools:
+            result["tools"] = request.tools
+
+        return result
 
     def _build_generate_request(self, request: InternalRequest) -> dict[str, Any]:
         """Build Ollama /api/generate request body."""
@@ -355,19 +372,38 @@ class OllamaAdapter(ProviderAdapter):
         message = data.get("message", {})
         content = message.get("content", "")
 
+        # Parse tool calls from response
+        tool_calls = None
+        raw_tool_calls = message.get("tool_calls")
+        if raw_tool_calls:
+            tool_calls = [
+                ToolCall(
+                    type="function",
+                    function=tc.get("function", {}),
+                )
+                for tc in raw_tool_calls
+            ]
+
+        # Determine finish reason
+        finish_reason = FinishReason.STOP if data.get("done") else FinishReason.LENGTH
+        if tool_calls:
+            finish_reason = FinishReason.TOOL_CALLS
+
+        assistant_msg = Message(
+            role=MessageRole.ASSISTANT,
+            content=content or None,
+            tool_calls=tool_calls,
+        )
+
         return InternalResponse(
             request_id=request.request_id,
             task=request.task,
             provider=self.name,
             model=data.get("model", request.model or "unknown"),
             content=content,
-            messages=[
-                Message(
-                    role=MessageRole.ASSISTANT,
-                    content=content,
-                )
-            ],
-            finish_reason=FinishReason.STOP if data.get("done") else FinishReason.LENGTH,
+            messages=[assistant_msg],
+            tool_calls=tool_calls,
+            finish_reason=finish_reason,
             usage=UsageStats(
                 prompt_tokens=data.get("prompt_eval_count", 0),
                 completion_tokens=data.get("eval_count", 0),

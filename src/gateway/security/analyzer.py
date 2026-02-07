@@ -56,6 +56,7 @@ class AnalysisRequest:
     client_id: str
     model: str
     messages: list[dict]
+    task: Optional[str] = None
     response_content: Optional[str] = None
     timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
@@ -117,6 +118,9 @@ class AsyncSecurityAnalyzer:
         """
         self.sanitizer = sanitizer or Sanitizer()
         self.detector = detector or InjectionDetector()
+        # Detector for embeddings: skip delimiter attacks to avoid false positives
+        # from model vocabulary tokens like [SYSTEM], [INST] etc.
+        self._embedding_detector = InjectionDetector(check_delimiter_attacks=False)
         self.max_queue_size = max_queue_size
         self.max_alerts = max_alerts
         self.alert_callback = alert_callback
@@ -160,6 +164,7 @@ class AsyncSecurityAnalyzer:
         client_id: str,
         model: str,
         messages: list[dict],
+        task: Optional[str] = None,
         response_content: Optional[str] = None,
     ) -> bool:
         """Queue a request for background analysis.
@@ -169,6 +174,7 @@ class AsyncSecurityAnalyzer:
             client_id: Client/API key identifier
             model: Model being used
             messages: Request messages
+            task: Task type (chat, completion, embeddings)
             response_content: Optional response content to analyze
 
         Returns:
@@ -179,6 +185,7 @@ class AsyncSecurityAnalyzer:
             client_id=client_id,
             model=model,
             messages=messages,
+            task=task,
             response_content=response_content,
         )
 
@@ -272,7 +279,10 @@ class AsyncSecurityAnalyzer:
             ))
 
         # Run injection pattern scan
-        injection_scan = self.detector.scan_messages(request.messages)
+        # Use embedding-specific detector (no delimiter attack patterns) for embedding
+        # tasks to avoid false positives from model vocabulary tokens like [SYSTEM]
+        detector = self._embedding_detector if request.task == "embeddings" else self.detector
+        injection_scan = detector.scan_messages(request.messages)
 
         # Generate alerts based on threat level
         if injection_scan.threat_level == ThreatLevel.CRITICAL:

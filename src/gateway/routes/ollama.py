@@ -31,6 +31,8 @@ from gateway.models.ollama import (
     OllamaMessage,
     OllamaTagsResponse,
     OllamaModelInfo,
+    OllamaToolCall,
+    OllamaToolCallFunction,
 )
 from gateway.observability import get_logger
 from gateway.routes.dependencies import (
@@ -85,11 +87,16 @@ async def ollama_chat(
     # Security: Sanitize message content
     sanitized_messages = []
     for m in body.messages:
+        msg_dict: dict = {"role": m.role, "content": m.content or ""}
         if m.content:
             result = sanitizer.sanitize(m.content)
-            sanitized_messages.append({"role": m.role, "content": result.sanitized})
-        else:
-            sanitized_messages.append({"role": m.role, "content": m.content or ""})
+            msg_dict["content"] = result.sanitized
+        if m.tool_calls:
+            msg_dict["tool_calls"] = [
+                {"function": tc.function.model_dump()}
+                for tc in m.tool_calls
+            ]
+        sanitized_messages.append(msg_dict)
 
     # Queue for async security analysis
     if security_analyzer:
@@ -101,10 +108,16 @@ async def ollama_chat(
         )
 
     # Convert Ollama messages to internal format (using sanitized content)
-    messages = [
-        Message(role=m["role"], content=m["content"])
-        for m in sanitized_messages
-    ]
+    from gateway.models.internal import ToolCall
+    messages = []
+    for m in sanitized_messages:
+        msg_kwargs: dict = {"role": m["role"], "content": m["content"]}
+        if m.get("tool_calls"):
+            msg_kwargs["tool_calls"] = [
+                ToolCall(type="function", function=tc["function"])
+                for tc in m["tool_calls"]
+            ]
+        messages.append(Message(**msg_kwargs))
 
     # Extract options - only include if actually set
     options = body.options or {}
@@ -116,6 +129,10 @@ async def ollama_chat(
         "client_id": client_id,
         "stream": body.stream,
     }
+
+    # Pass through tool definitions
+    if body.tools:
+        request_kwargs["tools"] = body.tools
 
     # Apply per-client target endpoint if configured
     if auth.target_endpoint:
@@ -158,13 +175,26 @@ async def ollama_chat(
             completion_tokens=result.response.usage.completion_tokens,
         )
 
-    # Convert to Ollama format
+    # Convert to Ollama format - include tool_calls if present
+    ollama_tool_calls = None
+    if result.response.tool_calls:
+        ollama_tool_calls = [
+            OllamaToolCall(
+                function=OllamaToolCallFunction(
+                    name=tc.function.get("name", ""),
+                    arguments=tc.function.get("arguments", {}),
+                )
+            )
+            for tc in result.response.tool_calls
+        ]
+
     return OllamaChatResponse(
         model=result.response.model,
         created_at=_now_iso(),
         message=OllamaMessage(
             role="assistant",
-            content=result.response.content,
+            content=result.response.content or "",
+            tool_calls=ollama_tool_calls,
         ),
         done=True,
         prompt_eval_count=result.response.usage.prompt_tokens,
@@ -197,10 +227,11 @@ async def _stream_ollama_chat(
                     message=OllamaMessage(
                         role="assistant",
                         content=chunk.delta or "",
+                        thinking=chunk.thinking,
                     ),
                     done=chunk.finish_reason is not None,
                 )
-                yield json.dumps(response.model_dump()) + "\n"
+                yield json.dumps(response.model_dump(exclude_none=True)) + "\n"
 
                 if chunk.finish_reason:
                     # Send final done message
@@ -473,6 +504,7 @@ async def ollama_embeddings(
             client_id=client_id,
             model=body.model,
             messages=[{"role": "user", "content": "\n".join(sanitized_prompts)}],
+            task="embeddings",
         )
 
     request_kwargs = {

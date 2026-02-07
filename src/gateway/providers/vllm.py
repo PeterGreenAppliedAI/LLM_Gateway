@@ -27,6 +27,7 @@ from gateway.models.internal import (
     Message,
     MessageRole,
     StreamChunk,
+    ToolCall,
 )
 from gateway.providers.base import ProviderAdapter
 
@@ -270,15 +271,34 @@ class VLLMAdapter(ProviderAdapter):
 
     def _build_chat_request(self, request: InternalRequest) -> dict[str, Any]:
         """Build OpenAI-compatible chat request body."""
+        import json
+
         messages = []
         if request.messages:
             for msg in request.messages:
-                messages.append({
+                m: dict[str, Any] = {
                     "role": msg.role.value,
                     "content": msg.content,
-                })
+                }
+                if msg.tool_calls:
+                    m["tool_calls"] = [
+                        {
+                            "id": tc.id or f"call_{i}",
+                            "type": "function",
+                            "function": {
+                                "name": tc.function.get("name", ""),
+                                "arguments": json.dumps(tc.function.get("arguments", {}))
+                                if isinstance(tc.function.get("arguments"), dict)
+                                else str(tc.function.get("arguments", "{}")),
+                            },
+                        }
+                        for i, tc in enumerate(msg.tool_calls)
+                    ]
+                if msg.tool_call_id:
+                    m["tool_call_id"] = msg.tool_call_id
+                messages.append(m)
 
-        return {
+        req: dict[str, Any] = {
             "model": request.model or "default",
             "messages": messages,
             "max_tokens": request.max_tokens,
@@ -287,13 +307,23 @@ class VLLMAdapter(ProviderAdapter):
             "stream": False,
         }
 
+        if request.tools:
+            req["tools"] = request.tools
+        if request.tool_choice is not None:
+            req["tool_choice"] = request.tool_choice
+
+        return req
+
     def _parse_chat_response(
         self, request: InternalRequest, data: dict[str, Any], latency_ms: float
     ) -> InternalResponse:
         """Parse OpenAI-compatible chat response."""
+        import json
+
         choices = data.get("choices", [])
         content = ""
         finish_reason = FinishReason.STOP
+        tool_calls = None
 
         if choices:
             choice = choices[0]
@@ -302,8 +332,37 @@ class VLLMAdapter(ProviderAdapter):
             finish = choice.get("finish_reason", "stop")
             if finish == "length":
                 finish_reason = FinishReason.LENGTH
+            elif finish == "tool_calls":
+                finish_reason = FinishReason.TOOL_CALLS
+
+            # Parse tool calls
+            raw_tool_calls = message.get("tool_calls")
+            if raw_tool_calls:
+                tool_calls = []
+                for tc in raw_tool_calls:
+                    func = tc.get("function", {})
+                    arguments = func.get("arguments", "{}")
+                    if isinstance(arguments, str):
+                        try:
+                            arguments = json.loads(arguments)
+                        except json.JSONDecodeError:
+                            arguments = {"raw": arguments}
+                    tool_calls.append(ToolCall(
+                        id=tc.get("id"),
+                        type="function",
+                        function={
+                            "name": func.get("name", ""),
+                            "arguments": arguments,
+                        },
+                    ))
 
         usage_data = data.get("usage", {})
+
+        assistant_msg = Message(
+            role=MessageRole.ASSISTANT,
+            content=content or None,
+            tool_calls=tool_calls,
+        )
 
         return InternalResponse(
             request_id=request.request_id,
@@ -311,12 +370,8 @@ class VLLMAdapter(ProviderAdapter):
             provider=self.name,
             model=data.get("model", request.model or "unknown"),
             content=content,
-            messages=[
-                Message(
-                    role=MessageRole.ASSISTANT,
-                    content=content,
-                )
-            ],
+            messages=[assistant_msg],
+            tool_calls=tool_calls,
             finish_reason=finish_reason,
             usage=UsageStats(
                 prompt_tokens=usage_data.get("prompt_tokens", 0),

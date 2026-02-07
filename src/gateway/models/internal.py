@@ -70,11 +70,20 @@ class MessageRole(str, Enum):
     TOOL = "tool"
 
 
+class ToolCall(BaseModel):
+    """A tool call requested by the model."""
+    id: str | None = None
+    type: str = "function"
+    function: dict[str, Any] = Field(default_factory=dict)  # {"name": ..., "arguments": ...}
+
+
 class Message(BaseModel):
     """A single message in a conversation."""
     role: MessageRole
-    content: BoundedContent  # Length-limited for security
+    content: BoundedContent | None = None  # Length-limited for security; None when tool_calls present
     name: str | None = Field(default=None, max_length=64)  # Bounded name
+    tool_calls: list[ToolCall] | None = None  # Tool calls from assistant
+    tool_call_id: str | None = None  # For tool role: which call this responds to
 
 
 class InternalRequest(BaseModel):
@@ -124,6 +133,10 @@ class InternalRequest(BaseModel):
     fallback_allowed: bool = True
     environment: str | None = Field(default=None, max_length=64)  # dev, prod, etc.
 
+    # Tool calling
+    tools: list[dict[str, Any]] | None = None  # Tool definitions (OpenAI/Ollama format)
+    tool_choice: str | dict[str, Any] | None = None  # "auto", "none", "required", or specific tool
+
     # Advanced options
     response_format: dict[str, Any] | None = None  # JSON schema for structured output
     metadata: dict[str, Any] = Field(default_factory=dict)  # Pass-through metadata
@@ -136,7 +149,7 @@ class InternalRequest(BaseModel):
             return self.input_text
         if self.messages:
             # Concatenate message contents for text-based operations
-            return "\n".join(m.content for m in self.messages if m.content)
+            return "\n".join(m.content for m in self.messages if m.content is not None)
         if self.input_data:
             return "\n".join(self.input_data)
         return ""
@@ -172,6 +185,7 @@ class InternalResponse(BaseModel):
     messages: list[Message] | None = None  # For chat responses
     embeddings: list[list[float]] | None = None  # For embedding responses
     data: dict[str, Any] | None = None  # For structured outputs (extract, classify)
+    tool_calls: list[ToolCall] | None = None  # Tool calls from model
 
     # Generation metadata
     finish_reason: FinishReason = FinishReason.STOP
@@ -206,5 +220,6 @@ class StreamChunk(BaseModel):
     request_id: str
     index: int = 0
     delta: str  # Incremental content
+    thinking: str | None = None  # Reasoning model thinking tokens
     finish_reason: FinishReason | None = None
     usage: UsageStats | None = None  # Only in final chunk

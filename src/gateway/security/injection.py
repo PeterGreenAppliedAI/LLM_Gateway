@@ -82,9 +82,9 @@ class InjectionDetector:
 
     # Instruction override patterns
     INSTRUCTION_OVERRIDE = [
-        (r"ignore\s+(all\s+)?(previous|prior|above|earlier)\s+(instructions?|prompts?|rules?|guidelines?)",
+        (r"ignore\s+(all\s+)?(the\s+)?(previous|prior|above|earlier)\s+(instructions?|prompts?|rules?|guidelines?)",
          ThreatLevel.HIGH, "ignore_previous"),
-        (r"disregard\s+(all\s+)?(previous|prior|above|earlier)",
+        (r"disregard\s+(all\s+)?(the\s+)?(previous|prior|above|earlier)",
          ThreatLevel.HIGH, "disregard_previous"),
         (r"forget\s+(everything|all|what)\s+(you|i|we)\s+(said|told|know)",
          ThreatLevel.HIGH, "forget_context"),

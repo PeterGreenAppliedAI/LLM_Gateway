@@ -13,11 +13,24 @@ from pydantic import BaseModel, Field
 # =============================================================================
 
 
+class OllamaToolCallFunction(BaseModel):
+    """Function details within an Ollama tool call."""
+    name: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+class OllamaToolCall(BaseModel):
+    """A tool call in Ollama format."""
+    function: OllamaToolCallFunction
+
+
 class OllamaMessage(BaseModel):
     """A single message in Ollama chat format."""
     role: str
-    content: str
+    content: str = ""
     images: list[str] | None = None
+    tool_calls: list[OllamaToolCall] | None = None
+    thinking: str | None = None  # Reasoning model thinking tokens
 
 
 class OllamaChatRequest(BaseModel):
@@ -28,6 +41,7 @@ class OllamaChatRequest(BaseModel):
     format: str | None = None
     options: dict[str, Any] | None = None
     keep_alive: str | None = None
+    tools: list[dict[str, Any]] | None = None
 
 
 class OllamaGenerateRequest(BaseModel):

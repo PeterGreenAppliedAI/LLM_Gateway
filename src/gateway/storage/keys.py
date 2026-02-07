@@ -2,6 +2,7 @@
 
 Keys are generated with a 'gw-' prefix and stored as SHA256 hashes.
 The plaintext key is only returned once at creation time.
+Uses async SQLAlchemy for non-blocking database I/O.
 """
 
 import hashlib
@@ -9,7 +10,8 @@ import secrets
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Engine, select, update
+from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from gateway.storage.schema import api_keys
 
@@ -32,10 +34,10 @@ class KeyManager:
     once at creation time and never stored or logged.
     """
 
-    def __init__(self, engine: Engine):
+    def __init__(self, engine: AsyncEngine):
         self._engine = engine
 
-    def create_key(
+    async def create_key(
         self,
         name: str,
         client_id: str,
@@ -56,8 +58,8 @@ class KeyManager:
 
         now = datetime.utcnow()
 
-        with self._engine.connect() as conn:
-            result = conn.execute(
+        async with self._engine.connect() as conn:
+            result = await conn.execute(
                 api_keys.insert().values(
                     key_hash=key_hash,
                     key_prefix=key_prefix,
@@ -72,7 +74,7 @@ class KeyManager:
                     is_active=True,
                 )
             )
-            conn.commit()
+            await conn.commit()
             key_id = result.inserted_primary_key[0]
 
         return {
@@ -84,13 +86,13 @@ class KeyManager:
             "created_at": now.isoformat(),
         }
 
-    def list_keys(self) -> list[dict]:
+    async def list_keys(self) -> list[dict]:
         """List all API keys (without hashes).
 
         Returns prefix, metadata, and status for each key.
         """
-        with self._engine.connect() as conn:
-            rows = conn.execute(
+        async with self._engine.connect() as conn:
+            rows = (await conn.execute(
                 select(
                     api_keys.c.id,
                     api_keys.c.key_prefix,
@@ -105,7 +107,7 @@ class KeyManager:
                     api_keys.c.rate_limit_rpm,
                     api_keys.c.description,
                 ).order_by(api_keys.c.created_at.desc())
-            ).fetchall()
+            )).fetchall()
 
         return [
             {
@@ -125,27 +127,27 @@ class KeyManager:
             for row in rows
         ]
 
-    def revoke_key(self, key_id: int) -> bool:
+    async def revoke_key(self, key_id: int) -> bool:
         """Revoke a key by setting is_active=False.
 
         Returns True if the key was found and revoked.
         """
-        with self._engine.connect() as conn:
-            result = conn.execute(
+        async with self._engine.connect() as conn:
+            result = await conn.execute(
                 update(api_keys)
                 .where(api_keys.c.id == key_id)
                 .values(is_active=False)
             )
-            conn.commit()
+            await conn.commit()
             return result.rowcount > 0
 
-    def get_key_by_hash(self, key_hash: str) -> Optional[dict]:
+    async def get_key_by_hash(self, key_hash: str) -> Optional[dict]:
         """Look up an active key by its hash.
 
         Returns key metadata if found and active, None otherwise.
         """
-        with self._engine.connect() as conn:
-            row = conn.execute(
+        async with self._engine.connect() as conn:
+            row = (await conn.execute(
                 select(
                     api_keys.c.id,
                     api_keys.c.client_id,
@@ -158,18 +160,18 @@ class KeyManager:
                     api_keys.c.key_hash == key_hash,
                     api_keys.c.is_active == True,  # noqa: E712
                 )
-            ).fetchone()
+            )).fetchone()
 
             if row is None:
                 return None
 
             # Update last_used_at
-            conn.execute(
+            await conn.execute(
                 update(api_keys)
                 .where(api_keys.c.id == row.id)
                 .values(last_used_at=datetime.utcnow())
             )
-            conn.commit()
+            await conn.commit()
 
             return {
                 "id": row.id,
@@ -180,10 +182,10 @@ class KeyManager:
                 "rate_limit_rpm": row.rate_limit_rpm,
             }
 
-    def validate_plaintext_key(self, plaintext: str) -> Optional[dict]:
+    async def validate_plaintext_key(self, plaintext: str) -> Optional[dict]:
         """Validate a plaintext API key by hashing and looking up.
 
         Returns key metadata if valid, None otherwise.
         """
         key_hash = _hash_key(plaintext)
-        return self.get_key_by_hash(key_hash)
+        return await self.get_key_by_hash(key_hash)

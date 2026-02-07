@@ -34,6 +34,7 @@ from gateway.models.internal import (
     Message,
     MessageRole,
     StreamChunk,
+    ToolCall,
 )
 from gateway.providers.base import ProviderAdapter
 
@@ -390,12 +391,31 @@ class OpenAIAdapter(ProviderAdapter):
         messages = []
         if request.messages:
             for msg in request.messages:
-                messages.append({
+                m: dict[str, Any] = {
                     "role": msg.role.value,
                     "content": msg.content,
-                })
+                }
+                # Include tool_calls for assistant messages (serialize arguments to JSON string)
+                if msg.tool_calls:
+                    m["tool_calls"] = [
+                        {
+                            "id": tc.id or f"call_{i}",
+                            "type": "function",
+                            "function": {
+                                "name": tc.function.get("name", ""),
+                                "arguments": json.dumps(tc.function.get("arguments", {}))
+                                if isinstance(tc.function.get("arguments"), dict)
+                                else str(tc.function.get("arguments", "{}")),
+                            },
+                        }
+                        for i, tc in enumerate(msg.tool_calls)
+                    ]
+                # Include tool_call_id for tool role messages
+                if msg.tool_call_id:
+                    m["tool_call_id"] = msg.tool_call_id
+                messages.append(m)
 
-        req = {
+        req: dict[str, Any] = {
             "model": request.model or "gpt-3.5-turbo",
             "messages": messages,
             "max_tokens": request.max_tokens,
@@ -403,6 +423,12 @@ class OpenAIAdapter(ProviderAdapter):
             "top_p": request.top_p,
             "stream": False,
         }
+
+        # Add tool definitions if provided
+        if request.tools:
+            req["tools"] = request.tools
+        if request.tool_choice is not None:
+            req["tool_choice"] = request.tool_choice
 
         # Add stop sequences if provided
         if request.stop:
@@ -439,7 +465,36 @@ class OpenAIAdapter(ProviderAdapter):
         content = message.get("content", "")
         finish_reason_str = choice.get("finish_reason", "stop")
 
+        # Parse tool calls from response
+        tool_calls = None
+        raw_tool_calls = message.get("tool_calls")
+        if raw_tool_calls:
+            tool_calls = []
+            for tc in raw_tool_calls:
+                func = tc.get("function", {})
+                # OpenAI returns arguments as JSON string; parse to dict
+                arguments = func.get("arguments", "{}")
+                if isinstance(arguments, str):
+                    try:
+                        arguments = json.loads(arguments)
+                    except json.JSONDecodeError:
+                        arguments = {"raw": arguments}
+                tool_calls.append(ToolCall(
+                    id=tc.get("id"),
+                    type="function",
+                    function={
+                        "name": func.get("name", ""),
+                        "arguments": arguments,
+                    },
+                ))
+
         usage_data = data.get("usage", {})
+
+        assistant_msg = Message(
+            role=MessageRole.ASSISTANT,
+            content=content or None,
+            tool_calls=tool_calls,
+        )
 
         return InternalResponse(
             request_id=request.request_id,
@@ -447,12 +502,8 @@ class OpenAIAdapter(ProviderAdapter):
             provider=self.name,
             model=data.get("model", request.model or "unknown"),
             content=content,
-            messages=[
-                Message(
-                    role=MessageRole.ASSISTANT,
-                    content=content,
-                )
-            ],
+            messages=[assistant_msg],
+            tool_calls=tool_calls,
             finish_reason=self._map_finish_reason(finish_reason_str),
             usage=UsageStats(
                 prompt_tokens=usage_data.get("prompt_tokens", 0),

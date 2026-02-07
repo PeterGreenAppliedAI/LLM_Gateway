@@ -27,7 +27,7 @@ from gateway.exception_handlers import register_exception_handlers
 from gateway.observability import get_logger
 from gateway.security import AsyncSecurityAnalyzer
 from gateway.settings import Settings, get_settings
-from gateway.storage import AuditLogger, DatabaseConfig, create_db_engine
+from gateway.storage import AuditLogger, DatabaseConfig, create_async_db_engine
 from gateway.routes import openai_router, devmesh_router, ollama_router
 
 logger = get_logger(__name__)
@@ -64,7 +64,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     )
 
     try:
-        db_engine = create_db_engine(db_config)
+        db_engine = await create_async_db_engine(db_config)
         app.state.db_engine = db_engine
 
         audit_logger = AuditLogger(
@@ -115,10 +115,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     if hasattr(app.state, "registry"):
         await app.state.registry.close()
 
-    # Close audit logger thread pool
-    if hasattr(app.state, "audit_logger") and app.state.audit_logger:
-        app.state.audit_logger.close()
-        logger.info("Audit logger shutdown complete")
+    # Dispose async database engine
+    if hasattr(app.state, "db_engine") and app.state.db_engine:
+        await app.state.db_engine.dispose()
+        logger.info("Database engine disposed")
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:

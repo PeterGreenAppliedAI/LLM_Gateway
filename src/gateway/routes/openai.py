@@ -452,6 +452,7 @@ async def embeddings(
             client_id=client_id,
             model=body.model,
             messages=[{"role": "user", "content": input_content}],
+            task="embeddings",
         )
 
     # Convert to internal format

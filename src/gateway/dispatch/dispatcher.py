@@ -434,10 +434,52 @@ class Dispatcher:
     # Streaming Support
     # =========================================================================
 
+    def _get_stream_provider_order(
+        self, primary: str, model_name: str | None, request: InternalRequest,
+    ) -> list[str]:
+        """Build ordered list of providers to try for streaming.
+
+        Uses the model catalog to prefer providers that have the model,
+        then falls back to health-based ordering.
+        """
+        providers: list[str] = []
+        seen: set[str] = set()
+
+        # First: check catalog for providers that have this model
+        if model_name:
+            catalog_endpoints = self._registry.get_endpoints_with_model(model_name)
+            # Prefer healthy endpoints from catalog
+            for ep in catalog_endpoints:
+                if ep not in seen and self._registry.is_healthy(ep):
+                    providers.append(ep)
+                    seen.add(ep)
+            # Then unhealthy catalog endpoints (model might still work)
+            for ep in catalog_endpoints:
+                if ep not in seen:
+                    providers.append(ep)
+                    seen.add(ep)
+
+        # Second: the resolved primary provider
+        if primary not in seen:
+            providers.append(primary)
+            seen.add(primary)
+
+        # Third: fallback chain (if allowed)
+        if request.fallback_allowed:
+            for fb in self._registry.get_fallback_chain(exclude=primary):
+                if fb not in seen:
+                    providers.append(fb)
+                    seen.add(fb)
+
+        return providers
+
     async def dispatch_stream(
         self, request: InternalRequest
     ) -> tuple[str, AsyncIterator[StreamChunk]]:
         """Dispatch a streaming request to the appropriate provider.
+
+        Tries providers in order (catalog-aware), peeking at the first chunk
+        to detect errors before committing to a provider.
 
         Args:
             request: Normalized internal request with stream=True
@@ -446,32 +488,54 @@ class Dispatcher:
             Tuple of (provider_name, stream_iterator)
 
         Raises:
-            DispatchError: If dispatch fails
+            DispatchError: If all providers fail
         """
+        from gateway.models.common import FinishReason
+
         provider_name, model_name = self.resolve_provider(request)
 
         # Update request with resolved model
         if model_name and model_name != request.model:
             request = request.model_copy(update={"model": model_name})
 
-        # For streaming, we don't support fallback mid-stream
-        # Just try primary provider
-        adapter = self._registry.get(provider_name)
-        if adapter is None:
-            raise ProviderNotFoundError(provider=provider_name)
+        providers_to_try = self._get_stream_provider_order(
+            provider_name, model_name, request,
+        )
 
-        if not self._registry.is_healthy(provider_name):
-            # Try fallback for initial connection
-            if request.fallback_allowed:
-                for fallback_name in self._registry.get_fallback_chain(exclude=provider_name):
-                    if self._registry.is_healthy(fallback_name):
-                        adapter = self._registry.get(fallback_name)
-                        provider_name = fallback_name
-                        break
-                else:
-                    raise ProviderUnavailableError(provider=provider_name, fallback_disabled=False)
-            else:
-                raise ProviderUnavailableError(provider=provider_name, fallback_disabled=True)
+        if not providers_to_try:
+            raise NoProviderError()
 
-        stream = adapter.chat_stream(request)
-        return provider_name, stream
+        attempted: list[str] = []
+
+        for try_name in providers_to_try[:MAX_FALLBACK_ATTEMPTS]:
+            adapter = self._registry.get(try_name)
+            if adapter is None:
+                continue
+
+            attempted.append(try_name)
+
+            # Start the stream and peek at the first chunk to detect errors
+            stream_iter = adapter.chat_stream(request)
+            try:
+                first_chunk = await stream_iter.__anext__()
+            except StopAsyncIteration:
+                # Empty stream - provider returned nothing, try next
+                continue
+            except Exception:
+                # Provider threw during stream startup, try next
+                continue
+
+            # If first chunk is an error, try next provider
+            # (thinking-only chunks are valid for reasoning models)
+            if first_chunk.finish_reason == FinishReason.ERROR and not first_chunk.delta and not first_chunk.thinking:
+                continue
+
+            # Success - return a chained stream (first_chunk + rest)
+            async def _chain(first: StreamChunk, rest: AsyncIterator[StreamChunk]) -> AsyncIterator[StreamChunk]:
+                yield first
+                async for chunk in rest:
+                    yield chunk
+
+            return try_name, _chain(first_chunk, stream_iter)
+
+        raise AllProvidersUnavailableError(attempted=attempted)

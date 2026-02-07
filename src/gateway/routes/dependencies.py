@@ -107,7 +107,7 @@ def get_audit_logger(request: Request) -> Optional[AuditLogger]:
     return getattr(request.app.state, "audit_logger", None)
 
 
-def validate_api_key(
+async def validate_api_key(
     api_key: str,
     config: GatewayConfig,
     db_engine=None,
@@ -127,7 +127,7 @@ def validate_api_key(
     Args:
         api_key: The API key to validate
         config: Gateway configuration
-        db_engine: Optional SQLAlchemy engine for DB key lookup
+        db_engine: Optional async SQLAlchemy engine for DB key lookup
 
     Returns:
         Tuple of (client_id, environment, target_endpoint) associated with the key.
@@ -152,11 +152,11 @@ def validate_api_key(
         if secrets.compare_digest(api_key, key_config.key):
             return key_config.client_id, key_config.environment, key_config.target_endpoint
 
-    # Source 2: DB-backed keys (hash lookup)
+    # Source 2: DB-backed keys (async hash lookup)
     if db_engine is not None:
         from gateway.storage.keys import KeyManager
         km = KeyManager(db_engine)
-        key_info = km.validate_plaintext_key(api_key)
+        key_info = await km.validate_plaintext_key(api_key)
         if key_info is not None:
             return key_info["client_id"], key_info.get("environment"), None
 
@@ -261,7 +261,7 @@ async def authenticate_with_environment(
 
     # Validate key if provided (pass db_engine for DB-backed key lookup)
     db_engine = getattr(request.app.state, "db_engine", None)
-    client_id, environment, target_endpoint = validate_api_key(api_key, config, db_engine)
+    client_id, environment, target_endpoint = await validate_api_key(api_key, config, db_engine)
     return AuthResult(client_id, environment, target_endpoint)
 
 
