@@ -91,6 +91,8 @@ async def ollama_chat(
         if m.content:
             result = sanitizer.sanitize(m.content)
             msg_dict["content"] = result.sanitized
+        if m.images:
+            msg_dict["images"] = m.images
         if m.tool_calls:
             msg_dict["tool_calls"] = [
                 {"function": tc.function.model_dump()}
@@ -105,6 +107,7 @@ async def ollama_chat(
             client_id=client_id,
             model=body.model,
             messages=sanitized_messages,
+            source_ip=request.client.host if request.client else None,
         )
 
     # Convert Ollama messages to internal format (using sanitized content)
@@ -112,6 +115,8 @@ async def ollama_chat(
     messages = []
     for m in sanitized_messages:
         msg_kwargs: dict = {"role": m["role"], "content": m["content"]}
+        if m.get("images"):
+            msg_kwargs["images"] = m["images"]
         if m.get("tool_calls"):
             msg_kwargs["tool_calls"] = [
                 ToolCall(type="function", function=tc["function"])
@@ -312,6 +317,7 @@ async def ollama_generate(
             client_id=client_id,
             model=body.model,
             messages=analysis_messages,
+            source_ip=request.client.host if request.client else None,
         )
 
     # Build messages from sanitized prompt and optional system
@@ -505,6 +511,7 @@ async def ollama_embeddings(
             model=body.model,
             messages=[{"role": "user", "content": "\n".join(sanitized_prompts)}],
             task="embeddings",
+            source_ip=request.client.host if request.client else None,
         )
 
     request_kwargs = {

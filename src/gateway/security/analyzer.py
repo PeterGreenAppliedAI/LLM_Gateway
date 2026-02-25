@@ -14,6 +14,7 @@ from collections import deque
 
 from gateway.security.sanitizer import Sanitizer, SanitizationResult
 from gateway.security.injection import InjectionDetector, DetectionResult, ThreatLevel
+from gateway.security.guard import GuardResult, LlamaGuardClient
 from gateway.observability import get_logger
 
 logger = get_logger(__name__)
@@ -58,6 +59,7 @@ class AnalysisRequest:
     messages: list[dict]
     task: Optional[str] = None
     response_content: Optional[str] = None
+    source_ip: Optional[str] = None
     timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 
@@ -67,6 +69,7 @@ class AnalysisResult:
     request_id: str
     sanitization: Optional[SanitizationResult]
     injection_scan: Optional[DetectionResult]
+    guard_scan: Optional[GuardResult] = None
     alerts: list[SecurityAlert] = field(default_factory=list)
     analyzed_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
@@ -76,6 +79,7 @@ class AnalysisResult:
             "analyzed_at": self.analyzed_at,
             "sanitization": self.sanitization.to_dict() if self.sanitization else None,
             "injection_scan": self.injection_scan.to_dict() if self.injection_scan else None,
+            "guard_scan": self.guard_scan.to_dict() if self.guard_scan else None,
             "alerts": [a.to_dict() for a in self.alerts],
         }
 
@@ -103,6 +107,8 @@ class AsyncSecurityAnalyzer:
         self,
         sanitizer: Optional[Sanitizer] = None,
         detector: Optional[InjectionDetector] = None,
+        guard_client: Optional[LlamaGuardClient] = None,
+        scan_allowlist_ips: Optional[list[str]] = None,
         max_queue_size: int = 1000,
         max_alerts: int = 1000,
         alert_callback: Optional[Callable[[SecurityAlert], Awaitable[None]]] = None,
@@ -112,12 +118,16 @@ class AsyncSecurityAnalyzer:
         Args:
             sanitizer: Sanitizer instance (uses default if None)
             detector: InjectionDetector instance (uses default if None)
+            guard_client: Optional LlamaGuardClient for shadow analysis
+            scan_allowlist_ips: Source IPs to skip scanning (trusted services)
             max_queue_size: Maximum pending analysis requests
             max_alerts: Maximum alerts to retain in memory
             alert_callback: Optional async callback for new alerts
         """
         self.sanitizer = sanitizer or Sanitizer()
         self.detector = detector or InjectionDetector()
+        self.guard_client = guard_client
+        self._scan_allowlist_ips: set[str] = set(scan_allowlist_ips or [])
         # Detector for embeddings: skip delimiter attacks to avoid false positives
         # from model vocabulary tokens like [SYSTEM], [INST] etc.
         self._embedding_detector = InjectionDetector(check_delimiter_attacks=False)
@@ -136,6 +146,10 @@ class AsyncSecurityAnalyzer:
             "requests_analyzed": 0,
             "alerts_generated": 0,
             "requests_dropped": 0,
+            "requests_allowlisted": 0,
+            "guard_scans": 0,
+            "guard_skipped": 0,
+            "guard_unsafe": 0,
         }
 
     async def start(self) -> None:
@@ -156,6 +170,8 @@ class AsyncSecurityAnalyzer:
                 await self._task
             except asyncio.CancelledError:
                 pass
+        if self.guard_client:
+            await self.guard_client.close()
         logger.info("Security analyzer stopped", stats=self._stats)
 
     def queue_request(
@@ -166,6 +182,7 @@ class AsyncSecurityAnalyzer:
         messages: list[dict],
         task: Optional[str] = None,
         response_content: Optional[str] = None,
+        source_ip: Optional[str] = None,
     ) -> bool:
         """Queue a request for background analysis.
 
@@ -176,10 +193,22 @@ class AsyncSecurityAnalyzer:
             messages: Request messages
             task: Task type (chat, completion, embeddings)
             response_content: Optional response content to analyze
+            source_ip: Source IP address of the request
 
         Returns:
-            True if queued, False if queue is full
+            True if queued, False if queue is full or allowlisted
         """
+        # Skip scanning for allowlisted IPs (trusted internal services)
+        if source_ip and source_ip in self._scan_allowlist_ips:
+            self._stats["requests_allowlisted"] += 1
+            logger.debug(
+                "Security scan skipped (allowlisted IP)",
+                request_id=request_id,
+                source_ip=source_ip,
+                client_id=client_id,
+            )
+            return False
+
         request = AnalysisRequest(
             request_id=request_id,
             client_id=client_id,
@@ -187,6 +216,7 @@ class AsyncSecurityAnalyzer:
             messages=messages,
             task=task,
             response_content=response_content,
+            source_ip=source_ip,
         )
 
         try:
@@ -316,10 +346,33 @@ class AsyncSecurityAnalyzer:
                 details=injection_scan.to_dict(),
             ))
 
+        # Run guard model shadow scan (informational only — no alerts)
+        guard_scan = None
+        if self.guard_client:
+            guard_scan = await self.guard_client.classify(request.messages)
+            self._stats["guard_scans"] += 1
+            if guard_scan.skipped:
+                self._stats["guard_skipped"] += 1
+            elif not guard_scan.safe:
+                self._stats["guard_unsafe"] += 1
+
+            # Log comparison for analysis
+            logger.info(
+                "Guard model shadow result",
+                request_id=request.request_id,
+                guard_safe=guard_scan.safe,
+                guard_skipped=guard_scan.skipped,
+                guard_category=guard_scan.category_code,
+                guard_inference_ms=guard_scan.inference_time_ms,
+                regex_threat_level=injection_scan.threat_level.value,
+                regex_match_count=injection_scan.match_count,
+            )
+
         return AnalysisResult(
             request_id=request.request_id,
             sanitization=sanitization,
             injection_scan=injection_scan,
+            guard_scan=guard_scan,
             alerts=alerts,
         )
 

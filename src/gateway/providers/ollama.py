@@ -328,6 +328,25 @@ class OllamaAdapter(ProviderAdapter):
                     "role": msg.role.value,
                     "content": msg.content or "",
                 }
+                # Include images for vision models (native Ollama format)
+                if msg.images:
+                    m["images"] = msg.images
+                # Extract images from OpenAI content_parts (cross-API support)
+                elif msg.content_parts:
+                    images = []
+                    for part in msg.content_parts:
+                        if part.get("type") == "image_url":
+                            url = part.get("image_url", {}).get("url", "")
+                            # Strip data URI prefix to get raw base64
+                            if url.startswith("data:"):
+                                # data:image/png;base64,<data>
+                                _, _, b64 = url.partition(",")
+                                if b64:
+                                    images.append(b64)
+                            else:
+                                images.append(url)
+                    if images:
+                        m["images"] = images
                 # Include tool_calls for assistant messages
                 if msg.tool_calls:
                     m["tool_calls"] = [
@@ -342,6 +361,7 @@ class OllamaAdapter(ProviderAdapter):
             "stream": False,
             "options": {
                 "num_predict": request.max_tokens,
+                "num_ctx": 32768,
                 "temperature": request.temperature,
                 "top_p": request.top_p,
             },
@@ -360,6 +380,7 @@ class OllamaAdapter(ProviderAdapter):
             "stream": False,
             "options": {
                 "num_predict": request.max_tokens,
+                "num_ctx": 32768,
                 "temperature": request.temperature,
                 "top_p": request.top_p,
             },

@@ -81,9 +81,11 @@ class Message(BaseModel):
     """A single message in a conversation."""
     role: MessageRole
     content: BoundedContent | None = None  # Length-limited for security; None when tool_calls present
+    content_parts: list[dict[str, Any]] | None = None  # OpenAI multimodal content parts (preserved raw)
     name: str | None = Field(default=None, max_length=64)  # Bounded name
     tool_calls: list[ToolCall] | None = None  # Tool calls from assistant
     tool_call_id: str | None = None  # For tool role: which call this responds to
+    images: list[str] | None = None  # Base64-encoded images for vision models (Ollama format)
 
 
 class InternalRequest(BaseModel):

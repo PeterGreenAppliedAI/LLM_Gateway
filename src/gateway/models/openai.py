@@ -13,7 +13,7 @@ import time
 from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_serializer
 
 from gateway.models.common import FinishReason, TaskType, UsageStats
 from gateway.models.internal import (
@@ -47,10 +47,32 @@ class OpenAIToolCall(BaseModel):
 class OpenAIChatMessage(BaseModel):
     """OpenAI chat message format."""
     role: Literal["system", "user", "assistant", "tool"]
-    content: str | None = None
+    content: str | list[dict[str, Any]] | None = None  # string, content parts array, or null
     name: str | None = None
     tool_calls: list[OpenAIToolCall] | None = None  # Assistant tool calls
     tool_call_id: str | None = None  # For tool role responses
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler: Any) -> dict[str, Any]:
+        """Match OpenAI response format: omit null optional fields except content."""
+        d = handler(self)
+        for key in ("name", "tool_calls", "tool_call_id"):
+            if d.get(key) is None:
+                del d[key]
+        return d
+
+    def content_as_str(self) -> str:
+        """Normalize content to a plain string."""
+        if self.content is None:
+            return ""
+        if isinstance(self.content, str):
+            return self.content
+        # Content parts array: [{"type": "text", "text": "..."}, ...]
+        parts = []
+        for part in self.content:
+            if isinstance(part, dict) and part.get("type") == "text":
+                parts.append(part.get("text", ""))
+        return "\n".join(parts)
 
 
 class OpenAIChatRequest(BaseModel):
@@ -82,9 +104,12 @@ class OpenAIChatRequest(BaseModel):
         for msg in self.messages:
             msg_kwargs: dict[str, Any] = {
                 "role": MessageRole(msg.role),
-                "content": msg.content,
+                "content": msg.content_as_str() or None,
                 "name": msg.name,
             }
+            # Preserve raw content parts for multimodal messages (images, etc.)
+            if isinstance(msg.content, list):
+                msg_kwargs["content_parts"] = msg.content
             if msg.tool_calls:
                 msg_kwargs["tool_calls"] = [
                     ToolCall(

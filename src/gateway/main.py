@@ -26,6 +26,7 @@ from gateway.dispatch import ProviderRegistry
 from gateway.exception_handlers import register_exception_handlers
 from gateway.observability import get_logger
 from gateway.security import AsyncSecurityAnalyzer
+from gateway.security.guard import LlamaGuardClient
 from gateway.settings import Settings, get_settings
 from gateway.storage import AuditLogger, DatabaseConfig, create_async_db_engine
 from gateway.routes import openai_router, devmesh_router, ollama_router
@@ -97,9 +98,28 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         app.state.discovery_service = discovery
 
     # Start security analyzer (async background analysis)
-    security_analyzer = AsyncSecurityAnalyzer()
+    guard_client = None
+    if settings.guard.enabled:
+        guard_client = LlamaGuardClient(
+            base_url=settings.guard.base_url,
+            model_name=settings.guard.model_name,
+            timeout=settings.guard.timeout,
+        )
+        logger.info(
+            "Guard model enabled (shadow mode)",
+            model=settings.guard.model_name,
+            base_url=settings.guard.base_url,
+        )
+
+    scan_allowlist_ips = settings.security.scan_allowlist_ips
+    security_analyzer = AsyncSecurityAnalyzer(
+        guard_client=guard_client,
+        scan_allowlist_ips=scan_allowlist_ips,
+    )
     await security_analyzer.start()
     app.state.security_analyzer = security_analyzer
+    if scan_allowlist_ips:
+        logger.info("Security scan allowlist", allowlisted_ips=scan_allowlist_ips)
     logger.info("Security analyzer started")
 
     yield

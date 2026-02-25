@@ -278,7 +278,7 @@ class VLLMAdapter(ProviderAdapter):
             for msg in request.messages:
                 m: dict[str, Any] = {
                     "role": msg.role.value,
-                    "content": msg.content,
+                    "content": msg.content_parts if msg.content_parts else msg.content,
                 }
                 if msg.tool_calls:
                     m["tool_calls"] = [

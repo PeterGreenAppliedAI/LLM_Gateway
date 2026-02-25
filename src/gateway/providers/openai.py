@@ -393,7 +393,7 @@ class OpenAIAdapter(ProviderAdapter):
             for msg in request.messages:
                 m: dict[str, Any] = {
                     "role": msg.role.value,
-                    "content": msg.content,
+                    "content": msg.content_parts if msg.content_parts else msg.content,
                 }
                 # Include tool_calls for assistant messages (serialize arguments to JSON string)
                 if msg.tool_calls:

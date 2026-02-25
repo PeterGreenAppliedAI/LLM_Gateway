@@ -50,6 +50,44 @@ class DatabaseSettings(BaseSettings):
     echo: bool = Field(default=False, description="Echo SQL statements (debug only)")
 
 
+class GuardModelSettings(BaseSettings):
+    """Llama Guard 3 shadow analyzer configuration.
+
+    Runs guard model alongside regex for verdict comparison.
+    Configure via environment variables with GATEWAY_GUARD_ prefix.
+    """
+
+    model_config = SettingsConfigDict(
+        env_prefix="GATEWAY_GUARD_",
+        extra="ignore",
+    )
+
+    enabled: bool = Field(default=False, description="Enable guard model shadow analysis")
+    base_url: str = Field(
+        default="http://10.0.0.15:11434",
+        description="Ollama server URL hosting llama-guard3",
+    )
+    model_name: str = Field(default="llama-guard3:1b", description="Guard model name")
+    timeout: float = Field(default=10.0, ge=1.0, le=60.0, description="Inference timeout seconds")
+
+
+class SecuritySettings(BaseSettings):
+    """Security scanning configuration.
+
+    Configure via environment variables with GATEWAY_SECURITY_ prefix.
+    """
+
+    model_config = SettingsConfigDict(
+        env_prefix="GATEWAY_SECURITY_",
+        extra="ignore",
+    )
+
+    scan_allowlist_ips: list[str] = Field(
+        default_factory=list,
+        description="Source IPs to skip security scanning (trusted internal services)",
+    )
+
+
 class Settings(BaseSettings):
     """Gateway application settings.
 
@@ -97,6 +135,12 @@ class Settings(BaseSettings):
 
     # Database (nested settings)
     db: DatabaseSettings = Field(default_factory=DatabaseSettings)
+
+    # Guard model (shadow analyzer)
+    guard: GuardModelSettings = Field(default_factory=GuardModelSettings)
+
+    # Security scanning
+    security: SecuritySettings = Field(default_factory=SecuritySettings)
 
     def __repr__(self) -> str:
         """Safe repr that doesn't expose secrets."""

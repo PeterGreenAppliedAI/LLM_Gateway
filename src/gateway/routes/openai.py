@@ -96,11 +96,12 @@ async def chat_completions(
     # Security: Sanitize message content (removes invisible Unicode chars)
     sanitized_messages = []
     for msg in body.messages:
-        if msg.content:
-            result = sanitizer.sanitize(msg.content)
+        text = msg.content_as_str()
+        if text:
+            result = sanitizer.sanitize(text)
             sanitized_messages.append({"role": msg.role, "content": result.sanitized})
         else:
-            sanitized_messages.append({"role": msg.role, "content": msg.content or ""})
+            sanitized_messages.append({"role": msg.role, "content": ""})
 
     # Queue for async security analysis (non-blocking)
     if security_analyzer:
@@ -109,10 +110,16 @@ async def chat_completions(
             client_id=client_id,
             model=body.model,
             messages=sanitized_messages,
+            source_ip=request.client.host if request.client else None,
         )
 
     # Convert to internal format
     internal_request = body.to_internal(client_id=client_id, task=TaskType.CHAT)
+
+    # Force non-streaming when tools are present (streaming tool call format
+    # requires complex delta fragmentation; non-streaming works with OpenAI SDK)
+    if body.tools and body.stream:
+        internal_request = internal_request.model_copy(update={"stream": False})
 
     # Apply per-client target endpoint if configured
     if auth.target_endpoint:
@@ -126,8 +133,8 @@ async def chat_completions(
     except PolicyViolation as e:
         translate_policy_violation(e)
 
-    # Handle streaming
-    if body.stream:
+    # Handle streaming (skip for tool calls - return non-streaming JSON instead)
+    if body.stream and not body.tools:
         return await _stream_chat_response(
             dispatcher, internal_request, body.model, ctx, audit_logger
         )
@@ -173,7 +180,30 @@ async def chat_completions(
         )
 
     # Convert to OpenAI format
-    return OpenAIChatResponse.from_internal(result.response)
+    openai_response = OpenAIChatResponse.from_internal(result.response)
+
+    # If client requested streaming + tools, wrap the complete response in SSE
+    # so the OpenAI SDK's stream parser is satisfied
+    if body.stream and body.tools:
+        # Rewrite to streaming chunk format: object → chunk, message → delta
+        d = openai_response.model_dump()
+        d["object"] = "chat.completion.chunk"
+        for choice in d.get("choices", []):
+            if "message" in choice:
+                choice["delta"] = choice.pop("message")
+        response_json = json.dumps(d)
+        sse_body = f"data: {response_json}\n\ndata: [DONE]\n\n"
+        return StreamingResponse(
+            iter([sse_body.encode()]),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    return openai_response
 
 
 async def _stream_chat_response(
@@ -348,6 +378,7 @@ async def completions(
             client_id=client_id,
             model=body.model,
             messages=[{"role": "user", "content": prompt_content}],
+            source_ip=request.client.host if request.client else None,
         )
 
     # Convert to internal format
@@ -453,6 +484,7 @@ async def embeddings(
             model=body.model,
             messages=[{"role": "user", "content": input_content}],
             task="embeddings",
+            source_ip=request.client.host if request.client else None,
         )
 
     # Convert to internal format
