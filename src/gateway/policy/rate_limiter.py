@@ -174,11 +174,12 @@ class RateLimiter:
             reset_burst=now + self.BURST_WINDOW,
         )
 
-    def acquire(self, key: str) -> RateLimitState:
+    def acquire(self, key: str, rpm_override: Optional[int] = None) -> RateLimitState:
         """Record a request and check if it's allowed.
 
         Args:
             key: Identifier for rate limiting
+            rpm_override: Per-key requests-per-minute override (from API key config)
 
         Returns:
             Updated rate limit state
@@ -187,8 +188,9 @@ class RateLimiter:
             RateLimitExceeded: If any rate limit is exceeded
         """
         if not self._config.enabled:
+            rpm = rpm_override or self._config.requests_per_minute
             return RateLimitState(
-                requests_remaining_minute=self._config.requests_per_minute,
+                requests_remaining_minute=rpm,
                 requests_remaining_hour=self._config.requests_per_hour,
                 burst_remaining=self._config.burst_limit,
                 reset_minute=time.time() + self.MINUTE_WINDOW,
@@ -203,6 +205,9 @@ class RateLimiter:
         self._cleanup_old_requests(key, now)
 
         requests = self._requests[key]
+
+        # Use per-key RPM override if provided, otherwise config default
+        effective_rpm = rpm_override or self._config.requests_per_minute
 
         # Count requests in each window
         burst_count = sum(1 for ts in requests if now - ts < self.BURST_WINDOW)
@@ -221,14 +226,14 @@ class RateLimiter:
                 retry_after=max(0.1, retry_after),
             )
 
-        # Check minute limit
-        if minute_count >= self._config.requests_per_minute:
+        # Check minute limit (uses per-key override)
+        if minute_count >= effective_rpm:
             oldest_minute = min((ts for ts in requests if now - ts < self.MINUTE_WINDOW), default=now)
             retry_after = self.MINUTE_WINDOW - (now - oldest_minute)
             raise RateLimitExceeded(
-                f"Rate limit exceeded: {self._config.requests_per_minute} requests per minute",
+                f"Rate limit exceeded: {effective_rpm} requests per minute",
                 key=key,
-                limit=self._config.requests_per_minute,
+                limit=effective_rpm,
                 window_seconds=self.MINUTE_WINDOW,
                 retry_after=max(0.1, retry_after),
             )
@@ -249,7 +254,7 @@ class RateLimiter:
         requests.append(now)
 
         return RateLimitState(
-            requests_remaining_minute=self._config.requests_per_minute - minute_count - 1,
+            requests_remaining_minute=effective_rpm - minute_count - 1,
             requests_remaining_hour=self._config.requests_per_hour - hour_count - 1,
             burst_remaining=self._config.burst_limit - burst_count - 1,
             reset_minute=now + self.MINUTE_WINDOW,

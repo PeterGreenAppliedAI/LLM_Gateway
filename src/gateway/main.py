@@ -123,6 +123,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.info("Security scan allowlist", allowlisted_ips=scan_allowlist_ips)
     logger.info("Security analyzer started")
 
+    # Initialize PII scrubber
+    if settings.pii.enabled:
+        from gateway.security.pii import PIIScrubber
+        pii_scrubber = PIIScrubber()
+        app.state.pii_scrubber = pii_scrubber
+        app.state.pii_settings = settings.pii
+        logger.info(
+            "PII detection enabled",
+            scrub_enabled=settings.pii.scrub_enabled,
+            scrub_routes=settings.pii.scrub_routes or ["all"],
+        )
+
     # Start periodic audit log cleanup
     retention_days = settings.db.retention_days
     if app.state.audit_logger and retention_days > 0:

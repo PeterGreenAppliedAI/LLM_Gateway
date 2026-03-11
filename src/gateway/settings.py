@@ -71,11 +71,32 @@ class GuardModelSettings(BaseSettings):
 
     enabled: bool = Field(default=False, description="Enable guard model shadow analysis")
     base_url: str = Field(
-        default="http://localhost:11434",
+        default="http://10.0.0.15:11434",
         description="Ollama server URL hosting guard model",
     )
     model_name: str = Field(default="ibm/granite3.2-guardian:5b", description="Guard model name (e.g. ibm/granite3.2-guardian:5b, llama-guard3:8b)")
     timeout: float = Field(default=15.0, ge=1.0, le=60.0, description="Inference timeout seconds")
+
+
+class PIISettings(BaseSettings):
+    """PII detection and scrubbing configuration.
+
+    Detection always runs when enabled (flags PII in security alerts).
+    Scrubbing (replacing PII with placeholders) is optional and per-route.
+    Configure via environment variables with GATEWAY_PII_ prefix.
+    """
+
+    model_config = SettingsConfigDict(
+        env_prefix="GATEWAY_PII_",
+        extra="ignore",
+    )
+
+    enabled: bool = Field(default=False, description="Enable PII detection (always flags)")
+    scrub_enabled: bool = Field(default=False, description="Enable PII scrubbing (replace with placeholders)")
+    scrub_routes: list[str] = Field(
+        default_factory=list,
+        description="Routes where scrubbing is active (e.g. ['/v1/chat/completions', '/api/chat']). Empty = all routes.",
+    )
 
 
 class SecuritySettings(BaseSettings):
@@ -155,6 +176,9 @@ class Settings(BaseSettings):
 
     # Guard model (shadow analyzer)
     guard: GuardModelSettings = Field(default_factory=GuardModelSettings)
+
+    # PII detection and scrubbing
+    pii: PIISettings = Field(default_factory=PIISettings)
 
     # Security scanning
     security: SecuritySettings = Field(default_factory=SecuritySettings)

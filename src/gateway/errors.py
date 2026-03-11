@@ -39,6 +39,8 @@ class ErrorCode(str, Enum):
     # Policy
     POLICY_VIOLATION = "policy_violation"
     PROVIDER_NOT_ALLOWED = "provider_not_allowed"
+    MODEL_NOT_ALLOWED = "model_not_allowed"
+    ENDPOINT_NOT_ALLOWED = "endpoint_not_allowed"
 
     # Dispatch & Routing
     NO_PROVIDER = "no_provider"

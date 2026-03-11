@@ -112,6 +112,9 @@ class PolicyEnforcer:
         request: InternalRequest,
         rate_limit_key: Optional[str] = None,
         provider: Optional[str] = None,
+        allowed_models: Optional[List[str]] = None,
+        allowed_endpoints: Optional[List[str]] = None,
+        rate_limit_rpm: Optional[int] = None,
     ) -> PolicyCheckResult:
         """Enforce all policies on a request.
 
@@ -119,6 +122,9 @@ class PolicyEnforcer:
             request: The request to check
             rate_limit_key: Key for rate limiting (defaults to client_id or user_id)
             provider: Target provider (for task-provider policy check)
+            allowed_models: Per-key model allowlist (from API key)
+            allowed_endpoints: Per-key endpoint allowlist (from API key)
+            rate_limit_rpm: Per-key rate limit override (from API key)
 
         Returns:
             PolicyCheckResult with enforcement details
@@ -132,9 +138,9 @@ class PolicyEnforcer:
         # Determine rate limit key
         key = rate_limit_key or request.client_id or request.user_id or "anonymous"
 
-        # 1. Check rate limits
+        # 1. Check rate limits (with per-key override)
         try:
-            rate_state = self._rate_limiter.acquire(key)
+            rate_state = self._rate_limiter.acquire(key, rpm_override=rate_limit_rpm)
         except RateLimitExceeded as e:
             raise PolicyViolation(
                 message=str(e),
@@ -153,7 +159,30 @@ class PolicyEnforcer:
                 code="token_limit_exceeded",
             )
 
-        # 3. Check provider-task authorization
+        # 3. Check per-key model allowlist
+        if allowed_models and request.model:
+            import fnmatch
+            model_allowed = any(
+                fnmatch.fnmatch(request.model, pattern)
+                for pattern in allowed_models
+            )
+            if not model_allowed:
+                raise PolicyViolation(
+                    message=f"Model '{request.model}' is not in allowed models for this API key",
+                    policy_type="model_not_allowed",
+                    code="model_not_allowed",
+                )
+
+        # 4. Check per-key endpoint allowlist
+        if allowed_endpoints and request.preferred_provider:
+            if request.preferred_provider not in allowed_endpoints:
+                raise PolicyViolation(
+                    message=f"Endpoint '{request.preferred_provider}' is not in allowed endpoints for this API key",
+                    policy_type="endpoint_not_allowed",
+                    code="endpoint_not_allowed",
+                )
+
+        # 5. Check provider-task authorization
         if provider and request.task in self._task_policies:
             policy = self._task_policies[request.task]
 

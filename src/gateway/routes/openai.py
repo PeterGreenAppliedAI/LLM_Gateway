@@ -46,12 +46,14 @@ from gateway.routes.dependencies import (
     get_audit_logger,
     get_dispatcher,
     get_enforcer,
+    get_pii_scrubber,
     get_sanitizer,
     get_security_analyzer,
     setup_request_context,
+    should_scrub_pii,
     translate_policy_violation,
 )
-from gateway.security import AsyncSecurityAnalyzer, Sanitizer
+from gateway.security import AsyncSecurityAnalyzer, PIIScrubber, Sanitizer
 from gateway.storage import AuditLogger
 
 logger = get_logger(__name__)
@@ -72,6 +74,7 @@ async def chat_completions(
     auth: Annotated[AuthResult, Depends(get_auth)],
     dispatcher: Annotated[Dispatcher, Depends(get_dispatcher)],
     enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
+    pii_scrubber: Annotated[PIIScrubber | None, Depends(get_pii_scrubber)],
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
     sanitizer: Annotated[Sanitizer, Depends(get_sanitizer)],
     security_analyzer: Annotated[AsyncSecurityAnalyzer | None, Depends(get_security_analyzer)],
@@ -102,6 +105,21 @@ async def chat_completions(
             sanitized_messages.append({"role": msg.role, "content": result.sanitized})
         else:
             sanitized_messages.append({"role": msg.role, "content": ""})
+
+    # PII detection (always flags) + optional scrubbing (per-route)
+    if pii_scrubber:
+        scrub = should_scrub_pii(request)
+        sanitized_messages, pii_results = pii_scrubber.scan_messages(
+            sanitized_messages, scrub=scrub
+        )
+        pii_found = sum(r.detection_count for r in pii_results)
+        if pii_found:
+            logger.warning(
+                "PII detected in request",
+                request_id=ctx.request_id,
+                pii_count=pii_found,
+                scrubbed=scrub,
+            )
 
     # Queue for async security analysis (non-blocking)
     if security_analyzer:
@@ -135,7 +153,13 @@ async def chat_completions(
 
     # Check policies - raises domain errors on violation
     try:
-        enforcer.enforce(internal_request)
+        enforcer.enforce(
+            internal_request,
+            rate_limit_key=auth.client_id,
+            allowed_models=auth.allowed_models,
+            allowed_endpoints=auth.allowed_endpoints,
+            rate_limit_rpm=auth.rate_limit_rpm,
+        )
     except PolicyViolation as e:
         translate_policy_violation(e)
 
@@ -350,6 +374,7 @@ async def completions(
     auth: Annotated[AuthResult, Depends(get_auth)],
     dispatcher: Annotated[Dispatcher, Depends(get_dispatcher)],
     enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
+    pii_scrubber: Annotated[PIIScrubber | None, Depends(get_pii_scrubber)],
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
     sanitizer: Annotated[Sanitizer, Depends(get_sanitizer)],
     security_analyzer: Annotated[AsyncSecurityAnalyzer | None, Depends(get_security_analyzer)],
@@ -376,6 +401,23 @@ async def completions(
     elif isinstance(body.prompt, list):
         sanitized_prompt = [sanitizer.sanitize(p).sanitized for p in body.prompt]
 
+    # PII detection + optional scrubbing
+    if pii_scrubber:
+        scrub = should_scrub_pii(request)
+        if isinstance(sanitized_prompt, str):
+            pii_result = pii_scrubber.scan(sanitized_prompt, scrub=scrub)
+            if pii_result.has_pii:
+                logger.warning("PII detected in request", request_id=ctx.request_id, pii_count=pii_result.detection_count, scrubbed=scrub)
+                if scrub and pii_result.scrubbed_text:
+                    sanitized_prompt = pii_result.scrubbed_text
+        elif isinstance(sanitized_prompt, list):
+            for idx, p in enumerate(sanitized_prompt):
+                pii_result = pii_scrubber.scan(p, scrub=scrub)
+                if pii_result.has_pii:
+                    logger.warning("PII detected in request", request_id=ctx.request_id, pii_count=pii_result.detection_count, scrubbed=scrub)
+                    if scrub and pii_result.scrubbed_text:
+                        sanitized_prompt[idx] = pii_result.scrubbed_text
+
     # Queue for async security analysis
     if security_analyzer:
         prompt_content = sanitized_prompt if isinstance(sanitized_prompt, str) else "\n".join(sanitized_prompt)
@@ -398,7 +440,13 @@ async def completions(
 
     # Check policies - raises domain errors on violation
     try:
-        enforcer.enforce(internal_request)
+        enforcer.enforce(
+            internal_request,
+            rate_limit_key=auth.client_id,
+            allowed_models=auth.allowed_models,
+            allowed_endpoints=auth.allowed_endpoints,
+            rate_limit_rpm=auth.rate_limit_rpm,
+        )
     except PolicyViolation as e:
         translate_policy_violation(e)
 
@@ -459,6 +507,7 @@ async def embeddings(
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
     sanitizer: Annotated[Sanitizer, Depends(get_sanitizer)],
     security_analyzer: Annotated[AsyncSecurityAnalyzer | None, Depends(get_security_analyzer)],
+    pii_scrubber: Annotated[PIIScrubber | None, Depends(get_pii_scrubber)],
 ) -> OpenAIEmbeddingResponse:
     """Create embeddings for the input text.
 
@@ -480,6 +529,40 @@ async def embeddings(
         sanitized_input = sanitizer.sanitize(body.input).sanitized
     elif isinstance(body.input, list):
         sanitized_input = [sanitizer.sanitize(i).sanitized if isinstance(i, str) else i for i in body.input]
+
+    # PII detection (always flags) + optional scrubbing (per-route)
+    if pii_scrubber:
+        scrub = should_scrub_pii(request)
+        if isinstance(sanitized_input, str):
+            pii_result = pii_scrubber.scan(sanitized_input, scrub=scrub)
+            if pii_result.detection_count:
+                logger.warning(
+                    "PII detected in request",
+                    request_id=ctx.request_id,
+                    pii_count=pii_result.detection_count,
+                    scrubbed=scrub,
+                )
+            if scrub:
+                sanitized_input = pii_result.scrubbed_text
+        elif isinstance(sanitized_input, list):
+            total_pii = 0
+            scrubbed_list = []
+            for item in sanitized_input:
+                if isinstance(item, str):
+                    pii_result = pii_scrubber.scan(item, scrub=scrub)
+                    total_pii += pii_result.detection_count
+                    scrubbed_list.append(pii_result.scrubbed_text if scrub else item)
+                else:
+                    scrubbed_list.append(item)
+            if total_pii:
+                logger.warning(
+                    "PII detected in request",
+                    request_id=ctx.request_id,
+                    pii_count=total_pii,
+                    scrubbed=scrub,
+                )
+            if scrub:
+                sanitized_input = scrubbed_list
 
     # Queue for async security analysis
     if security_analyzer:
@@ -504,7 +587,13 @@ async def embeddings(
 
     # Check policies - raises domain errors on violation
     try:
-        enforcer.enforce(internal_request)
+        enforcer.enforce(
+            internal_request,
+            rate_limit_key=auth.client_id,
+            allowed_models=auth.allowed_models,
+            allowed_endpoints=auth.allowed_endpoints,
+            rate_limit_rpm=auth.rate_limit_rpm,
+        )
     except PolicyViolation as e:
         translate_policy_violation(e)
 

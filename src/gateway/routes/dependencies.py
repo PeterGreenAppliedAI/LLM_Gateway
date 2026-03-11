@@ -34,7 +34,7 @@ from gateway.errors import (
 from gateway.observability import get_logger, get_metrics, RequestContext
 from gateway.observability.logging import set_request_context, clear_request_context
 from gateway.policy import PolicyEnforcer, PolicyViolation
-from gateway.security import AsyncSecurityAnalyzer, Sanitizer
+from gateway.security import AsyncSecurityAnalyzer, Sanitizer, PIIScrubber
 from gateway.storage import AuditLogger
 
 logger = get_logger(__name__)
@@ -87,12 +87,27 @@ def get_enforcer(request: Request) -> PolicyEnforcer:
     """Get or create policy enforcer.
 
     Creates enforcer on first request and caches in app state.
+    Bridges gateway.yaml rate_limits config into PolicyConfig.
     """
     enforcer = getattr(request.app.state, "enforcer", None)
     if enforcer is None:
         config = get_config(request)
-        # Handle both PolicyConfig object and None
-        policy_config = config.policy if config.policy else None
+        if config.policy:
+            policy_config = config.policy
+        else:
+            # Bridge gateway.yaml rate_limits into PolicyConfig
+            from gateway.policy.enforcer import PolicyConfig
+            from gateway.policy.rate_limiter import RateLimitConfig as PolicyRateLimitConfig
+            from gateway.policy.token_limiter import TokenLimitConfig
+            policy_config = PolicyConfig(
+                rate_limit=PolicyRateLimitConfig(
+                    requests_per_minute=config.rate_limits.requests_per_minute_per_user,
+                    requests_per_hour=config.rate_limits.requests_per_minute_global * 60,
+                ),
+                token_limit=TokenLimitConfig(
+                    max_tokens_per_request=config.rate_limits.max_tokens_per_request,
+                ),
+            )
         enforcer = PolicyEnforcer(policy_config)
         request.app.state.enforcer = enforcer
     return enforcer
@@ -111,8 +126,8 @@ async def validate_api_key(
     api_key: str,
     config: GatewayConfig,
     db_engine=None,
-) -> tuple[str, str | None, str | None]:
-    """Validate API key and return client_id, environment, and target_endpoint.
+) -> dict:
+    """Validate API key and return auth details.
 
     Checks two sources in order:
     1. Config-backed keys (fast, constant-time comparison)
@@ -122,7 +137,6 @@ async def validate_api_key(
     - Validates key format to prevent injection
     - Uses constant-time comparison for config keys
     - Uses SHA256 hash lookup for DB keys
-    - Returns sanitized client_id
 
     Args:
         api_key: The API key to validate
@@ -130,8 +144,7 @@ async def validate_api_key(
         db_engine: Optional async SQLAlchemy engine for DB key lookup
 
     Returns:
-        Tuple of (client_id, environment, target_endpoint) associated with the key.
-        Environment and target_endpoint may be None if not configured.
+        Dict with client_id, environment, target_endpoint, and per-key permissions.
 
     Raises:
         InvalidApiKeyFormatError: If key format is invalid
@@ -143,14 +156,17 @@ async def validate_api_key(
 
     # Check if auth is enabled
     if not config.auth.enabled:
-        # Auth disabled - return default client
-        return "default", None, None
+        return {"client_id": "default"}
 
     # Source 1: Config-backed keys (constant-time comparison)
     for key_config in config.auth.api_keys:
         # Security: Constant-time comparison
         if secrets.compare_digest(api_key, key_config.key):
-            return key_config.client_id, key_config.environment, key_config.target_endpoint
+            return {
+                "client_id": key_config.client_id,
+                "environment": key_config.environment,
+                "target_endpoint": key_config.target_endpoint,
+            }
 
     # Source 2: DB-backed keys (async hash lookup)
     if db_engine is not None:
@@ -158,23 +174,35 @@ async def validate_api_key(
         km = KeyManager(db_engine)
         key_info = await km.validate_plaintext_key(api_key)
         if key_info is not None:
-            return key_info["client_id"], key_info.get("environment"), None
+            return {
+                "client_id": key_info["client_id"],
+                "environment": key_info.get("environment"),
+                "allowed_models": key_info.get("allowed_models"),
+                "allowed_endpoints": key_info.get("allowed_endpoints"),
+                "rate_limit_rpm": key_info.get("rate_limit_rpm"),
+            }
 
     raise InvalidApiKeyError()
 
 
 class AuthResult:
-    """Result of authentication containing client_id, environment, and target_endpoint."""
+    """Result of authentication containing client_id, environment, target_endpoint, and per-key permissions."""
 
     def __init__(
         self,
         client_id: str,
         environment: str | None = None,
         target_endpoint: str | None = None,
+        allowed_models: list[str] | None = None,
+        allowed_endpoints: list[str] | None = None,
+        rate_limit_rpm: int | None = None,
     ):
         self.client_id = client_id
         self.environment = environment
         self.target_endpoint = target_endpoint
+        self.allowed_models = allowed_models
+        self.allowed_endpoints = allowed_endpoints
+        self.rate_limit_rpm = rate_limit_rpm
 
 
 async def authenticate(
@@ -303,8 +331,15 @@ async def authenticate_with_environment(
 
     # Validate key if provided (pass db_engine for DB-backed key lookup)
     db_engine = getattr(request.app.state, "db_engine", None)
-    client_id, environment, target_endpoint = await validate_api_key(api_key, config, db_engine)
-    return AuthResult(client_id, environment, target_endpoint)
+    key_info = await validate_api_key(api_key, config, db_engine)
+    return AuthResult(
+        client_id=key_info["client_id"],
+        environment=key_info.get("environment"),
+        target_endpoint=key_info.get("target_endpoint"),
+        allowed_models=key_info.get("allowed_models"),
+        allowed_endpoints=key_info.get("allowed_endpoints"),
+        rate_limit_rpm=key_info.get("rate_limit_rpm"),
+    )
 
 
 async def get_environment(
@@ -420,7 +455,6 @@ def translate_policy_violation(e: PolicyViolation) -> None:
             retry_after=e.retry_after or 60.0,
         )
     elif e.policy_type == "token_limit":
-        # Extract details if available
         raise PolicyError(
             message=str(e),
             code=ErrorCode.TOKEN_LIMIT_EXCEEDED,
@@ -429,6 +463,16 @@ def translate_policy_violation(e: PolicyViolation) -> None:
         raise PolicyError(
             message=str(e),
             code=ErrorCode.PROVIDER_NOT_ALLOWED,
+        )
+    elif e.policy_type == "model_not_allowed":
+        raise PolicyError(
+            message=str(e),
+            code=ErrorCode.MODEL_NOT_ALLOWED,
+        )
+    elif e.policy_type == "endpoint_not_allowed":
+        raise PolicyError(
+            message=str(e),
+            code=ErrorCode.ENDPOINT_NOT_ALLOWED,
         )
     else:
         raise PolicyError(message=str(e))
@@ -455,3 +499,23 @@ def get_security_analyzer(request: Request) -> Optional[AsyncSecurityAnalyzer]:
     Callers should handle None gracefully.
     """
     return getattr(request.app.state, "security_analyzer", None)
+
+
+def get_pii_scrubber(request: Request) -> Optional[PIIScrubber]:
+    """Get PII scrubber from app state, or None if not enabled."""
+    return getattr(request.app.state, "pii_scrubber", None)
+
+
+def should_scrub_pii(request: Request) -> bool:
+    """Check if PII scrubbing should be applied for this route.
+
+    Returns True if PII scrubbing is enabled globally AND for this route.
+    """
+    pii_settings = getattr(request.app.state, "pii_settings", None)
+    if not pii_settings or not pii_settings.scrub_enabled:
+        return False
+    # If no routes specified, scrub all routes
+    if not pii_settings.scrub_routes:
+        return True
+    # Check if current route matches any configured scrub route
+    return request.url.path in pii_settings.scrub_routes

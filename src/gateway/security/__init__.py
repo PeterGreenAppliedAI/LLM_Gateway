@@ -15,6 +15,7 @@ from gateway.security.injection import (
     ContentWrapper,
 )
 from gateway.security.analyzer import AsyncSecurityAnalyzer, SecurityAlert
+from gateway.security.pii import PIIScrubber, PIIScanResult, PIIMatch
 from gateway.security.guard import (
     CircuitBreaker,
     GuardResult,
@@ -37,4 +38,7 @@ __all__ = [
     "LlamaGuardClient",
     "GraniteGuardianClient",
     "create_guard_client",
+    "PIIScrubber",
+    "PIIScanResult",
+    "PIIMatch",
 ]

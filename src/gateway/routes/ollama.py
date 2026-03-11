@@ -35,16 +35,21 @@ from gateway.models.ollama import (
     OllamaToolCallFunction,
 )
 from gateway.observability import get_logger, get_metrics
+from gateway.policy import PolicyEnforcer, PolicyViolation
 from gateway.routes.dependencies import (
     AuthResult,
     get_auth,
     get_audit_logger,
     get_dispatcher,
+    get_enforcer,
+    get_pii_scrubber,
     get_sanitizer,
     get_security_analyzer,
     setup_request_context,
+    should_scrub_pii,
+    translate_policy_violation,
 )
-from gateway.security import AsyncSecurityAnalyzer, Sanitizer
+from gateway.security import AsyncSecurityAnalyzer, PIIScrubber, Sanitizer
 from gateway.storage import AuditLogger
 
 logger = get_logger(__name__)
@@ -69,6 +74,8 @@ async def ollama_chat(
     body: OllamaChatRequest,
     auth: Annotated[AuthResult, Depends(get_auth)],
     dispatcher: Annotated[Dispatcher, Depends(get_dispatcher)],
+    enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
+    pii_scrubber: Annotated[PIIScrubber | None, Depends(get_pii_scrubber)],
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
     sanitizer: Annotated[Sanitizer, Depends(get_sanitizer)],
     security_analyzer: Annotated[AsyncSecurityAnalyzer | None, Depends(get_security_analyzer)],
@@ -113,6 +120,21 @@ async def ollama_chat(
                 for tc in m.tool_calls
             ]
         sanitized_messages.append(msg_dict)
+
+    # PII detection (always flags) + optional scrubbing (per-route)
+    if pii_scrubber:
+        scrub = should_scrub_pii(request)
+        sanitized_messages, pii_results = pii_scrubber.scan_messages(
+            sanitized_messages, scrub=scrub
+        )
+        pii_found = sum(r.detection_count for r in pii_results)
+        if pii_found:
+            logger.warning(
+                "PII detected in request",
+                request_id=ctx.request_id,
+                pii_count=pii_found,
+                scrubbed=scrub,
+            )
 
     # Queue for async security analysis
     if security_analyzer:
@@ -165,6 +187,18 @@ async def ollama_chat(
         request_kwargs["top_p"] = options["top_p"]
 
     internal_request = InternalRequest(**request_kwargs)
+
+    # Check policies - raises domain errors on violation
+    try:
+        enforcer.enforce(
+            internal_request,
+            rate_limit_key=client_id,
+            allowed_models=auth.allowed_models,
+            allowed_endpoints=auth.allowed_endpoints,
+            rate_limit_rpm=auth.rate_limit_rpm,
+        )
+    except PolicyViolation as e:
+        translate_policy_violation(e)
 
     if body.stream:
         return await _stream_ollama_chat(
@@ -315,6 +349,8 @@ async def ollama_generate(
     body: OllamaGenerateRequest,
     auth: Annotated[AuthResult, Depends(get_auth)],
     dispatcher: Annotated[Dispatcher, Depends(get_dispatcher)],
+    enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
+    pii_scrubber: Annotated[PIIScrubber | None, Depends(get_pii_scrubber)],
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
     sanitizer: Annotated[Sanitizer, Depends(get_sanitizer)],
     security_analyzer: Annotated[AsyncSecurityAnalyzer | None, Depends(get_security_analyzer)],
@@ -332,11 +368,30 @@ async def ollama_generate(
     sanitized_prompt = sanitizer.sanitize(body.prompt).sanitized
     sanitized_system = sanitizer.sanitize(body.system).sanitized if body.system else None
 
-    # Queue for async security analysis
+    # PII detection + optional scrubbing
     analysis_messages = []
     if sanitized_system:
         analysis_messages.append({"role": "system", "content": sanitized_system})
     analysis_messages.append({"role": "user", "content": sanitized_prompt})
+
+    if pii_scrubber:
+        scrub = should_scrub_pii(request)
+        analysis_messages, pii_results = pii_scrubber.scan_messages(
+            analysis_messages, scrub=scrub
+        )
+        pii_found = sum(r.detection_count for r in pii_results)
+        if pii_found:
+            logger.warning(
+                "PII detected in request",
+                request_id=ctx.request_id,
+                pii_count=pii_found,
+                scrubbed=scrub,
+            )
+        # Update sanitized values from scrubbed messages
+        if scrub:
+            sanitized_prompt = analysis_messages[-1]["content"]
+            if sanitized_system and len(analysis_messages) > 1:
+                sanitized_system = analysis_messages[0]["content"]
 
     if security_analyzer:
         security_analyzer.queue_request(
@@ -376,6 +431,18 @@ async def ollama_generate(
         request_kwargs["top_p"] = options["top_p"]
 
     internal_request = InternalRequest(**request_kwargs)
+
+    # Check policies
+    try:
+        enforcer.enforce(
+            internal_request,
+            rate_limit_key=client_id,
+            allowed_models=auth.allowed_models,
+            allowed_endpoints=auth.allowed_endpoints,
+            rate_limit_rpm=auth.rate_limit_rpm,
+        )
+    except PolicyViolation as e:
+        translate_policy_violation(e)
 
     if body.stream:
         return await _stream_ollama_generate(
@@ -524,6 +591,8 @@ async def ollama_embeddings(
     body: OllamaEmbeddingsRequest,
     auth: Annotated[AuthResult, Depends(get_auth)],
     dispatcher: Annotated[Dispatcher, Depends(get_dispatcher)],
+    enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
+    pii_scrubber: Annotated[PIIScrubber | None, Depends(get_pii_scrubber)],
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
     sanitizer: Annotated[Sanitizer, Depends(get_sanitizer)],
     security_analyzer: Annotated[AsyncSecurityAnalyzer | None, Depends(get_security_analyzer)],
@@ -542,6 +611,24 @@ async def ollama_embeddings(
 
     # Security: Sanitize prompts
     sanitized_prompts = [sanitizer.sanitize(p).sanitized for p in prompts]
+
+    # PII detection + optional scrubbing
+    if pii_scrubber:
+        scrub = should_scrub_pii(request)
+        embed_messages = [{"role": "user", "content": p} for p in sanitized_prompts]
+        embed_messages, pii_results = pii_scrubber.scan_messages(
+            embed_messages, scrub=scrub
+        )
+        pii_found = sum(r.detection_count for r in pii_results)
+        if pii_found:
+            logger.warning(
+                "PII detected in request",
+                request_id=ctx.request_id,
+                pii_count=pii_found,
+                scrubbed=scrub,
+            )
+        if scrub:
+            sanitized_prompts = [m["content"] for m in embed_messages]
 
     # Queue for async security analysis
     if security_analyzer:
@@ -566,6 +653,18 @@ async def ollama_embeddings(
         request_kwargs["preferred_provider"] = auth.target_endpoint
 
     internal_request = InternalRequest(**request_kwargs)
+
+    # Check policies
+    try:
+        enforcer.enforce(
+            internal_request,
+            rate_limit_key=client_id,
+            allowed_models=auth.allowed_models,
+            allowed_endpoints=auth.allowed_endpoints,
+            rate_limit_rpm=auth.rate_limit_rpm,
+        )
+    except PolicyViolation as e:
+        translate_policy_violation(e)
 
     result = await dispatcher.dispatch(internal_request)
 
