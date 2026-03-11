@@ -76,7 +76,7 @@ def full_gateway_config_data(
         "rate_limits": {
             "requests_per_minute_global": 1000,
             "requests_per_minute_per_user": 100,
-            "max_tokens_per_request": 4096,
+            "max_tokens_per_request": 32768,
         },
         "routing": {
             "default_provider": provider_ollama_data["name"],
@@ -167,7 +167,7 @@ class TestRateLimitConfig:
 
         assert config.requests_per_minute_global == 1000
         assert config.requests_per_minute_per_user == 100
-        assert config.max_tokens_per_request == 4096
+        assert config.max_tokens_per_request == 32768
 
     def test_rate_limit_custom_values(self) -> None:
         """Test rate limit with custom values."""

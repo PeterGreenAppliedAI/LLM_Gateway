@@ -169,7 +169,7 @@ class RateLimitConfig(BaseModel):
 
     requests_per_minute_global: int = Field(default=1000, gt=0)
     requests_per_minute_per_user: int = Field(default=100, gt=0)
-    max_tokens_per_request: int = Field(default=4096, gt=0)
+    max_tokens_per_request: int = Field(default=32768, gt=0)
 
 
 class RoutingRule(BaseModel):

@@ -7,7 +7,7 @@
 rate_limits:
   requests_per_minute_global: 1000
   requests_per_minute_per_user: 100
-  max_tokens_per_request: 4096
+  max_tokens_per_request: 32768
 
 # =============================================================================
 # Endpoints Configuration

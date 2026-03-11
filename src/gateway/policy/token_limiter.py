@@ -35,7 +35,7 @@ class TokenLimitConfig(BaseModel):
 
     enabled: bool = Field(default=True, description="Whether token limiting is enabled")
     max_tokens_per_request: int = Field(
-        default=4096,
+        default=32768,
         ge=1,
         le=128000,
         description="Maximum tokens allowed per request",
