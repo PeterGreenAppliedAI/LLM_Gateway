@@ -48,13 +48,34 @@ DevMesh Gateway solves this by acting as the control plane between your applicat
 Teams deploying LLMs in production who need:
 
 - A **unified API** across multiple inference runtimes
-- **Prompt injection defense** without adding latency
+- **Prompt injection screening** with async guard-model analysis that adds no latency
 - **PII detection and scrubbing** before prompts reach models
 - **Request auditing** with full provenance
 - **Per-client routing** and model access control
 - **Centralized rate limiting** and policy enforcement
 
 If you're running Ollama on a GPU box in a closet, or managing a fleet of vLLM instances — this is the thing that sits in front of all of them.
+
+## Use Cases
+
+- **Unified model access** — Route internal apps across Ollama, vLLM, and cloud APIs behind one interface
+- **Security screening** — Add prompt injection and PII scanning in front of self-hosted models
+- **Access control** — Enforce per-team or per-client model access policies and rate limits
+- **Audit trail** — Log every AI request for compliance, debugging, and cost tracking
+- **Runtime abstraction** — Standardize model access before building agents and pipelines on top
+
+## What This Is / What This Isn't
+
+**What it is:**
+- A self-hosted AI request control plane
+- A routing, policy, and observability layer in front of inference runtimes
+- A unified API surface for multiple model backends
+
+**What it isn't:**
+- A model serving engine (use Ollama, vLLM, TRT-LLM for that)
+- A hosted proxy or SaaS
+- An agent framework
+- A Kubernetes operator
 
 ## Quick Start
 
@@ -210,7 +231,7 @@ The gateway exposes two API formats. Your apps pick whichever they already use.
 
 ## Security
 
-### Layered Defense (Zero Latency on the Request Path)
+### Layered Defense
 
 | Layer | Timing | What It Does |
 |-------|--------|-------------|
@@ -266,6 +287,25 @@ src/gateway/
 ├── settings.py      # Pydantic settings (env vars)
 └── main.py          # FastAPI application
 ```
+
+## Current Status
+
+DevMesh Gateway is actively developed and running in production. It currently supports:
+
+- OpenAI-compatible and Ollama-compatible API surfaces
+- Ollama and OpenAI provider adapters (vLLM, TRT-LLM, SGLang adapters are scaffolded)
+- Async audit logging to SQLite or PostgreSQL
+- Per-key policy enforcement (rate limits, model allowlists, endpoint restrictions)
+- Background guard-model analysis (IBM Granite Guardian, Llama Guard)
+- PII detection and per-route scrubbing
+- React monitoring dashboard
+
+Still evolving:
+
+- Broader provider adapter coverage (vLLM, TRT-LLM, SGLang)
+- Additional policy modes
+- Production hardening patterns
+- Enterprise deployment guidance
 
 ## Testing
 
