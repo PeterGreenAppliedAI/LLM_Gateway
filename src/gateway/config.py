@@ -103,7 +103,7 @@ class EndpointConfig(BaseModel):
 
     name: SafeIdentifier  # e.g., gpunode-ollama
     type: ProviderType  # ollama, vllm, etc.
-    url: ProviderUrl  # http://192.168.1.216:11434
+    url: ProviderUrl  # e.g., http://localhost:11434
     enabled: bool = True
     timeout: float = Field(default=30.0, gt=0, le=300.0)
     max_retries: int = Field(default=3, ge=0, le=10)

@@ -12,6 +12,9 @@ from typing import Any, AsyncIterator
 import httpx
 
 from gateway.config import ProviderConfig
+from gateway.observability import get_logger
+
+logger = get_logger(__name__)
 from gateway.models.common import (
     FinishReason,
     HealthStatus,
@@ -121,6 +124,33 @@ class OllamaAdapter(ProviderAdapter):
             # Build Ollama chat request
             ollama_request = self._build_chat_request(request)
 
+            # Log image presence for vision debugging
+            image_info = []
+            for i, m in enumerate(ollama_request.get("messages", [])):
+                imgs = m.get("images", [])
+                if imgs:
+                    image_info.append(
+                        {"msg_index": i, "role": m.get("role"), "image_count": len(imgs),
+                         "image_sizes": [len(img) for img in imgs]}
+                    )
+            if image_info:
+                logger.info(
+                    "Sending request with images to Ollama",
+                    model=ollama_request.get("model"),
+                    image_info=image_info,
+                    endpoint=self.base_url,
+                )
+            else:
+                # Log when a vision model request has NO images (helps debug drops)
+                model_name = (ollama_request.get("model") or "").lower()
+                if "vl" in model_name or "vision" in model_name or "llava" in model_name:
+                    logger.warning(
+                        "Vision model request has NO images",
+                        model=ollama_request.get("model"),
+                        endpoint=self.base_url,
+                        message_count=len(ollama_request.get("messages", [])),
+                    )
+
             response = await client.post("/api/chat", json=ollama_request)
             response.raise_for_status()
             data = response.json()
@@ -132,8 +162,16 @@ class OllamaAdapter(ProviderAdapter):
         except httpx.TimeoutException as e:
             return self._error_response(request, f"Timeout: {e}", "timeout")
         except httpx.HTTPStatusError as e:
+            error_body = e.response.text[:500]
+            logger.warning(
+                "Ollama HTTP error",
+                status_code=e.response.status_code,
+                error_body=error_body,
+                model=request.model,
+                endpoint=self.base_url,
+            )
             return self._error_response(
-                request, f"HTTP {e.response.status_code}: {e.response.text[:200]}", "http_error"
+                request, f"HTTP {e.response.status_code}: {error_body}", "http_error"
             )
         except Exception as e:
             return self._error_response(request, str(e), "unknown_error")
@@ -227,6 +265,31 @@ class OllamaAdapter(ProviderAdapter):
             client = await self._get_client()
             ollama_request = self._build_chat_request(request)
             ollama_request["stream"] = True
+
+            # Log image presence for vision debugging
+            stream_image_info = []
+            for i, m in enumerate(ollama_request.get("messages", [])):
+                imgs = m.get("images", [])
+                if imgs:
+                    stream_image_info.append(
+                        {"msg_index": i, "role": m.get("role"), "image_count": len(imgs),
+                         "image_sizes": [len(img) for img in imgs]}
+                    )
+            if stream_image_info:
+                logger.info(
+                    "Streaming request with images to Ollama",
+                    model=ollama_request.get("model"),
+                    image_info=stream_image_info,
+                    endpoint=self.base_url,
+                )
+            else:
+                model_name = (ollama_request.get("model") or "").lower()
+                if "vl" in model_name or "vision" in model_name or "llava" in model_name:
+                    logger.warning(
+                        "Vision model STREAM request has NO images",
+                        model=ollama_request.get("model"),
+                        endpoint=self.base_url,
+                    )
 
             async with client.stream("POST", "/api/chat", json=ollama_request) as response:
                 response.raise_for_status()

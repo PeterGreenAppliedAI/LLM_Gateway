@@ -51,9 +51,10 @@ class DatabaseSettings(BaseSettings):
 
 
 class GuardModelSettings(BaseSettings):
-    """Llama Guard 3 shadow analyzer configuration.
+    """Guard model shadow analyzer configuration.
 
-    Runs guard model alongside regex for verdict comparison.
+    Supports Llama Guard 3 and Granite Guardian 3.2.
+    Auto-detects backend from model_name.
     Configure via environment variables with GATEWAY_GUARD_ prefix.
     """
 
@@ -64,11 +65,11 @@ class GuardModelSettings(BaseSettings):
 
     enabled: bool = Field(default=False, description="Enable guard model shadow analysis")
     base_url: str = Field(
-        default="http://10.0.0.15:11434",
-        description="Ollama server URL hosting llama-guard3",
+        default="http://localhost:11434",
+        description="Ollama server URL hosting guard model",
     )
-    model_name: str = Field(default="llama-guard3:1b", description="Guard model name")
-    timeout: float = Field(default=10.0, ge=1.0, le=60.0, description="Inference timeout seconds")
+    model_name: str = Field(default="ibm/granite3.2-guardian:5b", description="Guard model name (e.g. ibm/granite3.2-guardian:5b, llama-guard3:8b)")
+    timeout: float = Field(default=15.0, ge=1.0, le=60.0, description="Inference timeout seconds")
 
 
 class SecuritySettings(BaseSettings):
@@ -124,6 +125,15 @@ class Settings(BaseSettings):
     api_key: SecretStr | None = Field(default=None, description="API key for authentication")
     api_key_header: str = Field(default="X-API-Key", description="Header name for API key")
     require_api_key: bool = Field(default=False, description="Require API key for all requests")
+
+    # CORS
+    cors_origins: list[str] = Field(
+        default_factory=lambda: [
+            "http://localhost:5174",
+            "http://localhost:5173",
+        ],
+        description="Allowed CORS origins (dashboard URLs)",
+    )
 
     # Logging
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = Field(

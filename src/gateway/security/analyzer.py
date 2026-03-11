@@ -14,7 +14,7 @@ from collections import deque
 
 from gateway.security.sanitizer import Sanitizer, SanitizationResult
 from gateway.security.injection import InjectionDetector, DetectionResult, ThreatLevel
-from gateway.security.guard import GuardResult, LlamaGuardClient
+from gateway.security.guard import GuardResult, LlamaGuardClient, GraniteGuardianClient
 from gateway.observability import get_logger
 
 logger = get_logger(__name__)
@@ -107,7 +107,7 @@ class AsyncSecurityAnalyzer:
         self,
         sanitizer: Optional[Sanitizer] = None,
         detector: Optional[InjectionDetector] = None,
-        guard_client: Optional[LlamaGuardClient] = None,
+        guard_client: Optional[LlamaGuardClient | GraniteGuardianClient] = None,
         scan_allowlist_ips: Optional[list[str]] = None,
         max_queue_size: int = 1000,
         max_alerts: int = 1000,

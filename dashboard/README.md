@@ -1,73 +1,47 @@
-# React + TypeScript + Vite
+# DevMesh Gateway Dashboard
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+React + TypeScript monitoring dashboard for the LLM Gateway.
 
-Currently, two official plugins are available:
+## Features
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+- **Stats Overview**: Request counts, success rates, latency, token usage (24h)
+- **Security Monitor**: Alerts, guard scan results, regex vs guard verdict comparison
+- **Audit Log**: Recent requests with model, endpoint, latency, tokens (click for details)
+- **Model Catalog**: All discovered models across endpoints with sizes and families
+- **API Key Management**: Create and revoke database-managed API keys
+- **Endpoint Health**: Per-endpoint status, model counts, health indicators
 
-## React Compiler
+## Setup
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm install
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+## Development
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+```bash
+# Default: connects to gateway at http://localhost:8001
+npx vite --host 0.0.0.0 --port 5174
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+# Custom gateway URL:
+VITE_API_URL=http://192.168.1.100:8001 npx vite --host 0.0.0.0 --port 5174
+```
+
+## Production Build
+
+```bash
+npm run build
+# Output in dist/
+```
+
+## Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `VITE_API_URL` | `http://localhost:8001` | Gateway API base URL |
+
+The gateway must have the dashboard's origin in its CORS configuration:
+
+```bash
+GATEWAY_CORS_ORIGINS='["http://localhost:5174","http://your-server:5174"]'
 ```

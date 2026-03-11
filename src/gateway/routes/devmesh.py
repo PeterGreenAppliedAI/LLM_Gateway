@@ -1023,6 +1023,7 @@ class SecurityResultResponse(BaseModel):
     guard_skipped: Optional[bool] = None
     guard_category_code: Optional[str] = None
     guard_category_name: Optional[str] = None
+    guard_confidence: Optional[str] = None
     guard_inference_ms: Optional[float] = None
     guard_error: Optional[str] = None
     alert_count: int = 0
@@ -1100,6 +1101,7 @@ async def get_security_results(
             item.guard_skipped = guard_scan.skipped
             item.guard_category_code = guard_scan.category_code
             item.guard_category_name = guard_scan.category_name
+            item.guard_confidence = guard_scan.confidence
             item.guard_inference_ms = guard_scan.inference_time_ms
             item.guard_error = guard_scan.error
 

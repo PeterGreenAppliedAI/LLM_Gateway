@@ -1,0 +1,85 @@
+# DevMesh Gateway Configuration
+#
+# Copy this file to gateway.yaml and edit to match your infrastructure.
+# Environment variables can be used with ${VAR_NAME:-default} syntax.
+
+# Rate limiting settings
+rate_limits:
+  requests_per_minute_global: 1000
+  requests_per_minute_per_user: 100
+  max_tokens_per_request: 4096
+
+# =============================================================================
+# Endpoints Configuration
+# Add your GPU nodes / inference runtimes here
+# =============================================================================
+
+endpoints:
+  # Example: Local Ollama instance
+  - name: local-ollama
+    type: ollama
+    url: http://localhost:11434
+    enabled: true
+    timeout: 120.0
+    max_retries: 3
+    labels:
+      tier: primary
+      location: local
+
+  # Example: Second GPU node
+  # - name: gpu-node-2
+  #   type: ollama
+  #   url: http://192.168.1.100:11434
+  #   enabled: true
+  #   timeout: 120.0
+  #   max_retries: 3
+  #   labels:
+  #     tier: primary
+
+# =============================================================================
+# Environments
+# Control which endpoints and models are available
+# =============================================================================
+
+environments:
+  - name: dev
+    # In dev, allow all discovered models from all endpoints
+    allow_all_discovered: true
+
+  - name: prod
+    # In prod, only approved models
+    approved_models:
+      - phi4:14b
+      - llama3.2:*
+      - qwen2.5:*
+
+# =============================================================================
+# Resolution Policy
+# Model -> Endpoint mapping when a model exists on multiple endpoints
+# =============================================================================
+
+resolution:
+  endpoint_priority:
+    - local-ollama
+    # - gpu-node-2
+  ambiguous_behavior: first_priority
+
+# =============================================================================
+# Authentication
+# API keys with optional per-client endpoint routing
+# Set keys via environment variables to avoid committing secrets.
+# =============================================================================
+
+auth:
+  enabled: true
+  api_keys:
+    # Example: Pin a client to a specific endpoint
+    - key: "${GATEWAY_KEY_APP1}"
+      client_id: my-app
+      description: "My application"
+      # target_endpoint: gpu-node-2  # Optional: route all traffic to this endpoint
+
+    # Example: General development key
+    - key: "${GATEWAY_KEY_DEV}"
+      client_id: dev-user
+      description: "Development testing"

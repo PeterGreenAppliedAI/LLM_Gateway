@@ -84,6 +84,19 @@ async def ollama_chat(
         task="chat",
     )
 
+    # Log incoming images for vision debugging
+    incoming_images = sum(1 for m in body.messages if m.images)
+    if incoming_images:
+        logger.info(
+            "Received chat request with images",
+            model=body.model,
+            messages_with_images=incoming_images,
+            image_sizes=[
+                [len(img) for img in m.images]
+                for m in body.messages if m.images
+            ],
+        )
+
     # Security: Sanitize message content
     sanitized_messages = []
     for m in body.messages:
@@ -154,7 +167,8 @@ async def ollama_chat(
 
     if body.stream:
         return await _stream_ollama_chat(
-            dispatcher, internal_request, body.model, ctx, audit_logger
+            dispatcher, internal_request, body.model, ctx, audit_logger,
+            request_body={"messages": sanitized_messages},
         )
 
     # Non-streaming
@@ -178,6 +192,7 @@ async def ollama_chat(
             latency_ms=ctx.total_latency_ms,
             prompt_tokens=result.response.usage.prompt_tokens,
             completion_tokens=result.response.usage.completion_tokens,
+            request_body={"messages": sanitized_messages},
         )
 
     # Convert to Ollama format - include tool_calls if present
@@ -213,6 +228,7 @@ async def _stream_ollama_chat(
     model: str,
     ctx,
     audit_logger: AuditLogger | None,
+    request_body: dict | None = None,
 ) -> StreamingResponse:
     """Stream Ollama chat response."""
 
@@ -261,6 +277,7 @@ async def _stream_ollama_chat(
                             status="success",
                             stream=True,
                             latency_ms=ctx.total_latency_ms,
+                            request_body=request_body,
                         )
 
         except Exception as e:
@@ -352,7 +369,8 @@ async def ollama_generate(
 
     if body.stream:
         return await _stream_ollama_generate(
-            dispatcher, internal_request, body.model, ctx, audit_logger
+            dispatcher, internal_request, body.model, ctx, audit_logger,
+            request_body={"messages": [m for m in analysis_messages]},
         )
 
     # Non-streaming
@@ -375,6 +393,7 @@ async def ollama_generate(
             latency_ms=ctx.total_latency_ms,
             prompt_tokens=result.response.usage.prompt_tokens,
             completion_tokens=result.response.usage.completion_tokens,
+            request_body={"messages": [m for m in analysis_messages]},
         )
 
     return OllamaGenerateResponse(
@@ -393,6 +412,7 @@ async def _stream_ollama_generate(
     model: str,
     ctx,
     audit_logger: AuditLogger | None,
+    request_body: dict | None = None,
 ) -> StreamingResponse:
     """Stream Ollama generate response."""
 
@@ -424,6 +444,7 @@ async def _stream_ollama_generate(
                             status="success",
                             stream=True,
                             latency_ms=ctx.total_latency_ms,
+                            request_body=request_body,
                         )
 
                 yield json.dumps(response) + "\n"
@@ -538,6 +559,7 @@ async def ollama_embeddings(
             endpoint=result.provider_used,
             status="success",
             latency_ms=ctx.total_latency_ms,
+            request_body={"prompts": sanitized_prompts},
         )
 
     # Return embeddings in Ollama format

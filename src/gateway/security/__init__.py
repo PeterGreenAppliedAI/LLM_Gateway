@@ -15,7 +15,12 @@ from gateway.security.injection import (
     ContentWrapper,
 )
 from gateway.security.analyzer import AsyncSecurityAnalyzer, SecurityAlert
-from gateway.security.guard import GuardResult, LlamaGuardClient
+from gateway.security.guard import (
+    GuardResult,
+    LlamaGuardClient,
+    GraniteGuardianClient,
+    create_guard_client,
+)
 
 __all__ = [
     "Sanitizer",
@@ -28,4 +33,6 @@ __all__ = [
     "SecurityAlert",
     "GuardResult",
     "LlamaGuardClient",
+    "GraniteGuardianClient",
+    "create_guard_client",
 ]

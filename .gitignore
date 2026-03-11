@@ -55,8 +55,10 @@ htmlcov/
 Thumbs.db
 
 # Config with secrets (keep templates)
+config/gateway.yaml
 config/providers.yaml
 config/*.bak
+!config/gateway.yaml.example
 !config/providers.yaml.example
 
 # Data (SQLite databases, runtime artifacts)

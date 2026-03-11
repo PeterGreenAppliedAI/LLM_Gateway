@@ -1,272 +1,143 @@
-# DevMesh Gateway v0 - Implementation Plan
+# DevMesh Gateway - Implementation Plan
 
-## Phased Approach
+## Status: v0+ (Beyond Original PRD)
 
-Each phase includes:
-- Implementation
-- Unit tests
-- Verification before proceeding
+The gateway has exceeded the original v0 PRD scope. This plan tracks the original phases and their current status, plus new phases for features added beyond v0.
 
 ---
 
-## Phase 1: Project Scaffolding
+## Original Phases (v0 PRD)
 
-**Goal:** Establish project structure, dependencies, Docker setup, and config loading.
+### Phase 1: Project Scaffolding -- COMPLETE
+- FastAPI app, config loading, settings, Docker structure
 
-### Deliverables
-```
-llm_gateway/
-├── src/
-│   └── gateway/
-│       ├── __init__.py
-│       ├── main.py              # FastAPI app entry
-│       ├── config.py            # Config loading (YAML + env vars)
-│       └── settings.py          # Pydantic settings
-├── tests/
-│   ├── __init__.py
-│   └── test_config.py
-├── config/
-│   ├── gateway.yaml             # Main config template
-│   └── providers.yaml           # Provider definitions
-├── docker/
-│   └── Dockerfile
-├── docker-compose.yaml
-├── pyproject.toml
-├── requirements.txt
-└── README.md
-```
+### Phase 2: Core Models -- COMPLETE
+- Internal normalized format, OpenAI-compatible schemas, Ollama schemas
 
-### Tests
-- [ ] Config loads from YAML
-- [ ] Environment variables override config
-- [ ] Missing required config raises clear error
-- [ ] FastAPI app starts and /health returns 200
+### Phase 3: Provider Adapter Interface -- COMPLETE
+- Abstract `ProviderAdapter`, Ollama adapter (full), OpenAI adapter (full)
+- vLLM, TRT-LLM, SGLang stubs
 
----
+### Phase 4: Routing Engine -- COMPLETE
+- Config-driven routing via `Dispatcher`
+- Health-aware provider selection with fallback
+- Per-client endpoint pinning via API keys
 
-## Phase 2: Core Models
+### Phase 5: Policy Enforcement -- COMPLETE
+- Rate limiting (global + per-user)
+- Token limits
+- Provider health gating
 
-**Goal:** Define normalized internal request/response format and OpenAI-compatible schemas.
+### Phase 6: Observability -- COMPLETE (with gaps)
+- Structured JSON logging
+- Prometheus metrics (OpenAI routes only — Ollama routes missing)
+- Request context tracking
 
-### Deliverables
-```
-src/gateway/
-├── models/
-│   ├── __init__.py
-│   ├── internal.py              # Internal normalized format
-│   ├── openai.py                # OpenAI-compatible schemas
-│   └── common.py                # Shared types (TaskType, etc.)
-```
-
-### Internal Model Fields (per PRD)
-- request_id, task, input/messages, max_tokens, temperature
-- client_id, user_id
-- Optional: preferred_provider, fallback_allowed, schema
-
-### Tests
-- [ ] Internal request model validates required fields
-- [ ] OpenAI ChatCompletion request parses correctly
-- [ ] OpenAI -> Internal conversion works
-- [ ] Internal -> OpenAI response conversion works
-- [ ] Invalid requests raise ValidationError
+### Phase 7: API Endpoints -- COMPLETE
+- OpenAI-compatible: `/v1/chat/completions`, `/v1/embeddings`
+- Ollama-native: `/api/chat`, `/api/generate`, `/api/embeddings`, `/api/tags`
+- DevMesh: `/health`, `/v1/devmesh/catalog`, management APIs
 
 ---
 
-## Phase 3: Provider Adapter Interface
+## Post-v0 Phases (Added Features)
 
-**Goal:** Abstract provider interface + working Ollama adapter.
+### Phase 8: Async Database & Audit Logging -- COMPLETE
+- Async SQLAlchemy with SQLite (default) and PostgreSQL support
+- Audit logger with optional request/response body storage
+- Usage statistics and daily aggregation
 
-### Deliverables
-```
-src/gateway/
-├── providers/
-│   ├── __init__.py
-│   ├── base.py                  # Abstract ProviderAdapter
-│   ├── ollama.py                # Ollama implementation
-│   ├── vllm.py                  # vLLM implementation (stub)
-│   ├── trtllm.py                # TRT-LLM stub
-│   └── sglang.py                # SGLang stub
-```
+### Phase 9: Security Module -- COMPLETE (needs hardening)
+- Unicode sanitization (zero latency)
+- Regex-based injection pattern detection
+- Content wrapping with trust markers
+- Async background analysis (zero request latency)
 
-### Interface Methods (per PRD)
-- `health() -> HealthStatus`
-- `list_models() -> List[ModelInfo]`
-- `chat(request) -> ChatResponse`
-- `generate(request) -> GenerateResponse` (optional)
-- `embeddings(request) -> EmbeddingsResponse` (optional)
+### Phase 10: Guard Model Integration -- COMPLETE
+- IBM Granite Guardian 3.2 support (jailbreak detection)
+- Llama Guard 3 support (1b/8b)
+- Factory pattern for auto-detection from model name
+- Shadow mode (log only, no blocking)
+- Confidence parsing for Granite Guardian
 
-### Adapter Metadata
-- Capabilities, max_context_length, streaming_support, limitations
+### Phase 11: API Key Management -- COMPLETE (needs auth hardening)
+- Database-backed key storage (SHA256 hashed)
+- Key creation, listing, revocation via API
+- Per-client endpoint routing via key config
 
-### Tests
-- [ ] Abstract base enforces interface contract
-- [ ] Ollama adapter implements all required methods
-- [ ] health() returns correct status
-- [ ] list_models() returns model info with capabilities
-- [ ] chat() handles request/response correctly (mocked)
-- [ ] Adapter declares capabilities properly
+### Phase 12: Dashboard -- COMPLETE
+- React + TypeScript + Tailwind
+- Security monitor with regex vs guard comparison
+- Audit log viewer
+- Model catalog
+- API key management UI
+- Endpoint health display
 
----
+### Phase 13: Model Discovery -- COMPLETE
+- Auto-discovers models across all Ollama endpoints
+- Periodic refresh (60s interval)
+- Catalog with model metadata (size, family, quantization)
 
-## Phase 4: Routing Engine
-
-**Goal:** Config-driven routing with fallback support.
-
-### Deliverables
-```
-src/gateway/
-├── routing/
-│   ├── __init__.py
-│   ├── engine.py                # Router implementation
-│   ├── rules.py                 # Routing rule definitions
-│   └── selector.py              # Provider selection logic
-config/
-└── routing.yaml                 # Routing rules config
-```
-
-### Routing Inputs (per PRD)
-- Task type
-- Model capability requirements
-- Provider health
-- Client overrides
-
-### Routing Outputs
-- Selected provider
-- Selected model
-- Fallback chain
-
-### Tests
-- [ ] Routes task to correct provider per config
-- [ ] Respects client preferred_provider override
-- [ ] Falls back when primary provider unhealthy
-- [ ] Returns error when no healthy provider available
-- [ ] Routing config loads and validates
+### Phase 14: Vision/Image Support -- COMPLETE
+- Image passthrough in Ollama chat/generate routes
+- Base64 image preservation through sanitization pipeline
+- Debug logging for image pipeline
 
 ---
 
-## Phase 5: Policy Enforcement
+## Known Issues (from 2026-03-11 Code Review)
 
-**Goal:** Rate limiting and token limits.
+### Blockers
+- [ ] Streaming errors leak raw exception messages to clients
+- [ ] OpenAI route sanitization bypass (`body.to_internal()` uses unsanitized)
+- [ ] No circuit breaker for guard model
+- [ ] No input length cap before regex scanning
+- [ ] Key management endpoints unauthenticated
+- [ ] Key expiration never checked
+- [ ] No migration framework (Alembic)
 
-### Deliverables
-```
-src/gateway/
-├── policies/
-│   ├── __init__.py
-│   ├── engine.py                # Policy enforcement engine
-│   ├── rate_limit.py            # Rate limiting (global + per-user)
-│   └── token_limit.py           # Max tokens per request
-config/
-└── policies.yaml                # Policy definitions
-```
+### High Risk
+- [ ] httpx client TOCTOU race in provider adapters
+- [ ] Dispatcher `_try_provider` swallows exceptions silently
+- [ ] Ollama routes have zero Prometheus metrics
+- [ ] No per-chunk timeout in OpenAI streaming
+- [ ] Zero test coverage: guard clients, analyzer, KeyManager
 
-### Required Policies (per PRD)
-- Max tokens per request
-- Requests per minute (global and per user)
-- Allowed providers per task
-- Block if provider unhealthy
-
-### Tests
-- [ ] Blocks request exceeding max_tokens
-- [ ] Enforces global rate limit
-- [ ] Enforces per-user rate limit
-- [ ] Blocks disallowed provider for task
-- [ ] Policy config loads correctly
+### See COMPLIANCE_AUDIT.md for full findings.
 
 ---
 
-## Phase 6: Observability
+## Future Phases
 
-**Goal:** Structured JSON logging + Prometheus metrics.
+### Phase 15: Open Source Readiness
+- [ ] Fix all blockers from code review
+- [ ] Add Alembic migrations
+- [ ] docker-compose.yaml with monitoring stack
+- [ ] Grafana dashboard template
+- [ ] Contributing guide
+- [ ] License file verification
 
-### Deliverables
-```
-src/gateway/
-├── observability/
-│   ├── __init__.py
-│   ├── logging.py               # Structured JSON logger
-│   └── metrics.py               # Prometheus metrics
-```
+### Phase 16: Enforcement Mode
+- [ ] Guard model inline (parallel with LLM inference)
+- [ ] Stream kill on guard flag
+- [ ] Configurable block vs shadow per category
 
-### Log Fields (per PRD)
-- request_id, client_id, user_id, provider, model
-- task, latency_ms, token counts, error type
-
-### Metrics (per PRD)
-- requests_total{provider,model,task,status}
-- request_latency_ms (histogram)
-- tokens_prompt_total, tokens_completion_total
-- provider_errors_total
-- active_requests{provider}
-
-### Tests
-- [ ] Logs are valid JSON
-- [ ] All required fields present in logs
-- [ ] Prometheus metrics exposed correctly
-- [ ] Latency histogram records correctly
-- [ ] Token counters increment properly
-
----
-
-## Phase 7: API Endpoints
-
-**Goal:** OpenAI-compatible API + DevMesh extensions.
-
-### Deliverables
-```
-src/gateway/
-├── api/
-│   ├── __init__.py
-│   ├── routes.py                # Route registration
-│   ├── chat.py                  # POST /v1/chat/completions
-│   ├── completions.py           # POST /v1/completions
-│   ├── models.py                # GET /v1/models
-│   ├── health.py                # GET /health
-│   ├── metrics.py               # GET /metrics
-│   └── devmesh.py               # POST /v1/devmesh/route
-├── middleware/
-│   ├── __init__.py
-│   ├── auth.py                  # API key authentication
-│   └── request_id.py            # Request ID injection
-```
-
-### External API (OpenAI-compatible)
-- POST /v1/chat/completions
-- POST /v1/completions
-- POST /v1/embeddings (optional)
-
-### DevMesh Extensions
-- GET /health
-- GET /metrics
-- GET /v1/models
-- POST /v1/devmesh/route
-
-### Tests
-- [ ] /health returns 200 with status
-- [ ] /v1/chat/completions accepts OpenAI format
-- [ ] /v1/models returns available models
-- [ ] /metrics returns Prometheus format
-- [ ] Auth middleware rejects invalid API key
-- [ ] Request ID generated and propagated
-- [ ] Full integration test: request -> route -> provider -> response
-
----
-
-## Final Integration
-
-After all phases complete:
-- [ ] docker-compose up starts full stack
-- [ ] End-to-end test with real Ollama
-- [ ] Grafana dashboard shows metrics
-- [ ] Deploy documentation complete
+### Phase 17: Cloud Provider Adapters
+- [ ] OpenAI API (direct)
+- [ ] Anthropic API
+- [ ] AWS Bedrock
+- [ ] Google Vertex AI
 
 ---
 
 ## Tech Stack
 
 - **Framework:** FastAPI
-- **Config:** Pydantic Settings + YAML (PyYAML)
+- **Config:** Pydantic Settings + YAML
 - **HTTP Client:** httpx (async)
+- **Database:** SQLAlchemy (async) — SQLite default, PostgreSQL ready
 - **Metrics:** prometheus-client
-- **Testing:** pytest + pytest-asyncio + httpx (TestClient)
-- **Container:** Docker + Docker Compose
+- **Security:** Custom injection detector + Granite Guardian / Llama Guard
+- **Dashboard:** React + TypeScript + Vite + Tailwind
+- **Testing:** pytest + pytest-asyncio
+- **Container:** Docker (compose not yet created)

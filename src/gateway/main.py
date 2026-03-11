@@ -26,7 +26,7 @@ from gateway.dispatch import ProviderRegistry
 from gateway.exception_handlers import register_exception_handlers
 from gateway.observability import get_logger
 from gateway.security import AsyncSecurityAnalyzer
-from gateway.security.guard import LlamaGuardClient
+from gateway.security.guard import create_guard_client
 from gateway.settings import Settings, get_settings
 from gateway.storage import AuditLogger, DatabaseConfig, create_async_db_engine
 from gateway.routes import openai_router, devmesh_router, ollama_router
@@ -100,7 +100,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Start security analyzer (async background analysis)
     guard_client = None
     if settings.guard.enabled:
-        guard_client = LlamaGuardClient(
+        guard_client = create_guard_client(
             base_url=settings.guard.base_url,
             model_name=settings.guard.model_name,
             timeout=settings.guard.timeout,
@@ -154,14 +154,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
 
     # Add CORS middleware for dashboard
+    # Configure via GATEWAY_CORS_ORIGINS env var (JSON list)
+    settings = get_settings()
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=[
-            "http://192.168.1.184:5174",   # Dashboard dev server
-            "http://192.168.1.184:5173",   # Dashboard alt port
-            "http://localhost:5174",        # Local dev
-            "http://localhost:5173",        # Local dev alt
-        ],
+        allow_origins=settings.cors_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

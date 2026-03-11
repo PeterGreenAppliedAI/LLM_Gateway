@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 // Helper to format UTC timestamp to local time
 function formatTimestamp(utcTimestamp: string): string {
@@ -123,6 +123,7 @@ interface SecurityResult {
   guard_skipped: boolean | null
   guard_category_code: string | null
   guard_category_name: string | null
+  guard_confidence: string | null
   guard_inference_ms: number | null
   guard_error: string | null
   alert_count: number
@@ -144,7 +145,7 @@ interface ApiKeyInfo {
 }
 
 // API base URL - gateway server
-const API_BASE = import.meta.env.VITE_API_URL || 'http://192.168.1.184:8001'
+const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8001'
 
 // Fetch helpers
 async function fetchStats(hours = 24): Promise<Stats> {
@@ -478,6 +479,11 @@ function GuardResultRow({ result }: { result: SecurityResult }) {
         {result.guard_category_code && (
           <span className="text-gray-400 text-xs ml-1" title={result.guard_category_name || ''}>
             {result.guard_category_code}
+          </span>
+        )}
+        {result.guard_confidence && (
+          <span className={`text-xs ml-1 ${result.guard_confidence === 'High' ? 'text-red-400' : 'text-gray-500'}`}>
+            {result.guard_confidence}
           </span>
         )}
       </div>
@@ -847,14 +853,14 @@ function App() {
   const [securityAlerts, setSecurityAlerts] = useState<SecurityAlert[]>([])
   const [securityStats, setSecurityStats] = useState<SecurityStats | null>(null)
   const [guardResults, setGuardResults] = useState<SecurityResult[]>([])
-  const [guardDisagreementsOnly, setGuardDisagreementsOnly] = useState(false)
+  const guardDisagreementsRef = useRef(false)
   const [apiKeys, setApiKeys] = useState<ApiKeyInfo[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [selectedRequest, setSelectedRequest] = useState<RequestDetail | null>(null)
   const [loadingDetail, setLoadingDetail] = useState(false)
 
-  const refresh = async () => {
+  const refresh = useCallback(async () => {
     try {
       const [statsData, requestsData, catalogData, healthData, secAlertsData, secStatsData, guardData, apiKeysData] = await Promise.all([
         fetchStats(),
@@ -863,7 +869,7 @@ function App() {
         fetchHealth(),
         fetchSecurityAlerts(),
         fetchSecurityStats(),
-        fetchSecurityResults(50, guardDisagreementsOnly),
+        fetchSecurityResults(50, guardDisagreementsRef.current),
         fetchApiKeys(),
       ])
       setStats(statsData)
@@ -880,7 +886,7 @@ function App() {
     } finally {
       setLoading(false)
     }
-  }
+  }, [])
 
   const handleRequestClick = async (request: Request) => {
     setLoadingDetail(true)
@@ -959,7 +965,7 @@ function App() {
         alerts={securityAlerts}
         stats={securityStats}
         guardResults={guardResults}
-        onFilterChange={(d) => { setGuardDisagreementsOnly(d); refresh() }}
+        onFilterChange={(d) => { guardDisagreementsRef.current = d; refresh() }}
       />
 
       {/* API Keys */}
