@@ -56,15 +56,18 @@ Thumbs.db
 
 # Config with secrets (keep templates)
 config/gateway.yaml
+config/endpoints.yaml
 config/providers.yaml
 config/*.bak
 !config/gateway.yaml.example
+!config/endpoints.yaml.example
 !config/providers.yaml.example
 
 # Data (SQLite databases, runtime artifacts)
 data/
 
 # Error page artifacts
+500
 500/
 
 # Dashboard build output

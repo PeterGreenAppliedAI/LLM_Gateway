@@ -1,0 +1,44 @@
+# LLM Gateway Endpoints Configuration
+# Copy to endpoints.yaml and edit for your environment.
+# This file can be used instead of (or alongside) the endpoints
+# section in gateway.yaml.
+
+endpoints:
+  # Local Ollama instance
+  - name: ollama-local
+    type: ollama
+    url: http://localhost:11434
+    enabled: true
+    timeout: 120.0
+    max_retries: 3
+    labels:
+      tier: primary
+      location: local
+
+  # Example: second GPU node
+  # - name: gpu-server-2
+  #   type: ollama
+  #   url: http://192.168.1.101:11434
+  #   enabled: true
+  #   timeout: 120.0
+  #   max_retries: 3
+  #   labels:
+  #     tier: secondary
+  #     gpu: "4090"
+
+# Environments control which endpoints and models are available
+environments:
+  - name: dev
+    allow_all_discovered: true
+
+  - name: prod
+    approved_models:
+      - llama3.2:*
+      - phi4:*
+      - qwen2.5:*
+
+# Resolution configuration for model -> endpoint mapping
+resolution:
+  endpoint_priority:
+    - ollama-local
+  ambiguous_behavior: first_priority

@@ -71,7 +71,7 @@ class GuardModelSettings(BaseSettings):
 
     enabled: bool = Field(default=False, description="Enable guard model shadow analysis")
     base_url: str = Field(
-        default="http://10.0.0.15:11434",
+        default="http://localhost:11434",
         description="Ollama server URL hosting guard model",
     )
     model_name: str = Field(default="ibm/granite3.2-guardian:5b", description="Guard model name (e.g. ibm/granite3.2-guardian:5b, llama-guard3:8b)")
