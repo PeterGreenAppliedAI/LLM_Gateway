@@ -48,35 +48,29 @@ The gateway is a policy/routing/enforcement system handling untrusted input from
 
 ## Blockers
 
-### B1: Streaming error info disclosure
-- **Location**: `src/gateway/routes/ollama.py:283-289, 452-454`
-- **Impact**: Raw `str(e)` sent to client, can leak file paths, connection strings
-- **Fix**: Wrap in generic error like OpenAI route does (`"Stream interrupted"`)
+### ~~B1: Streaming error info disclosure~~ — FIXED
+- **Location**: `src/gateway/routes/ollama.py`
+- **Fix**: Replaced `str(e)` with generic `"Stream interrupted"` message in both chat and generate stream error handlers
 
-### B2: OpenAI route sanitization bypass
-- **Location**: `src/gateway/routes/openai.py:117`
-- **Impact**: `body.to_internal()` uses unsanitized content, bypassing Unicode sanitizer
-- **Fix**: Apply sanitized messages to the InternalRequest construction
+### ~~B2: OpenAI route sanitization bypass~~ — FIXED
+- **Location**: `src/gateway/routes/openai.py`
+- **Fix**: Sanitized content is now applied back to `body.messages` before `to_internal()` conversion
 
-### B3: No circuit breaker for guard model
+### ~~B3: No circuit breaker for guard model~~ — FIXED
 - **Location**: `src/gateway/security/guard.py`
-- **Impact**: When guard is down, every request waits full timeout, causing queue backup
-- **Fix**: Add circuit breaker (open after N consecutive failures, half-open after cooldown)
+- **Fix**: Added `CircuitBreaker` class (closed→open after 5 consecutive failures, half-open after 60s cooldown). Wired into both `LlamaGuardClient` and `GraniteGuardianClient`.
 
-### B4: No input length cap before regex scanning
+### ~~B4: No input length cap before regex scanning~~ — FIXED
 - **Location**: `src/gateway/security/injection.py`
-- **Impact**: Multi-megabyte prompts cause ReDoS / CPU exhaustion
-- **Fix**: Cap input to configurable max (e.g., 100KB) before scanning
+- **Fix**: Added configurable `max_input_length` (default 100KB) that truncates input before regex scanning
 
-### B5: Key management endpoints unauthenticated
-- **Location**: `src/gateway/routes/devmesh.py` (key CRUD endpoints)
-- **Impact**: Anyone on the network can create/delete API keys
-- **Fix**: Require auth for key management, or add separate admin auth
+### ~~B5: Key management endpoints unauthenticated~~ — FIXED
+- **Location**: `src/gateway/routes/devmesh.py`, `src/gateway/routes/dependencies.py`
+- **Fix**: Added `require_admin` dependency using `GATEWAY_ADMIN_API_KEY` env var. Key management endpoints now require admin auth. Falls back to standard auth when admin key is not configured.
 
-### B6: Key expiration never checked
-- **Location**: `src/gateway/storage/keys.py:get_key_by_hash()`
-- **Impact**: Expired keys remain valid until manually revoked
-- **Fix**: Add `expires_at` filter to key validation query
+### ~~B6: Key expiration never checked~~ — FIXED
+- **Location**: `src/gateway/storage/keys.py`
+- **Fix**: Added `expires_at` filter to `get_key_by_hash()` query. Also fixed deprecated `datetime.utcnow()` → `datetime.now(timezone.utc)`.
 
 ### B7: No migration framework
 - **Location**: `src/gateway/storage/engine.py`

@@ -202,6 +202,48 @@ async def authenticate(
     return result.client_id
 
 
+async def require_admin(
+    request: Request,
+    authorization: Annotated[Optional[str], Header()] = None,
+    x_api_key: Annotated[Optional[str], Header(alias="X-API-Key")] = None,
+) -> str:
+    """Require admin authentication for sensitive management endpoints.
+
+    Checks the provided key against GATEWAY_ADMIN_API_KEY. If no admin key
+    is configured, falls back to standard authentication (backward compatible).
+
+    Returns:
+        client_id for the authenticated admin
+    Raises:
+        AuthenticationError: If admin auth fails
+    """
+    from gateway.settings import get_settings
+    settings = get_settings()
+
+    # If no admin key configured, fall back to standard auth
+    if not settings.admin_api_key:
+        return await authenticate(request, authorization, x_api_key)
+
+    # Extract API key from headers
+    api_key = None
+    if authorization:
+        if authorization.lower().startswith("bearer "):
+            api_key = authorization[7:].strip()
+        else:
+            raise AuthenticationError(message="Invalid authorization header format")
+    elif x_api_key:
+        api_key = x_api_key
+
+    if not api_key:
+        raise AuthenticationError(message="Admin authentication required")
+
+    # Compare against admin key using constant-time comparison
+    if not secrets.compare_digest(api_key, settings.admin_api_key.get_secret_value()):
+        raise AuthenticationError(message="Invalid admin credentials")
+
+    return "admin"
+
+
 async def get_auth(
     request: Request,
     authorization: Annotated[Optional[str], Header()] = None,

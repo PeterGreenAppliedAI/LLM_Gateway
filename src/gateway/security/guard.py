@@ -9,7 +9,7 @@ Runs in shadow mode alongside regex — results are logged but do not generate a
 
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import httpx
@@ -48,6 +48,62 @@ GRANITE_CATEGORIES: dict[str, str] = {
 
 # Keep CATEGORY_MAP as alias for backward compatibility
 CATEGORY_MAP = LLAMA_GUARD_CATEGORIES
+
+
+@dataclass
+class CircuitBreaker:
+    """Simple circuit breaker for guard model calls.
+
+    States:
+    - closed: normal operation, requests pass through
+    - open: too many failures, requests are short-circuited (skipped)
+    - half-open: after cooldown, allow one request to test recovery
+    """
+
+    failure_threshold: int = 5  # Consecutive failures to open circuit
+    cooldown_seconds: float = 60.0  # Time before half-open
+
+    _failure_count: int = field(default=0, init=False)
+    _state: str = field(default="closed", init=False)
+    _last_failure_time: float = field(default=0.0, init=False)
+
+    def allow_request(self) -> bool:
+        """Check if request should be allowed through."""
+        if self._state == "closed":
+            return True
+        if self._state == "open":
+            # Check if cooldown has elapsed
+            if time.monotonic() - self._last_failure_time >= self.cooldown_seconds:
+                self._state = "half-open"
+                logger.info("Guard circuit breaker half-open, testing recovery")
+                return True
+            return False
+        # half-open: allow one test request
+        return True
+
+    def record_success(self) -> None:
+        """Record a successful call."""
+        if self._state == "half-open":
+            logger.info("Guard circuit breaker closed (recovered)")
+        self._failure_count = 0
+        self._state = "closed"
+
+    def record_failure(self) -> None:
+        """Record a failed call."""
+        self._failure_count += 1
+        self._last_failure_time = time.monotonic()
+        if self._failure_count >= self.failure_threshold:
+            if self._state != "open":
+                logger.warning(
+                    "Guard circuit breaker opened",
+                    failures=self._failure_count,
+                    cooldown_seconds=self.cooldown_seconds,
+                )
+            self._state = "open"
+
+    @property
+    def state(self) -> str:
+        return self._state
 
 
 @dataclass
@@ -93,6 +149,7 @@ class LlamaGuardClient:
         self.model_name = model_name
         self.timeout = timeout
         self._client: Optional[httpx.AsyncClient] = None
+        self.circuit_breaker = CircuitBreaker()
 
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create HTTP client."""
@@ -116,6 +173,12 @@ class LlamaGuardClient:
             GuardResult with classification outcome.
         """
         start = time.perf_counter()
+
+        if not self.circuit_breaker.allow_request():
+            return GuardResult(
+                safe=True, skipped=True, error="circuit_breaker_open",
+                inference_time_ms=_elapsed_ms(start),
+            )
 
         try:
             # Build the conversation for guard model classification
@@ -157,10 +220,13 @@ class LlamaGuardClient:
             data = response.json()
             raw = data.get("message", {}).get("content", "").strip()
 
-            return self._parse_response(raw, start)
+            result = self._parse_response(raw, start)
+            self.circuit_breaker.record_success()
+            return result
 
         except httpx.TimeoutException:
             elapsed = _elapsed_ms(start)
+            self.circuit_breaker.record_failure()
             logger.warning("Guard model timeout", timeout_ms=elapsed)
             return GuardResult(
                 safe=True, skipped=True, error="timeout",
@@ -168,6 +234,7 @@ class LlamaGuardClient:
             )
         except httpx.ConnectError as e:
             elapsed = _elapsed_ms(start)
+            self.circuit_breaker.record_failure()
             logger.warning("Guard model connection error", error=str(e))
             return GuardResult(
                 safe=True, skipped=True, error="connection_error",
@@ -175,6 +242,7 @@ class LlamaGuardClient:
             )
         except Exception as e:
             elapsed = _elapsed_ms(start)
+            self.circuit_breaker.record_failure()
             logger.warning("Guard model error", error=str(e))
             return GuardResult(
                 safe=True, skipped=True, error=str(e),
@@ -255,6 +323,7 @@ class GraniteGuardianClient:
         self.timeout = timeout
         self.categories = categories or self.DEFAULT_CATEGORIES
         self._client: Optional[httpx.AsyncClient] = None
+        self.circuit_breaker = CircuitBreaker()
 
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create HTTP client."""
@@ -278,6 +347,12 @@ class GraniteGuardianClient:
             GuardResult with classification outcome.
         """
         start = time.perf_counter()
+
+        if not self.circuit_breaker.allow_request():
+            return GuardResult(
+                safe=True, skipped=True, error="circuit_breaker_open",
+                inference_time_ms=_elapsed_ms(start),
+            )
 
         try:
             # Build user/assistant messages (strip system — we use our own)
@@ -334,6 +409,7 @@ class GraniteGuardianClient:
 
             # All categories passed
             elapsed = _elapsed_ms(start)
+            self.circuit_breaker.record_success()
             return GuardResult(
                 safe=True,
                 raw_response="; ".join(all_raw),
@@ -342,6 +418,7 @@ class GraniteGuardianClient:
 
         except httpx.TimeoutException:
             elapsed = _elapsed_ms(start)
+            self.circuit_breaker.record_failure()
             logger.warning("Granite Guardian timeout", timeout_ms=elapsed)
             return GuardResult(
                 safe=True, skipped=True, error="timeout",
@@ -349,6 +426,7 @@ class GraniteGuardianClient:
             )
         except httpx.ConnectError as e:
             elapsed = _elapsed_ms(start)
+            self.circuit_breaker.record_failure()
             logger.warning("Granite Guardian connection error", error=str(e))
             return GuardResult(
                 safe=True, skipped=True, error="connection_error",
@@ -356,6 +434,7 @@ class GraniteGuardianClient:
             )
         except Exception as e:
             elapsed = _elapsed_ms(start)
+            self.circuit_breaker.record_failure()
             logger.warning("Granite Guardian error", error=str(e))
             return GuardResult(
                 safe=True, skipped=True, error=str(e),

@@ -283,7 +283,7 @@ async def _stream_ollama_chat(
         except Exception as e:
             logger.exception("Error in Ollama chat stream")
             error_response = {
-                "error": str(e),
+                "error": "Stream interrupted",
                 "done": True,
             }
             yield json.dumps(error_response) + "\n"
@@ -451,7 +451,7 @@ async def _stream_ollama_generate(
 
         except Exception as e:
             logger.exception("Error in Ollama generate stream")
-            yield json.dumps({"error": str(e), "done": True}) + "\n"
+            yield json.dumps({"error": "Stream interrupted", "done": True}) + "\n"
 
     return StreamingResponse(
         generate(),

@@ -26,6 +26,7 @@ from gateway.models.internal import InternalRequest, Message, MessageRole
 from gateway.observability import get_logger, get_metrics
 from gateway.routes.dependencies import (
     authenticate,
+    require_admin,
     get_audit_logger,
     get_config,
     get_dispatcher,
@@ -1179,7 +1180,7 @@ class KeyListResponse(BaseModel):
 async def create_api_key(
     request: Request,
     body: CreateKeyRequest,
-    client_id: Annotated[str, Depends(authenticate)],
+    client_id: Annotated[str, Depends(require_admin)],
 ) -> CreateKeyResponse:
     """Create a new database-backed API key.
 
@@ -1214,7 +1215,7 @@ async def create_api_key(
 @router.get("/api/keys", response_model=KeyListResponse)
 async def list_api_keys(
     request: Request,
-    client_id: Annotated[str, Depends(authenticate)],
+    client_id: Annotated[str, Depends(require_admin)],
 ) -> KeyListResponse:
     """List all API keys (masked - no secret data).
 
@@ -1242,7 +1243,7 @@ async def list_api_keys(
 async def revoke_api_key(
     request: Request,
     key_id: int,
-    client_id: Annotated[str, Depends(authenticate)],
+    client_id: Annotated[str, Depends(require_admin)],
 ) -> dict[str, Any]:
     """Revoke an API key by ID.
 

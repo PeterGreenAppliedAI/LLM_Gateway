@@ -7,10 +7,10 @@ Uses async SQLAlchemy for non-blocking database I/O.
 
 import hashlib
 import secrets
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from gateway.storage.schema import api_keys
@@ -56,7 +56,7 @@ class KeyManager:
         key_hash = _hash_key(plaintext)
         key_prefix = plaintext[:12]  # "gw-" + first 9 chars of token
 
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         async with self._engine.connect() as conn:
             result = await conn.execute(
@@ -147,6 +147,7 @@ class KeyManager:
         Returns key metadata if found and active, None otherwise.
         """
         async with self._engine.connect() as conn:
+            now = datetime.now(timezone.utc)
             row = (await conn.execute(
                 select(
                     api_keys.c.id,
@@ -159,6 +160,10 @@ class KeyManager:
                 ).where(
                     api_keys.c.key_hash == key_hash,
                     api_keys.c.is_active == True,  # noqa: E712
+                    or_(
+                        api_keys.c.expires_at.is_(None),
+                        api_keys.c.expires_at > now,
+                    ),
                 )
             )).fetchone()
 
@@ -169,7 +174,7 @@ class KeyManager:
             await conn.execute(
                 update(api_keys)
                 .where(api_keys.c.id == row.id)
-                .values(last_used_at=datetime.utcnow())
+                .values(last_used_at=datetime.now(timezone.utc))
             )
             await conn.commit()
 

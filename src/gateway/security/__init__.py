@@ -16,6 +16,7 @@ from gateway.security.injection import (
 )
 from gateway.security.analyzer import AsyncSecurityAnalyzer, SecurityAlert
 from gateway.security.guard import (
+    CircuitBreaker,
     GuardResult,
     LlamaGuardClient,
     GraniteGuardianClient,
@@ -31,6 +32,7 @@ __all__ = [
     "ContentWrapper",
     "AsyncSecurityAnalyzer",
     "SecurityAlert",
+    "CircuitBreaker",
     "GuardResult",
     "LlamaGuardClient",
     "GraniteGuardianClient",

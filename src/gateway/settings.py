@@ -123,6 +123,7 @@ class Settings(BaseSettings):
     # Security
     # SecretStr prevents accidental exposure in logs, repr, etc.
     api_key: SecretStr | None = Field(default=None, description="API key for authentication")
+    admin_api_key: SecretStr | None = Field(default=None, description="Admin API key for key management endpoints")
     api_key_header: str = Field(default="X-API-Key", description="Header name for API key")
     require_api_key: bool = Field(default=False, description="Require API key for all requests")
 

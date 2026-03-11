@@ -150,9 +150,13 @@ class InjectionDetector:
          ThreatLevel.HIGH, "admin_claim"),
     ]
 
+    # Maximum input length for scanning (100KB default, prevents ReDoS)
+    DEFAULT_MAX_INPUT_LENGTH = 100_000
+
     def __init__(
         self,
         case_sensitive: bool = False,
+        max_input_length: int = DEFAULT_MAX_INPUT_LENGTH,
         check_instruction_override: bool = True,
         check_delimiter_attacks: bool = True,
         check_roleplay_escape: bool = True,
@@ -166,6 +170,7 @@ class InjectionDetector:
             check_*: Enable/disable specific pattern categories
         """
         self.case_sensitive = case_sensitive
+        self.max_input_length = max_input_length
         self.patterns: list[tuple[re.Pattern, ThreatLevel, str, str]] = []
 
         flags = 0 if case_sensitive else re.IGNORECASE
@@ -230,6 +235,10 @@ class InjectionDetector:
 
         if not text:
             return DetectionResult(scanned=True, threat_level=ThreatLevel.NONE)
+
+        # Cap input length to prevent ReDoS / CPU exhaustion
+        if len(text) > self.max_input_length:
+            text = text[: self.max_input_length]
 
         matches: list[PatternMatch] = []
         max_threat = ThreatLevel.NONE

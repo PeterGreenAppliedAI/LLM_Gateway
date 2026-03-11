@@ -113,6 +113,12 @@ async def chat_completions(
             source_ip=request.client.host if request.client else None,
         )
 
+    # Apply sanitized content back to body before converting to internal format
+    # This ensures to_internal() uses sanitized text, not raw user input
+    for i, msg in enumerate(body.messages):
+        if i < len(sanitized_messages):
+            msg.content = sanitized_messages[i]["content"]
+
     # Convert to internal format
     internal_request = body.to_internal(client_id=client_id, task=TaskType.CHAT)
 
