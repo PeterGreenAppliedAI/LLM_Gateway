@@ -1,20 +1,60 @@
 # DevMesh LLM Gateway
 
-A deployable AI control plane that sits in front of inference runtimes and foundation model APIs. Provides a consistent interface, security scanning, routing, and observability for AI in production environments.
+An AI inference control plane. One API in front of all your LLM runtimes — with security, routing, policy enforcement, and observability built in.
 
-## Overview
+**Self-hosted. Not a SaaS. Deploys inside your infrastructure.**
 
-DevMesh Gateway is **client-deployed, not a centralized SaaS**. It enables:
+```
+┌─────────────────────────────────────────────────────┐
+│                  Your Applications                   │
+│         (Open WebUI, Discord bots, internal tools)   │
+└───────────────────────┬─────────────────────────────┘
+                        │
+                        ▼
+┌─────────────────────────────────────────────────────┐
+│               DevMesh Gateway                        │
+│                                                      │
+│  ┌──────────┐ ┌──────────┐ ┌───────────┐           │
+│  │ Security │ │  Policy  │ │ Observ-   │           │
+│  │ Layer    │ │  Engine  │ │ ability   │           │
+│  └──────────┘ └──────────┘ └───────────┘           │
+│  ┌──────────┐ ┌──────────┐ ┌───────────┐           │
+│  │ Routing  │ │  Audit   │ │ Model     │           │
+│  │ Engine   │ │  Logger  │ │ Discovery │           │
+│  └──────────┘ └──────────┘ └───────────┘           │
+└───────────────────────┬─────────────────────────────┘
+                        │
+                        ▼
+┌─────────────────────────────────────────────────────┐
+│              Inference Runtimes                      │
+│                                                      │
+│    Ollama    vLLM    TRT-LLM    SGLang    OpenAI    │
+└─────────────────────────────────────────────────────┘
+```
 
-- **Dual API Surface**: OpenAI-compatible and native Ollama endpoints
-- **Multiple Runtime Support**: Ollama, vLLM, TRT-LLM, SGLang (and cloud APIs)
-- **Security Scanning**: Prompt injection detection, Unicode sanitization, guard model integration
-- **PII Detection & Scrubbing**: Flags personally identifiable information with optional per-route scrubbing
-- **Per-Client Routing**: API keys with optional endpoint pinning and model/endpoint allowlists
-- **Policy Enforcement**: Configurable rate limits, per-key rate overrides, model and endpoint restrictions
-- **Audit Logging**: Async SQLite/PostgreSQL request logging with optional body storage
-- **Model Discovery**: Auto-discovers models across all endpoints
-- **Dashboard**: React-based monitoring UI with security, audit, and catalog views
+## Why This Exists
+
+Production AI systems become fragmented fast:
+
+- **No consistent API** — Service A talks to OpenAI, Service B to Ollama, Service C to vLLM. Each with different SDKs, auth patterns, and error handling.
+- **No visibility** — Who's calling what model? How many tokens? What's the latency? Nobody knows.
+- **No security** — Prompt injection, PII leakage, and jailbreak attempts flow straight through to your models.
+- **No governance** — No rate limits, no model restrictions, no audit trail. Every app is on its own.
+
+DevMesh Gateway solves this by acting as the control plane between your applications and your inference runtimes. One deployment. One API. Full visibility.
+
+## Who This Is For
+
+Teams deploying LLMs in production who need:
+
+- A **unified API** across multiple inference runtimes
+- **Prompt injection defense** without adding latency
+- **PII detection and scrubbing** before prompts reach models
+- **Request auditing** with full provenance
+- **Per-client routing** and model access control
+- **Centralized rate limiting** and policy enforcement
+
+If you're running Ollama on a GPU box in a closet, or managing a fleet of vLLM instances — this is the thing that sits in front of all of them.
 
 ## Quick Start
 
@@ -23,27 +63,23 @@ DevMesh Gateway is **client-deployed, not a centralized SaaS**. It enables:
 - Python 3.10+
 - At least one inference runtime (e.g., [Ollama](https://ollama.com))
 
-### Local Development
+### Get Running
 
 ```bash
-# Clone and setup
 git clone https://github.com/PeterGreenAppliedAI/LLM_Gateway.git
 cd LLM_Gateway
 
-# Create virtual environment
-python3 -m venv venv
-source venv/bin/activate
-
-# Install dependencies
+python3 -m venv venv && source venv/bin/activate
 pip install -e ".[dev]"
 
-# Copy and edit configuration
 cp config/gateway.yaml.example config/gateway.yaml
 cp .env.example .env
+# Edit gateway.yaml with your endpoint URLs
 
-# Run the gateway
 PYTHONPATH=src uvicorn gateway.main:app --host 0.0.0.0 --port 8001
 ```
+
+Your gateway is now running. Point your apps at `http://localhost:8001` using either the OpenAI or Ollama API format.
 
 ### With Docker Compose
 
@@ -54,39 +90,33 @@ docker compose up -d
 ### Dashboard
 
 ```bash
-cd dashboard
-npm install
+cd dashboard && npm install
 npx vite --host 0.0.0.0 --port 5174
 ```
 
+## How It Works
+
+Every request flows through the same pipeline:
+
+```
+Request
+  → Auth (API key validation, client identification)
+  → Sanitize (Unicode normalization, invisible character stripping)
+  → PII Scan (detect and optionally scrub personal data)
+  → Policy Check (rate limits, model allowlists, token limits)
+  → Route (resolve model → select endpoint → failover)
+  → Respond
+  → Async: Guard model analysis (background, zero latency impact)
+  → Async: Audit log (SQLite or PostgreSQL)
+```
+
+The security guard model (Granite Guardian, Llama Guard) runs **after** the response is sent. It never adds latency. Results are logged for monitoring and pattern analysis.
+
 ## Configuration
 
-### Environment Variables
+### Endpoints
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `GATEWAY_HOST` | `127.0.0.1` | Bind address |
-| `GATEWAY_PORT` | `8000` | Listen port |
-| `GATEWAY_CONFIG_PATH` | `config/gateway.yaml` | Main config file |
-| `GATEWAY_DB_URL` | `sqlite:///./data/gateway.db` | Database URL (SQLite or PostgreSQL) |
-| `GATEWAY_DB_STORE_REQUEST_BODY` | `false` | Store request prompts in audit log |
-| `GATEWAY_DB_STORE_RESPONSE_BODY` | `false` | Store response content in audit log |
-| `GATEWAY_DB_RETENTION_DAYS` | `90` | Auto-delete audit records older than N days (0 = disabled) |
-| `GATEWAY_GUARD_ENABLED` | `false` | Enable guard model shadow analysis |
-| `GATEWAY_GUARD_MODEL_NAME` | `ibm/granite3.2-guardian:5b` | Guard model name |
-| `GATEWAY_GUARD_BASE_URL` | `http://localhost:11434` | Ollama server hosting the guard model |
-| `GATEWAY_GUARD_TIMEOUT` | `15.0` | Guard model inference timeout (seconds) |
-| `GATEWAY_PII_ENABLED` | `false` | Enable PII detection (always flags when enabled) |
-| `GATEWAY_PII_SCRUB_ENABLED` | `false` | Enable PII scrubbing (replaces PII with placeholders) |
-| `GATEWAY_PII_SCRUB_ROUTES` | `[]` | Routes where scrubbing is active (empty = all routes) |
-| `GATEWAY_SECURITY_SCAN_ALLOWLIST_IPS` | `[]` | Source IPs to skip security scanning (JSON list) |
-| `GATEWAY_ADMIN_API_KEY` | | Admin key for key management endpoints |
-
-See [`.env.example`](.env.example) for a complete template.
-
-### Endpoint Configuration
-
-Copy `config/gateway.yaml.example` to `config/gateway.yaml`:
+Define your inference runtimes in `config/gateway.yaml`:
 
 ```yaml
 endpoints:
@@ -98,26 +128,55 @@ endpoints:
     labels:
       tier: primary
 
+  - name: gpu-cluster
+    type: ollama
+    url: http://192.168.1.100:11434
+    enabled: true
+
+resolution:
+  endpoint_priority:
+    - ollama-local
+    - gpu-cluster
+  ambiguous_behavior: first_priority
+```
+
+### Authentication & Routing
+
+```yaml
 auth:
   enabled: true
   api_keys:
-    - key: "${GATEWAY_KEY_APP1}"
+    - key: "${GATEWAY_KEY_APP1}"        # Always use env vars for secrets
       client_id: my-app
-      target_endpoint: ollama-local  # Optional: pin to specific endpoint
+      target_endpoint: gpu-cluster      # Pin this client to a specific endpoint
+
+    - key: "${GATEWAY_KEY_DEV}"
+      client_id: dev-user               # Uses default routing
 ```
 
-Keys are referenced via environment variables — never commit secrets to the config file.
+Database-managed API keys support additional controls: model allowlists (glob patterns), endpoint restrictions, and per-key rate limits.
 
-## API Endpoints
+### Environment Variables
 
-### Ollama-Compatible (Native)
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `GATEWAY_CONFIG_PATH` | `config/gateway.yaml` | Main config file |
+| `GATEWAY_DB_URL` | `sqlite:///./data/gateway.db` | Database URL (SQLite or PostgreSQL) |
+| `GATEWAY_DB_STORE_REQUEST_BODY` | `false` | Store prompts in audit log |
+| `GATEWAY_DB_RETENTION_DAYS` | `90` | Auto-delete old audit records (0 = disabled) |
+| `GATEWAY_GUARD_ENABLED` | `false` | Enable guard model shadow analysis |
+| `GATEWAY_GUARD_MODEL_NAME` | `ibm/granite3.2-guardian:5b` | Guard model name |
+| `GATEWAY_GUARD_BASE_URL` | `http://localhost:11434` | Ollama server hosting guard model |
+| `GATEWAY_PII_ENABLED` | `false` | Enable PII detection (always flags) |
+| `GATEWAY_PII_SCRUB_ENABLED` | `false` | Replace PII with placeholders |
+| `GATEWAY_PII_SCRUB_ROUTES` | `[]` | Routes where scrubbing is active (empty = all) |
+| `GATEWAY_ADMIN_API_KEY` | | Admin key for key management endpoints |
 
-| Endpoint | Description |
-|----------|-------------|
-| `POST /api/chat` | Chat completions (streaming supported) |
-| `POST /api/generate` | Text generation (streaming supported) |
-| `POST /api/embeddings` | Generate embeddings |
-| `GET /api/tags` | List available models |
+See [`.env.example`](.env.example) for the full list.
+
+## API Surface
+
+The gateway exposes two API formats. Your apps pick whichever they already use.
 
 ### OpenAI-Compatible
 
@@ -127,123 +186,91 @@ Keys are referenced via environment variables — never commit secrets to the co
 | `POST /v1/completions` | Text completions |
 | `POST /v1/embeddings` | Generate embeddings |
 
-### Management
+### Ollama-Compatible
+
+| Endpoint | Description |
+|----------|-------------|
+| `POST /api/chat` | Chat completions (streaming supported) |
+| `POST /api/generate` | Text generation (streaming supported) |
+| `POST /api/embeddings` | Generate embeddings |
+| `GET /api/tags` | List available models |
+
+### Management & Security
 
 | Endpoint | Description |
 |----------|-------------|
 | `GET /health` | Health check with provider status |
 | `GET /v1/devmesh/catalog` | Full model catalog across all endpoints |
 | `GET /api/stats` | Usage statistics (last 24h) |
-| `GET /api/requests` | Recent audit log entries |
-| `POST /api/keys` | Create new API key (admin) |
-| `GET /api/keys` | List API keys (admin) |
-| `DELETE /api/keys/{key_id}` | Revoke API key (admin) |
-
-### Security
-
-| Endpoint | Description |
-|----------|-------------|
+| `GET /api/requests` | Audit log entries |
+| `POST /api/keys` | Create API key |
 | `GET /api/security/stats` | Security scan statistics |
 | `GET /api/security/alerts` | Recent security alerts |
 | `GET /api/security/results` | Regex vs guard model side-by-side verdicts |
 
 ## Security
 
-### Layered Defense
+### Layered Defense (Zero Latency on the Request Path)
 
-The gateway implements multiple security layers with zero added latency to the request path:
+| Layer | Timing | What It Does |
+|-------|--------|-------------|
+| **Unicode Sanitization** | Sync, ~0ms | Strips invisible characters, homoglyphs, zero-width joiners |
+| **Pattern Detection** | Sync, ~1ms | Regex injection scanning — role overrides, delimiter attacks, known patterns |
+| **PII Detection** | Sync, ~1ms | Detects emails, phones, SSNs, credit cards, IPs. Scrubbing is per-route configurable |
+| **Guard Model** | Async, background | IBM Granite Guardian or Llama Guard — runs after response, never blocks |
+| **IP Allowlist** | Sync, ~0ms | Trusted internal services skip scanning |
 
-1. **Unicode Sanitization** (sync, ~0ms): Strips invisible characters, homoglyphs, and zero-width joiners used to bypass content filters.
+### Guard Model
 
-2. **Pattern Detection** (sync, ~1ms): Regex-based injection pattern scanning — detects role overrides, delimiter attacks, and known prompt injection patterns. Threat levels: none, low, medium, high, critical.
+The guard model is a **shadow analyzer** — it classifies every request in the background and logs whether it agrees with the regex scanner. This lets you:
 
-3. **PII Detection** (sync, ~1ms): Detects email addresses, phone numbers, SSNs, credit card numbers, and IP addresses. Always flags when enabled. Optional scrubbing replaces PII with `[EMAIL]`, `[SSN]`, etc. placeholders — configurable per route.
+- Measure regex false positive rates against a real model
+- Detect attacks the regex missed
+- Build confidence before switching to blocking mode
 
-4. **Guard Model** (async, shadow mode): Runs a guard model in the background after the response is sent. Supports:
-   - **IBM Granite Guardian 3.2** — Returns Yes/No per category with confidence
-   - **Llama Guard 3** — Returns safe/unsafe with S1-S13 category codes
-
-5. **IP Allowlist**: Trusted internal services can be exempted from scanning.
-
-### Guard Model Architecture
-
-The guard model runs asynchronously — it does not add latency to requests. Results are stored for monitoring and comparison via the `/api/security/results` endpoint.
-
-```
-Request → Sanitize → PII Scan → Route → Respond (fast path)
-                 ↘ Queue → Guard Model → Log Result (background)
-```
+Results are available at `GET /api/security/results?disagreements_only=true`.
 
 ### Policy Enforcement
 
-- **Rate Limiting**: Global and per-user RPM limits (configurable in `gateway.yaml`)
+- **Rate Limiting**: Global and per-user RPM limits
 - **Token Limits**: Max tokens per request
-- **Per-Key Overrides**: Database-managed API keys can have custom rate limits, model allowlists (glob patterns), and endpoint restrictions
+- **Model Allowlists**: Per-key glob patterns (e.g., `llama-*` allows all Llama variants)
+- **Endpoint Restrictions**: Per-key endpoint access control
+- **Per-Key Rate Overrides**: Database-managed keys can have custom RPM limits
 
 ## Dashboard
 
-React + TypeScript dashboard for monitoring. Features:
+React + TypeScript monitoring UI:
 
-- **Stats Overview**: Request counts, success rates, latency, token usage
-- **Security Monitor**: Alerts, guard scan results, regex vs guard comparison
+- **Stats**: Request volume, success rates, latency, token usage
+- **Security**: Alerts, guard scan results, regex vs guard comparison
 - **Audit Log**: Recent requests with model, endpoint, latency, tokens
 - **Model Catalog**: All discovered models across endpoints with sizes
-- **API Key Management**: Create/delete database-managed API keys
-- **Endpoint Health**: Per-endpoint status and model counts
-
-## Architecture
-
-```
-Client Applications (Open WebUI, Discord bots, internal tools)
-        |
-        v
-DevMesh Gateway (FastAPI)
-├── Auth (API key + per-client routing)
-├── Security (sanitize → PII scan → pattern detect → async guard)
-├── Policy (rate limits, token limits, model/endpoint allowlists)
-├── Dispatch (model resolution → provider selection → failover)
-├── Audit Logger (async SQLite/PostgreSQL)
-└── Model Discovery (periodic catalog refresh)
-        |
-        v
-Provider Adapters
-├── Ollama (chat, generate, embeddings, streaming, vision)
-├── OpenAI (chat, embeddings, streaming)
-├── vLLM
-├── TRT-LLM
-└── SGLang
-```
+- **API Keys**: Create/revoke database-managed keys
+- **Endpoint Health**: Per-endpoint status and model availability
 
 ## Project Structure
 
 ```
-llm_gateway/
-├── src/gateway/
-│   ├── catalog/         # Model discovery and catalog
-│   ├── dispatch/        # Routing, registry, provider selection
-│   ├── models/          # Data models (internal, OpenAI, Ollama)
-│   ├── observability/   # Structured logging and metrics
-│   ├── policy/          # Rate limiting, token limits, enforcement
-│   ├── providers/       # Provider adapters (Ollama, OpenAI, vLLM, etc.)
-│   ├── routes/          # API endpoints (Ollama, OpenAI, management)
-│   ├── security/        # Injection defense, PII scrubber, guard model
-│   ├── storage/         # Audit logging, API key management, DB engine
-│   ├── config.py        # YAML configuration loading
-│   ├── settings.py      # Pydantic settings (env vars)
-│   └── main.py          # FastAPI application
-├── dashboard/           # React + Vite monitoring dashboard
-├── config/              # Configuration templates
-├── tests/               # Test suite
-└── docs/                # Architecture and design documentation
+src/gateway/
+├── catalog/         # Model discovery across endpoints
+├── dispatch/        # Model → endpoint routing and failover
+├── models/          # Internal, OpenAI, and Ollama data models
+├── observability/   # Structured logging and metrics
+├── policy/          # Rate limits, token limits, enforcement
+├── providers/       # Runtime adapters (Ollama, OpenAI, vLLM, TRT-LLM, SGLang)
+├── routes/          # API endpoints
+├── security/        # Injection defense, PII scrubber, guard model client
+├── storage/         # Audit logging, API key management, async DB
+├── config.py        # YAML config loader
+├── settings.py      # Pydantic settings (env vars)
+└── main.py          # FastAPI application
 ```
 
 ## Testing
 
 ```bash
-# Run all tests
 pytest tests/ -v
-
-# With coverage
 pytest tests/ --cov=gateway --cov-report=html
 ```
 
