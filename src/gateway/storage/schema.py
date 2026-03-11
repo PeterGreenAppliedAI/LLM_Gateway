@@ -9,7 +9,7 @@ Tables:
 - api_keys: Database-managed API keys (optional, alternative to config)
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import (
     MetaData,
@@ -48,7 +48,7 @@ audit_log = Table(
     # Primary key
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("request_id", String(64), unique=True, nullable=False),
-    Column("timestamp", DateTime, default=datetime.utcnow, nullable=False),
+    Column("timestamp", DateTime, default=lambda: datetime.now(timezone.utc), nullable=False),
 
     # Who made the request
     Column("client_id", String(128), nullable=False),
@@ -175,7 +175,7 @@ api_keys = Table(
     Column("environment", String(64), nullable=True),  # Which environment this key accesses
 
     # Lifecycle
-    Column("created_at", DateTime, default=datetime.utcnow, nullable=False),
+    Column("created_at", DateTime, default=lambda: datetime.now(timezone.utc), nullable=False),
     Column("expires_at", DateTime, nullable=True),
     Column("last_used_at", DateTime, nullable=True),
     Column("is_active", Boolean, default=True),

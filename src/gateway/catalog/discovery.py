@@ -5,7 +5,7 @@ Provides background discovery of models from various endpoint types
 """
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
@@ -119,7 +119,7 @@ class ModelDiscoveryService:
                 else:
                     results[endpoint.name] = result
 
-        self._catalog.last_discovery = datetime.utcnow()
+        self._catalog.last_discovery = datetime.now(timezone.utc)
         return results
 
     async def _discover_endpoint(self, endpoint: EndpointConfig) -> list[str]:

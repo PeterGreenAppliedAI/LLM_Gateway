@@ -280,8 +280,18 @@ class InjectionDetector:
 
         for msg in messages:
             content = msg.get('content', '')
+            texts: list[str] = []
             if isinstance(content, str):
-                result = self.scan(content)
+                texts.append(content)
+            elif isinstance(content, list):
+                # Multimodal content arrays: extract text parts
+                for part in content:
+                    if isinstance(part, dict) and part.get('type') == 'text':
+                        text = part.get('text', '')
+                        if isinstance(text, str):
+                            texts.append(text)
+            for text in texts:
+                result = self.scan(text)
                 all_matches.extend(result.matches)
                 total_time += result.scan_time_ms
                 if self._threat_order(result.threat_level) > self._threat_order(max_threat):

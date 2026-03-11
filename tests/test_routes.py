@@ -468,7 +468,7 @@ class TestRouteDebug:
         mock_registry.get_fallback_chain.return_value = ["vllm"]
         app.state.registry = mock_registry
 
-        with patch("gateway.routes.devmesh.get_dispatcher", return_value=mock_dispatcher):
+        with patch("gateway.routes.catalog.get_dispatcher", return_value=mock_dispatcher):
             response = client.post(
                 "/v1/devmesh/route",
                 json={
@@ -494,7 +494,7 @@ class TestRouteDebug:
         mock_registry.get_fallback_chain.return_value = ["vllm"]
         app.state.registry = mock_registry
 
-        with patch("gateway.routes.devmesh.get_dispatcher", return_value=mock_dispatcher):
+        with patch("gateway.routes.catalog.get_dispatcher", return_value=mock_dispatcher):
             response = client.post(
                 "/v1/devmesh/route",
                 json={

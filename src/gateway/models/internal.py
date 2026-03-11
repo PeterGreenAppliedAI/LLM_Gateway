@@ -11,7 +11,7 @@ Design principles:
 """
 
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Annotated, Any
 from uuid import uuid4
@@ -111,7 +111,7 @@ class InternalRequest(BaseModel):
     request_id: str = Field(default_factory=lambda: str(uuid4()), max_length=64)
     client_id: SafeId = Field(default="default")
     user_id: SafeId = Field(default="anonymous")
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     # Task specification
     task: TaskType
@@ -176,7 +176,7 @@ class InternalResponse(BaseModel):
     # Tracking (echoed from request)
     request_id: str
     task: TaskType
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     # Provider info
     provider: str

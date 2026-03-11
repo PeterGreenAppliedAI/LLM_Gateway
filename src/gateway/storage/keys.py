@@ -13,7 +13,10 @@ from typing import Optional
 from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from gateway.observability import get_logger
 from gateway.storage.schema import api_keys
+
+logger = get_logger(__name__)
 
 
 def _hash_key(plaintext: str) -> str:
@@ -77,6 +80,8 @@ class KeyManager:
             await conn.commit()
             key_id = result.inserted_primary_key[0]
 
+        logger.info("API key created", key_prefix=key_prefix, client_id=client_id, name=name)
+
         return {
             "key": plaintext,
             "key_id": key_id,
@@ -139,7 +144,12 @@ class KeyManager:
                 .values(is_active=False)
             )
             await conn.commit()
-            return result.rowcount > 0
+            revoked = result.rowcount > 0
+            if revoked:
+                logger.info("API key revoked", key_id=key_id)
+            else:
+                logger.warning("API key revoke failed: not found", key_id=key_id)
+            return revoked
 
     async def get_key_by_hash(self, key_hash: str) -> Optional[dict]:
         """Look up an active key by its hash.
@@ -168,6 +178,7 @@ class KeyManager:
             )).fetchone()
 
             if row is None:
+                logger.debug("API key validation failed: key not found or expired")
                 return None
 
             # Update last_used_at

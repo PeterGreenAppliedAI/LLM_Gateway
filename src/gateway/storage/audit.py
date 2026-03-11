@@ -5,7 +5,7 @@ to the database for compliance, debugging, and analytics.
 Uses async SQLAlchemy for non-blocking database I/O.
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from sqlalchemy import insert, select, func, and_, Integer, cast, delete
@@ -64,7 +64,7 @@ class AuditLogger:
         """Log a request to the audit table."""
         values = {
             "request_id": request_id,
-            "timestamp": datetime.utcnow(),
+            "timestamp": datetime.now(timezone.utc),
             "client_id": client_id,
             "user_id": user_id,
             "environment": environment,
@@ -138,7 +138,7 @@ class AuditLogger:
         client_id: Optional[str] = None,
     ) -> dict:
         """Get usage statistics for the specified time period."""
-        cutoff = datetime.utcnow() - timedelta(hours=hours)
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
 
         async with self._engine.connect() as conn:
             conditions = [audit_log.c.timestamp >= cutoff]
@@ -242,7 +242,7 @@ class AuditLogger:
 
     async def get_models_usage(self, hours: int = 24) -> list[dict]:
         """Get usage statistics grouped by model."""
-        cutoff = datetime.utcnow() - timedelta(hours=hours)
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
 
         async with self._engine.connect() as conn:
             stmt = (
@@ -277,7 +277,7 @@ class AuditLogger:
 
     async def get_endpoints_usage(self, hours: int = 24) -> list[dict]:
         """Get usage statistics grouped by endpoint."""
-        cutoff = datetime.utcnow() - timedelta(hours=hours)
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
 
         async with self._engine.connect() as conn:
             stmt = (
@@ -317,7 +317,7 @@ class AuditLogger:
         dashboard queries over long time periods.
         """
         if date is None:
-            date = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
+            date = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
 
         start_of_day = date.replace(hour=0, minute=0, second=0, microsecond=0)
         end_of_day = start_of_day + timedelta(days=1)
@@ -393,7 +393,7 @@ class AuditLogger:
         client_id: Optional[str] = None,
     ) -> list[dict]:
         """Get daily usage from the aggregated table."""
-        cutoff = datetime.utcnow() - timedelta(days=days)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
 
         stmt = (
             select(
@@ -422,3 +422,28 @@ class AuditLogger:
                     "total_cost_usd": float(row.total_cost_usd or 0),
                 })
             return results
+
+    async def cleanup_old_records(self, retention_days: int) -> int:
+        """Delete audit log records older than retention_days.
+
+        Returns the number of records deleted.
+        """
+        cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+
+        try:
+            async with self._engine.connect() as conn:
+                result = await conn.execute(
+                    delete(audit_log).where(audit_log.c.timestamp < cutoff)
+                )
+                await conn.commit()
+                deleted = result.rowcount
+                if deleted > 0:
+                    logger.info(
+                        "Audit log cleanup completed",
+                        deleted=deleted,
+                        retention_days=retention_days,
+                    )
+                return deleted
+        except Exception as e:
+            logger.error("Audit log cleanup failed", error=str(e))
+            return 0

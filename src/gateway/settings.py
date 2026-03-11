@@ -46,6 +46,12 @@ class DatabaseSettings(BaseSettings):
     # Table creation
     create_tables: bool = Field(default=True, description="Auto-create tables on startup")
 
+    # Data retention
+    retention_days: int = Field(
+        default=90, ge=1, le=3650,
+        description="Days to retain audit log entries (0 = no cleanup)",
+    )
+
     # Debug
     echo: bool = Field(default=False, description="Echo SQL statements (debug only)")
 

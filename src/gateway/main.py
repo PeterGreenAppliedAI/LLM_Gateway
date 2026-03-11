@@ -13,6 +13,7 @@ Per Database Architecture:
 - SQLite default, PostgreSQL production-ready
 """
 
+import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncGenerator
@@ -122,9 +123,27 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.info("Security scan allowlist", allowlisted_ips=scan_allowlist_ips)
     logger.info("Security analyzer started")
 
+    # Start periodic audit log cleanup
+    retention_days = settings.db.retention_days
+    if app.state.audit_logger and retention_days > 0:
+        async def _cleanup_loop() -> None:
+            while True:
+                await asyncio.sleep(86400)  # Run daily
+                await app.state.audit_logger.cleanup_old_records(retention_days)
+
+        app.state._cleanup_task = asyncio.create_task(_cleanup_loop())
+        logger.info("Audit log retention policy", retention_days=retention_days)
+
     yield
 
     # Shutdown
+    if hasattr(app.state, "_cleanup_task"):
+        app.state._cleanup_task.cancel()
+        try:
+            await app.state._cleanup_task
+        except asyncio.CancelledError:
+            pass
+
     if hasattr(app.state, "security_analyzer"):
         await app.state.security_analyzer.stop()
         logger.info("Security analyzer stopped")

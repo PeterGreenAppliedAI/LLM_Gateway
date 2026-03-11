@@ -5,7 +5,7 @@ and their availability across endpoints.
 """
 
 import fnmatch
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from pydantic import BaseModel, Field
@@ -22,7 +22,7 @@ class DiscoveredModel(BaseModel):
 
     name: str  # Model identifier (e.g., phi4:14b)
     endpoint: str  # Endpoint name where discovered (e.g., gpunode-ollama)
-    discovered_at: datetime = Field(default_factory=datetime.utcnow)
+    discovered_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     # Optional metadata from discovery
     size_bytes: int | None = None
