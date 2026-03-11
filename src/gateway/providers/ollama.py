@@ -51,14 +51,19 @@ class OllamaAdapter(ProviderAdapter):
         super().__init__(config=config, provider_type=ProviderType.OLLAMA)
         self._client: httpx.AsyncClient | None = None
 
+    _client_lock: asyncio.Lock | None = None
+
     async def _get_client(self) -> httpx.AsyncClient:
-        """Get or create HTTP client."""
-        if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(
-                base_url=self.base_url,
-                timeout=httpx.Timeout(self.timeout),
-            )
-        return self._client
+        """Get or create HTTP client (thread-safe)."""
+        if self._client_lock is None:
+            self._client_lock = asyncio.Lock()
+        async with self._client_lock:
+            if self._client is None or self._client.is_closed:
+                self._client = httpx.AsyncClient(
+                    base_url=self.base_url,
+                    timeout=httpx.Timeout(self.timeout),
+                )
+            return self._client
 
     async def close(self) -> None:
         """Close the HTTP client."""

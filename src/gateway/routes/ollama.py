@@ -34,7 +34,7 @@ from gateway.models.ollama import (
     OllamaToolCall,
     OllamaToolCallFunction,
 )
-from gateway.observability import get_logger
+from gateway.observability import get_logger, get_metrics
 from gateway.routes.dependencies import (
     AuthResult,
     get_auth,
@@ -48,6 +48,7 @@ from gateway.security import AsyncSecurityAnalyzer, Sanitizer
 from gateway.storage import AuditLogger
 
 logger = get_logger(__name__)
+metrics = get_metrics()
 
 router = APIRouter(prefix="/api", tags=["ollama"])
 
@@ -175,6 +176,15 @@ async def ollama_chat(
     result = await dispatcher.dispatch(internal_request)
 
     ctx.record_complete(
+        prompt_tokens=result.response.usage.prompt_tokens,
+        completion_tokens=result.response.usage.completion_tokens,
+    )
+    metrics.record_request(
+        provider=result.provider_used,
+        model=result.response.model,
+        task="chat",
+        status="success",
+        latency_ms=ctx.total_latency_ms or 0,
         prompt_tokens=result.response.usage.prompt_tokens,
         completion_tokens=result.response.usage.completion_tokens,
     )
@@ -380,6 +390,15 @@ async def ollama_generate(
         prompt_tokens=result.response.usage.prompt_tokens,
         completion_tokens=result.response.usage.completion_tokens,
     )
+    metrics.record_request(
+        provider=result.provider_used,
+        model=result.response.model,
+        task="generate",
+        status="success",
+        latency_ms=ctx.total_latency_ms or 0,
+        prompt_tokens=result.response.usage.prompt_tokens,
+        completion_tokens=result.response.usage.completion_tokens,
+    )
 
     if audit_logger:
         await audit_logger.log_request(
@@ -549,6 +568,15 @@ async def ollama_embeddings(
     internal_request = InternalRequest(**request_kwargs)
 
     result = await dispatcher.dispatch(internal_request)
+
+    metrics.record_request(
+        provider=result.provider_used,
+        model=result.response.model,
+        task="embeddings",
+        status="success",
+        latency_ms=ctx.total_latency_ms or 0,
+        prompt_tokens=result.response.usage.prompt_tokens,
+    )
 
     if audit_logger:
         await audit_logger.log_request(

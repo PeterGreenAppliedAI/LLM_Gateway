@@ -12,8 +12,8 @@ from sqlalchemy import insert, select, func, and_, Integer, cast, delete
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from gateway.storage.schema import audit_log, usage_daily
-from sqlalchemy import case, literal_column
-from gateway.observability import get_logger
+from sqlalchemy import bindparam, case
+from gateway.observability import get_logger, get_metrics
 
 logger = get_logger(__name__)
 
@@ -98,7 +98,14 @@ class AuditLogger:
                 await conn.execute(stmt)
                 await conn.commit()
         except Exception as e:
-            logger.error(f"Failed to write audit log: {e}")
+            logger.error("Failed to write audit log", error=str(e), request_id=request_id)
+            try:
+                get_metrics().record_request(
+                    provider="audit", model="", task="audit_write",
+                    status="error", latency_ms=0,
+                )
+            except Exception:
+                pass
 
     async def get_recent_requests(
         self,
@@ -328,7 +335,7 @@ class AuditLogger:
             # Aggregate from audit_log
             agg_stmt = (
                 select(
-                    literal_column(f"'{start_of_day.isoformat()}'").label("date"),
+                    bindparam("agg_date", value=start_of_day).label("date"),
                     audit_log.c.client_id,
                     audit_log.c.endpoint,
                     audit_log.c.model,

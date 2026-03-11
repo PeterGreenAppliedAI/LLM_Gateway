@@ -72,10 +72,9 @@ The gateway is a policy/routing/enforcement system handling untrusted input from
 - **Location**: `src/gateway/storage/keys.py`
 - **Fix**: Added `expires_at` filter to `get_key_by_hash()` query. Also fixed deprecated `datetime.utcnow()` → `datetime.now(timezone.utc)`.
 
-### B7: No migration framework
-- **Location**: `src/gateway/storage/engine.py`
-- **Impact**: `create_all` cannot evolve existing tables; production schema changes require manual intervention
-- **Fix**: Adopt Alembic
+### ~~B7: No migration framework~~ — FIXED
+- **Location**: `alembic/`, `alembic.ini`
+- **Fix**: Adopted Alembic with batch mode for SQLite support. Initial migration created. Existing databases stamped at head. `render_as_batch=True` enables SQLite ALTER TABLE via batch operations.
 
 ---
 
@@ -83,15 +82,15 @@ The gateway is a policy/routing/enforcement system handling untrusted input from
 
 | ID | Location | Issue |
 |----|----------|-------|
-| H1 | `providers/ollama.py:54`, `openai.py:104` | `_get_client()` TOCTOU race — connection leak under concurrency |
-| H2 | `dispatch/dispatcher.py:407` | `_try_provider` swallows all exceptions silently (no logging) |
-| H3 | `routes/ollama.py` | Zero Prometheus metrics — Ollama traffic invisible to monitoring |
-| H4 | `security/injection.py:422` | `_escape_markers` only escapes closing tags, not opening |
+| ~~H1~~ | `providers/ollama.py`, `openai.py` | ~~TOCTOU race~~ — **FIXED**: Added `asyncio.Lock` to `_get_client()` |
+| ~~H2~~ | `dispatch/dispatcher.py` | ~~Silent exception swallowing~~ — **FIXED**: Added structured logging with provider/model/error |
+| ~~H3~~ | `routes/ollama.py` | ~~Zero Prometheus metrics~~ — **FIXED**: Added `metrics.record_request()` to chat, generate, embeddings |
+| ~~H4~~ | `security/injection.py` | ~~Incomplete tag escaping~~ — **FIXED**: Now escapes both opening and closing tags |
 | H5 | `security/guard.py`, `analyzer.py` | Zero test coverage for guard clients + async analyzer |
 | H6 | `storage/keys.py` | Zero test coverage for KeyManager |
-| H7 | `storage/audit.py:101` | Audit log write failures silently swallowed, no metric |
-| H8 | `storage/audit.py:331` | `literal_column` with f-string — fragile SQL pattern |
-| H9 | `providers/openai.py` | No per-chunk timeout in streaming |
+| ~~H7~~ | `storage/audit.py` | ~~Silent audit failures~~ — **FIXED**: Added structured error logging + metric |
+| ~~H8~~ | `storage/audit.py` | ~~literal_column f-string~~ — **FIXED**: Replaced with `bindparam()` |
+| ~~H9~~ | `providers/openai.py` | ~~No per-chunk timeout~~ — **FIXED**: Added `_iter_lines_with_timeout()` (120s) |
 
 ---
 

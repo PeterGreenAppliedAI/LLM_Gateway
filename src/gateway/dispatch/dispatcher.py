@@ -40,7 +40,10 @@ from gateway.errors import (
 )
 from gateway.models.common import HealthStatus
 from gateway.models.internal import InternalRequest, InternalResponse, StreamChunk
+from gateway.observability import get_logger
 from gateway.providers import ProviderAdapter
+
+logger = get_logger(__name__)
 
 
 # Maximum number of providers to attempt before failing
@@ -404,8 +407,14 @@ class Dispatcher:
 
             return response
 
-        except Exception:
-            # Mark provider as potentially unhealthy and return None for fallback
+        except Exception as e:
+            logger.warning(
+                "Provider dispatch failed",
+                provider=provider_name,
+                model=request.model,
+                error=str(e),
+                error_type=type(e).__name__,
+            )
             return None
 
     async def _execute_request(

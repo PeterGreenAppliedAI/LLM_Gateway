@@ -11,6 +11,7 @@ Supports OpenAI and all OpenAI-compatible APIs:
 Per NEXT_STEPS.md Phase 1: Cloud Provider Support
 """
 
+import asyncio
 import json
 import os
 import time
@@ -101,23 +102,28 @@ class OpenAIAdapter(ProviderAdapter):
 
         return None
 
+    _client_lock: asyncio.Lock | None = None
+
     async def _get_client(self) -> httpx.AsyncClient:
-        """Get or create HTTP client with authentication headers."""
-        if self._client is None or self._client.is_closed:
-            headers = {"Content-Type": "application/json"}
+        """Get or create HTTP client with authentication headers (thread-safe)."""
+        if self._client_lock is None:
+            self._client_lock = asyncio.Lock()
+        async with self._client_lock:
+            if self._client is None or self._client.is_closed:
+                headers = {"Content-Type": "application/json"}
 
-            if self._api_key:
-                headers["Authorization"] = f"Bearer {self._api_key}"
+                if self._api_key:
+                    headers["Authorization"] = f"Bearer {self._api_key}"
 
-            # Add custom headers (e.g., anthropic-version)
-            headers.update(self._custom_headers)
+                # Add custom headers (e.g., anthropic-version)
+                headers.update(self._custom_headers)
 
-            self._client = httpx.AsyncClient(
-                base_url=self.base_url,
-                timeout=httpx.Timeout(self.timeout),
-                headers=headers,
-            )
-        return self._client
+                self._client = httpx.AsyncClient(
+                    base_url=self.base_url,
+                    timeout=httpx.Timeout(self.timeout),
+                    headers=headers,
+                )
+            return self._client
 
     async def close(self) -> None:
         """Close the HTTP client."""
@@ -294,6 +300,22 @@ class OpenAIAdapter(ProviderAdapter):
     # Streaming
     # =========================================================================
 
+    # Per-chunk timeout: if no chunk arrives within this window, the stream is dead
+    STREAM_CHUNK_TIMEOUT = 120.0  # seconds between chunks
+
+    async def _iter_lines_with_timeout(self, response: httpx.Response) -> AsyncIterator[str]:
+        """Iterate response lines with a per-chunk timeout."""
+        aiter = response.aiter_lines().__aiter__()
+        while True:
+            try:
+                line = await asyncio.wait_for(
+                    aiter.__anext__(),
+                    timeout=self.STREAM_CHUNK_TIMEOUT,
+                )
+                yield line
+            except StopAsyncIteration:
+                break
+
     async def chat_stream(
         self, request: InternalRequest
     ) -> AsyncIterator[StreamChunk]:
@@ -309,7 +331,7 @@ class OpenAIAdapter(ProviderAdapter):
                 response.raise_for_status()
                 index = 0
 
-                async for line in response.aiter_lines():
+                async for line in self._iter_lines_with_timeout(response):
                     if not line or not line.startswith("data: "):
                         continue
 
