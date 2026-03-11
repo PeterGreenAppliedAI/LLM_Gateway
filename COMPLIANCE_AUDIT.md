@@ -86,8 +86,8 @@ The gateway is a policy/routing/enforcement system handling untrusted input from
 | ~~H2~~ | `dispatch/dispatcher.py` | ~~Silent exception swallowing~~ — **FIXED**: Added structured logging with provider/model/error |
 | ~~H3~~ | `routes/ollama.py` | ~~Zero Prometheus metrics~~ — **FIXED**: Added `metrics.record_request()` to chat, generate, embeddings |
 | ~~H4~~ | `security/injection.py` | ~~Incomplete tag escaping~~ — **FIXED**: Now escapes both opening and closing tags |
-| H5 | `security/guard.py`, `analyzer.py` | Zero test coverage for guard clients + async analyzer |
-| H6 | `storage/keys.py` | Zero test coverage for KeyManager |
+| ~~H5~~ | `security/guard.py`, `analyzer.py` | ~~Zero test coverage~~ — **FIXED**: 30 tests for guard clients (LlamaGuard, Granite, CircuitBreaker, factory) + 19 tests for analyzer |
+| ~~H6~~ | `storage/keys.py` | ~~Zero test coverage~~ — **FIXED**: 18 tests for KeyManager (CRUD, validation, revocation, hash helpers) |
 | ~~H7~~ | `storage/audit.py` | ~~Silent audit failures~~ — **FIXED**: Added structured error logging + metric |
 | ~~H8~~ | `storage/audit.py` | ~~literal_column f-string~~ — **FIXED**: Replaced with `bindparam()` |
 | ~~H9~~ | `providers/openai.py` | ~~No per-chunk timeout~~ — **FIXED**: Added `_iter_lines_with_timeout()` (120s) |
