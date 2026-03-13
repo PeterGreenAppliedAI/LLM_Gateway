@@ -18,7 +18,10 @@ from pydantic import BaseModel, Field
 from gateway.routes.dependencies import (
     authenticate,
     get_audit_logger,
+    get_enforcer,
+    get_config,
 )
+from gateway.policy import PolicyEnforcer
 from gateway.storage import AuditLogger
 
 router = APIRouter(tags=["dashboard"])
@@ -374,4 +377,152 @@ async def trigger_aggregation(
     return {
         "status": "success",
         **result,
+    }
+
+
+# =============================================================================
+# Token Budget
+# =============================================================================
+
+
+@router.get("/api/budget/config")
+async def budget_config(
+    request: Request,
+    _client_id: Annotated[str, Depends(authenticate)],
+    enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
+) -> dict:
+    """Get token budget configuration, including tier assignments and unclassified models."""
+    config = get_config(request)
+    budget = config.token_budgets
+    tracker = enforcer.token_budget
+
+    # Get all discovered models from catalog
+    catalog = getattr(request.app.state, "catalog", None)
+    discovered_models = []
+    if catalog:
+        for model in catalog.models:
+            discovered_models.append(model.name if hasattr(model, "name") else str(model))
+
+    # Classify each discovered model
+    model_classifications = []
+    for model_name in sorted(set(discovered_models)):
+        tier = tracker.resolve_tier(model_name)
+        model_classifications.append({
+            "model": model_name,
+            "tier": tier.name if tier else None,
+            "cost_multiplier": tier.cost_multiplier if tier else budget.default_cost_multiplier,
+            "classified": tier is not None,
+        })
+
+    return {
+        "enabled": budget.enabled,
+        "default_daily_limit": budget.default_daily_limit,
+        "default_cost_multiplier": budget.default_cost_multiplier,
+        "enforce_pre_request": budget.enforce_pre_request,
+        "tiers": [
+            {
+                "name": t.name,
+                "cost_multiplier": t.cost_multiplier,
+                "daily_limit": t.daily_limit,
+            }
+            for t in budget.model_tiers
+        ],
+        "model_assignments": tracker.model_assignments,
+        "model_classifications": model_classifications,
+    }
+
+
+@router.get("/api/budget/usage")
+async def budget_usage(
+    request: Request,
+    _client_id: Annotated[str, Depends(authenticate)],
+    enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
+    key: Optional[str] = None,
+) -> dict:
+    """Get token budget usage for a key (or all tracked keys)."""
+    tracker = enforcer.token_budget
+
+    if not tracker.enabled:
+        return {"enabled": False, "keys": []}
+
+    if key:
+        state = tracker.get_budget_state(key)
+        return {
+            "enabled": True,
+            "keys": [{
+                "key": key,
+                "daily_limit": state.daily_limit,
+                "tokens_used": state.tokens_used,
+                "tokens_remaining": state.tokens_remaining,
+                "tier_usage": state.tier_usage,
+                "resets_at": state.resets_at,
+            }],
+        }
+
+    # Return all tracked keys
+    keys = []
+    for k, usage in tracker._usage.items():
+        state = tracker.get_budget_state(k)
+        keys.append({
+            "key": k,
+            "daily_limit": state.daily_limit,
+            "tokens_used": state.tokens_used,
+            "tokens_remaining": state.tokens_remaining,
+            "tier_usage": state.tier_usage,
+            "request_count": usage.request_count,
+            "resets_at": state.resets_at,
+        })
+
+    return {
+        "enabled": True,
+        "keys": sorted(keys, key=lambda x: x["tokens_used"], reverse=True),
+    }
+
+
+class ModelAssignmentRequest(BaseModel):
+    """Request to assign a model to a tier."""
+    model: str = Field(description="Model name or glob pattern")
+    tier: str = Field(description="Tier name to assign to")
+
+
+@router.post("/api/budget/assignments")
+async def assign_model_tier(
+    request: Request,
+    body: ModelAssignmentRequest,
+    _client_id: Annotated[str, Depends(authenticate)],
+    enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
+) -> dict:
+    """Assign a model to a cost tier at runtime (no restart needed)."""
+    tracker = enforcer.token_budget
+    success = tracker.assign_model(body.model, body.tier)
+
+    if not success:
+        available = list(tracker.tiers.keys())
+        return {
+            "status": "error",
+            "message": f"Tier '{body.tier}' not found. Available: {available}",
+        }
+
+    return {
+        "status": "success",
+        "model": body.model,
+        "tier": body.tier,
+        "cost_multiplier": tracker.get_cost_multiplier(body.model),
+    }
+
+
+@router.delete("/api/budget/assignments/{model_name:path}")
+async def unassign_model_tier(
+    model_name: str,
+    _client_id: Annotated[str, Depends(authenticate)],
+    enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
+) -> dict:
+    """Remove a model's tier assignment (reverts to default cost multiplier)."""
+    tracker = enforcer.token_budget
+    existed = tracker.unassign_model(model_name)
+
+    return {
+        "status": "success" if existed else "not_found",
+        "model": model_name,
+        "now_using": "default_cost_multiplier",
     }

@@ -41,6 +41,7 @@ class ErrorCode(str, Enum):
     PROVIDER_NOT_ALLOWED = "provider_not_allowed"
     MODEL_NOT_ALLOWED = "model_not_allowed"
     ENDPOINT_NOT_ALLOWED = "endpoint_not_allowed"
+    TOKEN_BUDGET_EXCEEDED = "token_budget_exceeded"
 
     # Dispatch & Routing
     NO_PROVIDER = "no_provider"

@@ -10,6 +10,38 @@ rate_limits:
   max_tokens_per_request: 32768
 
 # =============================================================================
+# Token Budgets (optional)
+# Daily token quotas per API key with model-tier cost multipliers.
+# Tiers use glob patterns — adapts as models change without code changes.
+# =============================================================================
+
+# token_budgets:
+#   enabled: false
+#   default_daily_limit: 1000000         # 1M weighted tokens/day per key (0 = unlimited)
+#   default_cost_multiplier: 5.0         # Unknown models default to 5x until classified
+#   enforce_pre_request: true            # Reject before dispatch if budget blown
+#
+#   # Define cost tiers (just names and multipliers)
+#   model_tiers:
+#     - name: frontier
+#       cost_multiplier: 15.0
+#       daily_limit: 500000              # Optional: global cap across all keys
+#     - name: midrange
+#       cost_multiplier: 3.0
+#     - name: standard
+#       cost_multiplier: 1.0
+#     - name: embedding
+#       cost_multiplier: 0.1
+#
+#   # Assign models to tiers (exact names or globs)
+#   # Manage at runtime via POST /api/budget/assignments — no restart needed
+#   model_assignments:
+#     - { model: "phi4:14b",          tier: midrange }
+#     - { model: "llama3.1:8b",       tier: standard }
+#     - { model: "llama3.1:70b",      tier: frontier }
+#     - { model: "*embed*",           tier: embedding }
+
+# =============================================================================
 # Endpoints Configuration
 # Add your GPU nodes / inference runtimes here
 # =============================================================================

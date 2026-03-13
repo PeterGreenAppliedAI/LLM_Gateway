@@ -21,6 +21,7 @@ from gateway.models.common import TaskType
 from gateway.models.internal import InternalRequest
 from gateway.policy.rate_limiter import RateLimiter, RateLimitConfig, RateLimitExceeded
 from gateway.policy.token_limiter import TokenLimiter, TokenLimitConfig, TokenLimitExceeded
+from gateway.policy.token_budget import TokenBudgetTracker, TokenBudgetConfig, TokenBudgetExceeded
 
 
 class PolicyViolation(Exception):
@@ -53,6 +54,7 @@ class PolicyConfig(BaseModel):
     enabled: bool = Field(default=True, description="Whether policy enforcement is enabled")
     rate_limit: RateLimitConfig = Field(default_factory=RateLimitConfig)
     token_limit: TokenLimitConfig = Field(default_factory=TokenLimitConfig)
+    token_budget: TokenBudgetConfig = Field(default_factory=TokenBudgetConfig)
 
     # Provider-task mapping (optional - empty means all providers allowed for all tasks)
     task_policies: List[TaskProviderPolicy] = Field(
@@ -96,6 +98,7 @@ class PolicyEnforcer:
         self._config = config or PolicyConfig()
         self._rate_limiter = RateLimiter(self._config.rate_limit)
         self._token_limiter = TokenLimiter(self._config.token_limit)
+        self._token_budget = TokenBudgetTracker(self._config.token_budget)
 
         # Build task -> provider policy lookup
         self._task_policies: Dict[TaskType, TaskProviderPolicy] = {}
@@ -182,7 +185,23 @@ class PolicyEnforcer:
                     code="endpoint_not_allowed",
                 )
 
-        # 5. Check provider-task authorization
+        # 5. Check token budget (daily quotas)
+        if self._token_budget.enabled:
+            try:
+                self._token_budget.check_budget(
+                    key=key,
+                    model=request.model or "",
+                    estimated_tokens=request.max_tokens or 0,
+                    daily_limit_override=None,  # TODO: per-key override from DB
+                )
+            except TokenBudgetExceeded as e:
+                raise PolicyViolation(
+                    message=str(e),
+                    policy_type="token_budget_exceeded",
+                    code="token_budget_exceeded",
+                )
+
+        # 6. Check provider-task authorization
         if provider and request.task in self._task_policies:
             policy = self._task_policies[request.task]
 
@@ -275,3 +294,18 @@ class PolicyEnforcer:
     def reset_all_rate_limits(self) -> None:
         """Reset all rate limits (admin operation)."""
         self._rate_limiter.reset_all()
+
+    def record_token_usage(self, key: str, model: str, tokens: int) -> None:
+        """Record actual token usage after a response completes.
+
+        Args:
+            key: Client ID or rate limit key
+            model: Model name used
+            tokens: Total tokens consumed (prompt + completion)
+        """
+        self._token_budget.record_usage(key, model, tokens)
+
+    @property
+    def token_budget(self) -> TokenBudgetTracker:
+        """Access the token budget tracker (for querying state)."""
+        return self._token_budget

@@ -188,6 +188,32 @@ class RoutingConfig(BaseModel):
     rules: list[RoutingRule] = Field(default_factory=list, max_length=100)
 
 
+class ModelTierYamlConfig(BaseModel):
+    """Model tier definition in gateway.yaml."""
+
+    name: str
+    cost_multiplier: float = Field(default=1.0, ge=0.0, le=1000.0)
+    daily_limit: int | None = Field(default=None, ge=0)
+
+
+class ModelAssignmentYamlConfig(BaseModel):
+    """Model-to-tier assignment in gateway.yaml."""
+
+    model: str
+    tier: str
+
+
+class TokenBudgetYamlConfig(BaseModel):
+    """Token budget configuration in gateway.yaml."""
+
+    enabled: bool = Field(default=False)
+    default_daily_limit: int = Field(default=1_000_000, ge=0)
+    default_cost_multiplier: float = Field(default=5.0, ge=0.0, le=1000.0)
+    enforce_pre_request: bool = Field(default=True)
+    model_tiers: list[ModelTierYamlConfig] = Field(default_factory=list, max_length=50)
+    model_assignments: list[ModelAssignmentYamlConfig] = Field(default_factory=list, max_length=500)
+
+
 class GatewayConfig(BaseModel):
     """Main gateway configuration.
 
@@ -202,6 +228,9 @@ class GatewayConfig(BaseModel):
     auth: AuthConfig = Field(default_factory=AuthConfig)
     # Policy config imported lazily to avoid circular imports
     policy: Any = None
+
+    # Token budgets
+    token_budgets: TokenBudgetYamlConfig = Field(default_factory=TokenBudgetYamlConfig)
 
     # New endpoints architecture
     endpoints: list[EndpointConfig] = Field(default_factory=list, max_length=50)

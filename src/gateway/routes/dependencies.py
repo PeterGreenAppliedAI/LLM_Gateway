@@ -34,6 +34,7 @@ from gateway.errors import (
 from gateway.observability import get_logger, get_metrics, RequestContext
 from gateway.observability.logging import set_request_context, clear_request_context
 from gateway.policy import PolicyEnforcer, PolicyViolation
+from gateway.policy.token_budget import TokenBudgetTracker, TokenBudgetExceeded
 from gateway.security import AsyncSecurityAnalyzer, Sanitizer, PIIScrubber
 from gateway.storage import AuditLogger
 
@@ -95,10 +96,33 @@ def get_enforcer(request: Request) -> PolicyEnforcer:
         if config.policy:
             policy_config = config.policy
         else:
-            # Bridge gateway.yaml rate_limits into PolicyConfig
+            # Bridge gateway.yaml rate_limits + token_budgets into PolicyConfig
             from gateway.policy.enforcer import PolicyConfig
             from gateway.policy.rate_limiter import RateLimitConfig as PolicyRateLimitConfig
             from gateway.policy.token_limiter import TokenLimitConfig
+            from gateway.policy.token_budget import TokenBudgetConfig, ModelTierConfig, ModelAssignment
+
+            # Build token budget config from yaml
+            budget_cfg = config.token_budgets
+            budget_config = TokenBudgetConfig(
+                enabled=budget_cfg.enabled,
+                default_daily_limit=budget_cfg.default_daily_limit,
+                default_cost_multiplier=budget_cfg.default_cost_multiplier,
+                enforce_pre_request=budget_cfg.enforce_pre_request,
+                model_tiers=[
+                    ModelTierConfig(
+                        name=t.name,
+                        cost_multiplier=t.cost_multiplier,
+                        daily_limit=t.daily_limit,
+                    )
+                    for t in budget_cfg.model_tiers
+                ],
+                model_assignments=[
+                    ModelAssignment(model=a.model, tier=a.tier)
+                    for a in budget_cfg.model_assignments
+                ],
+            )
+
             policy_config = PolicyConfig(
                 rate_limit=PolicyRateLimitConfig(
                     requests_per_minute=config.rate_limits.requests_per_minute_per_user,
@@ -107,6 +131,7 @@ def get_enforcer(request: Request) -> PolicyEnforcer:
                 token_limit=TokenLimitConfig(
                     max_tokens_per_request=config.rate_limits.max_tokens_per_request,
                 ),
+                token_budget=budget_config,
             )
         enforcer = PolicyEnforcer(policy_config)
         request.app.state.enforcer = enforcer
@@ -474,6 +499,11 @@ def translate_policy_violation(e: PolicyViolation) -> None:
             message=str(e),
             code=ErrorCode.ENDPOINT_NOT_ALLOWED,
         )
+    elif e.policy_type == "token_budget_exceeded":
+        raise PolicyError(
+            message=str(e),
+            code=ErrorCode.TOKEN_BUDGET_EXCEEDED,
+        )
     else:
         raise PolicyError(message=str(e))
 
@@ -499,6 +529,11 @@ def get_security_analyzer(request: Request) -> Optional[AsyncSecurityAnalyzer]:
     Callers should handle None gracefully.
     """
     return getattr(request.app.state, "security_analyzer", None)
+
+
+def get_token_budget(request: Request) -> Optional[TokenBudgetTracker]:
+    """Get token budget tracker from app state, or None if not enabled."""
+    return getattr(request.app.state, "token_budget_tracker", None)
 
 
 def get_pii_scrubber(request: Request) -> Optional[PIIScrubber]:

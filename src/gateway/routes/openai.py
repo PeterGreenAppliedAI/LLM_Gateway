@@ -190,6 +190,11 @@ async def chat_completions(
         tokens_per_second=ctx.tokens_per_second,
     )
 
+    # Record token usage for daily budget tracking
+    total_tokens = (result.response.usage.prompt_tokens or 0) + (result.response.usage.completion_tokens or 0)
+    if total_tokens > 0:
+        enforcer.record_token_usage(client_id, result.response.model, total_tokens)
+
     # Audit log the request
     if audit_logger:
         await audit_logger.log_request(
@@ -470,6 +475,11 @@ async def completions(
         tokens_per_second=ctx.tokens_per_second,
     )
 
+    # Record token usage for daily budget tracking
+    total_tokens = (result.response.usage.prompt_tokens or 0) + (result.response.usage.completion_tokens or 0)
+    if total_tokens > 0:
+        enforcer.record_token_usage(client_id, result.response.model, total_tokens)
+
     # Audit log the request
     if audit_logger:
         await audit_logger.log_request(
@@ -614,6 +624,10 @@ async def embeddings(
         latency_ms=ctx.total_latency_ms or 0,
         prompt_tokens=result.response.usage.prompt_tokens,
     )
+
+    # Record token usage for daily budget tracking
+    if result.response.usage.prompt_tokens:
+        enforcer.record_token_usage(client_id, result.response.model, result.response.usage.prompt_tokens)
 
     # Audit log the request
     if audit_logger:

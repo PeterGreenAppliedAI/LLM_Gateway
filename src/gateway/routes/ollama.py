@@ -223,6 +223,11 @@ async def ollama_chat(
         completion_tokens=result.response.usage.completion_tokens,
     )
 
+    # Record token usage for daily budget tracking
+    total_tokens = (result.response.usage.prompt_tokens or 0) + (result.response.usage.completion_tokens or 0)
+    if total_tokens > 0:
+        enforcer.record_token_usage(client_id, result.response.model, total_tokens)
+
     # Audit log
     if audit_logger:
         await audit_logger.log_request(
@@ -467,6 +472,11 @@ async def ollama_generate(
         completion_tokens=result.response.usage.completion_tokens,
     )
 
+    # Record token usage for daily budget tracking
+    total_tokens = (result.response.usage.prompt_tokens or 0) + (result.response.usage.completion_tokens or 0)
+    if total_tokens > 0:
+        enforcer.record_token_usage(client_id, result.response.model, total_tokens)
+
     if audit_logger:
         await audit_logger.log_request(
             request_id=ctx.request_id,
@@ -676,6 +686,10 @@ async def ollama_embeddings(
         latency_ms=ctx.total_latency_ms or 0,
         prompt_tokens=result.response.usage.prompt_tokens,
     )
+
+    # Record token usage for daily budget tracking
+    if result.response.usage.prompt_tokens:
+        enforcer.record_token_usage(client_id, result.response.model, result.response.usage.prompt_tokens)
 
     if audit_logger:
         await audit_logger.log_request(

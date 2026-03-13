@@ -259,6 +259,19 @@ Results are available at `GET /api/security/results?disagreements_only=true`.
 - **Endpoint Restrictions**: Per-key endpoint access control
 - **Per-Key Rate Overrides**: Database-managed keys can have custom RPM limits
 
+### Token Budgets
+
+Daily token quotas with cost-tier weighting. Models cost different amounts against a budget depending on how expensive they are to run.
+
+- **Cost tiers**: Named levels (e.g., `frontier: 15x`, `midrange: 3x`, `standard: 1x`, `embedding: 0.1x`)
+- **Model assignments**: Map any model to a tier — exact names or glob patterns
+- **Unknown models default to an expensive multiplier** (configurable) until classified
+- **Auto-discovery integration**: The gateway discovers models from all endpoints. Unclassified models show up in the dashboard for assignment
+- **Runtime management**: Assign models to tiers via API (`POST /api/budget/assignments`) — no restart, no config file edits
+- **Per-tier global caps**: Optional daily token limits per tier across all keys (e.g., "only 500k tokens of frontier models per day")
+
+This means when a new model like `gpt-6` appears, it defaults to an expensive rate until someone classifies it from the dashboard. No config changes needed.
+
 ## Dashboard
 
 React + TypeScript monitoring UI:
