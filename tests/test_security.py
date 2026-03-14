@@ -1,13 +1,11 @@
 """Tests for security module - injection defense."""
 
-import pytest
-from gateway.security.sanitizer import Sanitizer, SanitizationResult, SanitizationType
 from gateway.security.injection import (
-    InjectionDetector,
-    DetectionResult,
-    ThreatLevel,
     ContentWrapper,
+    InjectionDetector,
+    ThreatLevel,
 )
+from gateway.security.sanitizer import SanitizationType, Sanitizer
 
 
 class TestSanitizer:

@@ -14,23 +14,23 @@ Per Database Architecture:
 """
 
 import asyncio
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncGenerator
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from gateway.catalog import ModelCatalog, ModelDiscoveryService
+from gateway.catalog import ModelDiscoveryService
 from gateway.config import GatewayConfig, load_config
 from gateway.dispatch import ProviderRegistry
 from gateway.exception_handlers import register_exception_handlers
 from gateway.observability import get_logger
+from gateway.routes import devmesh_router, ollama_router, openai_router
 from gateway.security import AsyncSecurityAnalyzer
 from gateway.security.guard import create_guard_client
 from gateway.settings import Settings, get_settings
-from gateway.storage import AuditLogger, DatabaseConfig, create_async_db_engine
-from gateway.routes import openai_router, devmesh_router, ollama_router
+from gateway.storage import AuditLogger, DatabaseConfig, SecurityScanStore, create_async_db_engine
 
 logger = get_logger(__name__)
 
@@ -112,9 +112,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             base_url=settings.guard.base_url,
         )
 
+    # Create security scan store for training data collection
+    scan_store = None
+    if getattr(app.state, "db_engine", None):
+        scan_store = SecurityScanStore(app.state.db_engine)
+        app.state.scan_store = scan_store
+        logger.info("Security scan store enabled (training data collection)")
+
     scan_allowlist_ips = settings.security.scan_allowlist_ips
     security_analyzer = AsyncSecurityAnalyzer(
         guard_client=guard_client,
+        scan_store=scan_store,
         scan_allowlist_ips=scan_allowlist_ips,
     )
     await security_analyzer.start()
@@ -126,6 +134,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Initialize PII scrubber
     if settings.pii.enabled:
         from gateway.security.pii import PIIScrubber
+
         pii_scrubber = PIIScrubber()
         app.state.pii_scrubber = pii_scrubber
         app.state.pii_settings = settings.pii
@@ -138,6 +147,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Start periodic audit log cleanup
     retention_days = settings.db.retention_days
     if app.state.audit_logger and retention_days > 0:
+
         async def _cleanup_loop() -> None:
             while True:
                 await asyncio.sleep(86400)  # Run daily

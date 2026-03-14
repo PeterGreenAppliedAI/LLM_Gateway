@@ -8,21 +8,17 @@ Tests cover:
 """
 
 import pytest
-from datetime import datetime, timedelta
-
 from sqlalchemy import text
 
 from gateway.storage import (
     AuditLogger,
     DatabaseConfig,
-    create_async_db_engine,
-    metadata,
-    audit_log,
-    usage_daily,
     api_keys,
+    audit_log,
+    create_async_db_engine,
+    usage_daily,
 )
 from gateway.storage.engine import get_table_stats
-
 
 # =============================================================================
 # Database Engine Tests
@@ -323,7 +319,9 @@ class TestAuditLogger:
 
         async with db_engine.connect() as conn:
             result = await conn.execute(
-                text("SELECT request_body, response_body FROM audit_log WHERE request_id = 'req-private'")
+                text(
+                    "SELECT request_body, response_body FROM audit_log WHERE request_id = 'req-private'"
+                )
             )
             row = result.fetchone()
 

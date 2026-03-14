@@ -8,7 +8,6 @@ Uses async SQLAlchemy for non-blocking database I/O.
 import hashlib
 import secrets
 from datetime import datetime, timezone
-from typing import Optional
 
 from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -44,11 +43,11 @@ class KeyManager:
         self,
         name: str,
         client_id: str,
-        environment: Optional[str] = None,
-        description: Optional[str] = None,
-        allowed_endpoints: Optional[list[str]] = None,
-        allowed_models: Optional[list[str]] = None,
-        rate_limit_rpm: Optional[int] = None,
+        environment: str | None = None,
+        description: str | None = None,
+        allowed_endpoints: list[str] | None = None,
+        allowed_models: list[str] | None = None,
+        rate_limit_rpm: int | None = None,
     ) -> dict:
         """Create a new API key.
 
@@ -97,22 +96,24 @@ class KeyManager:
         Returns prefix, metadata, and status for each key.
         """
         async with self._engine.connect() as conn:
-            rows = (await conn.execute(
-                select(
-                    api_keys.c.id,
-                    api_keys.c.key_prefix,
-                    api_keys.c.name,
-                    api_keys.c.client_id,
-                    api_keys.c.environment,
-                    api_keys.c.created_at,
-                    api_keys.c.last_used_at,
-                    api_keys.c.is_active,
-                    api_keys.c.allowed_endpoints,
-                    api_keys.c.allowed_models,
-                    api_keys.c.rate_limit_rpm,
-                    api_keys.c.description,
-                ).order_by(api_keys.c.created_at.desc())
-            )).fetchall()
+            rows = (
+                await conn.execute(
+                    select(
+                        api_keys.c.id,
+                        api_keys.c.key_prefix,
+                        api_keys.c.name,
+                        api_keys.c.client_id,
+                        api_keys.c.environment,
+                        api_keys.c.created_at,
+                        api_keys.c.last_used_at,
+                        api_keys.c.is_active,
+                        api_keys.c.allowed_endpoints,
+                        api_keys.c.allowed_models,
+                        api_keys.c.rate_limit_rpm,
+                        api_keys.c.description,
+                    ).order_by(api_keys.c.created_at.desc())
+                )
+            ).fetchall()
 
         return [
             {
@@ -139,9 +140,7 @@ class KeyManager:
         """
         async with self._engine.connect() as conn:
             result = await conn.execute(
-                update(api_keys)
-                .where(api_keys.c.id == key_id)
-                .values(is_active=False)
+                update(api_keys).where(api_keys.c.id == key_id).values(is_active=False)
             )
             await conn.commit()
             revoked = result.rowcount > 0
@@ -151,31 +150,33 @@ class KeyManager:
                 logger.warning("API key revoke failed: not found", key_id=key_id)
             return revoked
 
-    async def get_key_by_hash(self, key_hash: str) -> Optional[dict]:
+    async def get_key_by_hash(self, key_hash: str) -> dict | None:
         """Look up an active key by its hash.
 
         Returns key metadata if found and active, None otherwise.
         """
         async with self._engine.connect() as conn:
             now = datetime.now(timezone.utc)
-            row = (await conn.execute(
-                select(
-                    api_keys.c.id,
-                    api_keys.c.client_id,
-                    api_keys.c.environment,
-                    api_keys.c.is_active,
-                    api_keys.c.allowed_endpoints,
-                    api_keys.c.allowed_models,
-                    api_keys.c.rate_limit_rpm,
-                ).where(
-                    api_keys.c.key_hash == key_hash,
-                    api_keys.c.is_active == True,  # noqa: E712
-                    or_(
-                        api_keys.c.expires_at.is_(None),
-                        api_keys.c.expires_at > now,
-                    ),
+            row = (
+                await conn.execute(
+                    select(
+                        api_keys.c.id,
+                        api_keys.c.client_id,
+                        api_keys.c.environment,
+                        api_keys.c.is_active,
+                        api_keys.c.allowed_endpoints,
+                        api_keys.c.allowed_models,
+                        api_keys.c.rate_limit_rpm,
+                    ).where(
+                        api_keys.c.key_hash == key_hash,
+                        api_keys.c.is_active == True,  # noqa: E712
+                        or_(
+                            api_keys.c.expires_at.is_(None),
+                            api_keys.c.expires_at > now,
+                        ),
+                    )
                 )
-            )).fetchone()
+            ).fetchone()
 
             if row is None:
                 logger.debug("API key validation failed: key not found or expired")
@@ -198,7 +199,7 @@ class KeyManager:
                 "rate_limit_rpm": row.rate_limit_rpm,
             }
 
-    async def validate_plaintext_key(self, plaintext: str) -> Optional[dict]:
+    async def validate_plaintext_key(self, plaintext: str) -> dict | None:
         """Validate a plaintext API key by hashing and looking up.
 
         Returns key metadata if valid, None otherwise.

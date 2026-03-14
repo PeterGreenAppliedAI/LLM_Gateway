@@ -1,19 +1,17 @@
 """Tests for API routes - OpenAI-compatible and DevMesh extensions."""
 
-import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from gateway.config import GatewayConfig, ProviderConfig, AuthConfig, ApiKeyConfig
+from gateway.config import ApiKeyConfig, AuthConfig, GatewayConfig, ProviderConfig
 from gateway.dispatch import ProviderRegistry
 from gateway.exception_handlers import register_exception_handlers
 from gateway.models.common import FinishReason, HealthStatus, ProviderType, TaskType, UsageStats
 from gateway.models.internal import InternalResponse
-from gateway.routes import openai_router, devmesh_router
-
+from gateway.routes import devmesh_router, openai_router
 
 # =============================================================================
 # Fixtures
@@ -225,7 +223,9 @@ class TestAuthentication:
         response = client.get("/v1/models")
         assert response.status_code == 200
 
-    def test_auth_optional_uses_default_client(self, auth_client: TestClient, app_with_auth: FastAPI):
+    def test_auth_optional_uses_default_client(
+        self, auth_client: TestClient, app_with_auth: FastAPI
+    ):
         """Auth is optional - requests without key use 'default' client."""
         mock_registry = MagicMock(spec=ProviderRegistry)
         mock_registry.list_providers.return_value = []

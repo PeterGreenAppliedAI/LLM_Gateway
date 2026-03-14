@@ -18,11 +18,11 @@ Split into sub-routers for maintainability:
 
 from fastapi import APIRouter
 
-from gateway.routes.health import router as health_router
 from gateway.routes.catalog import router as catalog_router
 from gateway.routes.dashboard import router as dashboard_router
-from gateway.routes.security_api import router as security_router
+from gateway.routes.health import router as health_router
 from gateway.routes.keys import router as keys_router
+from gateway.routes.security_api import router as security_router
 
 router = APIRouter()
 

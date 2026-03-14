@@ -10,18 +10,18 @@ Endpoints:
 - POST /api/usage/aggregate
 """
 
-from typing import Annotated, Any, Optional
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
+from gateway.policy import PolicyEnforcer
 from gateway.routes.dependencies import (
     authenticate,
     get_audit_logger,
-    get_enforcer,
     get_config,
+    get_enforcer,
 )
-from gateway.policy import PolicyEnforcer
 from gateway.storage import AuditLogger
 
 router = APIRouter(tags=["dashboard"])
@@ -34,6 +34,7 @@ router = APIRouter(tags=["dashboard"])
 
 class StatsResponse(BaseModel):
     """Usage statistics response."""
+
     period_hours: int
     total_requests: int
     success_count: int
@@ -42,9 +43,9 @@ class StatsResponse(BaseModel):
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int
-    avg_latency_ms: Optional[float] = None
-    min_latency_ms: Optional[float] = None
-    max_latency_ms: Optional[float] = None
+    avg_latency_ms: float | None = None
+    min_latency_ms: float | None = None
+    max_latency_ms: float | None = None
     total_cost_usd: float = 0.0
     requests_by_endpoint: dict[str, int] = Field(default_factory=dict)
     top_models: dict[str, int] = Field(default_factory=dict)
@@ -55,7 +56,7 @@ async def get_stats(
     request: Request,
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
     hours: int = 24,
-    filter_client: Optional[str] = None,
+    filter_client: str | None = None,
 ) -> StatsResponse:
     """Get usage statistics for the dashboard."""
     if audit_logger is None:
@@ -81,25 +82,27 @@ async def get_stats(
 
 class AuditRequestSummary(BaseModel):
     """Summary of an audit log entry."""
+
     id: int
     request_id: str
     timestamp: str
     client_id: str
-    user_id: Optional[str] = None
-    environment: Optional[str] = None
+    user_id: str | None = None
+    environment: str | None = None
     task: str
     model: str
     endpoint: str
     status: str
-    latency_ms: Optional[float] = None
+    latency_ms: float | None = None
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
-    error_code: Optional[str] = None
+    error_code: str | None = None
 
 
 class RequestsListResponse(BaseModel):
     """Response for listing requests."""
+
     requests: list[AuditRequestSummary]
     total: int
     limit: int
@@ -112,9 +115,9 @@ async def list_requests(
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
     limit: int = 50,
     offset: int = 0,
-    filter_client: Optional[str] = None,
-    filter_status: Optional[str] = None,
-    filter_environment: Optional[str] = None,
+    filter_client: str | None = None,
+    filter_status: str | None = None,
+    filter_environment: str | None = None,
 ) -> RequestsListResponse:
     """Get recent requests from the audit log."""
     if audit_logger is None:
@@ -129,27 +132,29 @@ async def list_requests(
         status=filter_status,
     )
 
-    requests = requests[offset:offset + limit]
+    requests = requests[offset : offset + limit]
 
     summaries = []
     for req in requests:
-        summaries.append(AuditRequestSummary(
-            id=req.get("id", 0),
-            request_id=req["request_id"],
-            timestamp=req["timestamp"].isoformat() if req.get("timestamp") else "",
-            client_id=req["client_id"],
-            user_id=req.get("user_id"),
-            environment=req.get("environment"),
-            task=req["task"],
-            model=req["model"],
-            endpoint=req["endpoint"],
-            status=req["status"],
-            latency_ms=req.get("latency_ms"),
-            prompt_tokens=req.get("prompt_tokens", 0),
-            completion_tokens=req.get("completion_tokens", 0),
-            total_tokens=req.get("total_tokens", 0),
-            error_code=req.get("error_code"),
-        ))
+        summaries.append(
+            AuditRequestSummary(
+                id=req.get("id", 0),
+                request_id=req["request_id"],
+                timestamp=req["timestamp"].isoformat() if req.get("timestamp") else "",
+                client_id=req["client_id"],
+                user_id=req.get("user_id"),
+                environment=req.get("environment"),
+                task=req["task"],
+                model=req["model"],
+                endpoint=req["endpoint"],
+                status=req["status"],
+                latency_ms=req.get("latency_ms"),
+                prompt_tokens=req.get("prompt_tokens", 0),
+                completion_tokens=req.get("completion_tokens", 0),
+                total_tokens=req.get("total_tokens", 0),
+                error_code=req.get("error_code"),
+            )
+        )
 
     return RequestsListResponse(
         requests=summaries,
@@ -161,31 +166,32 @@ async def list_requests(
 
 class RequestDetailResponse(BaseModel):
     """Detailed information about a single request."""
+
     id: int
     request_id: str
     timestamp: str
     client_id: str
-    user_id: Optional[str] = None
-    environment: Optional[str] = None
+    user_id: str | None = None
+    environment: str | None = None
     task: str
     model: str
     endpoint: str
-    provider_type: Optional[str] = None
+    provider_type: str | None = None
     stream: bool = False
-    max_tokens: Optional[int] = None
-    temperature: Optional[float] = None
+    max_tokens: int | None = None
+    temperature: float | None = None
     status: str
-    error_code: Optional[str] = None
-    error_message: Optional[str] = None
-    latency_ms: Optional[float] = None
-    time_to_first_token_ms: Optional[float] = None
-    tokens_per_second: Optional[float] = None
+    error_code: str | None = None
+    error_message: str | None = None
+    latency_ms: float | None = None
+    time_to_first_token_ms: float | None = None
+    tokens_per_second: float | None = None
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
-    estimated_cost_usd: Optional[float] = None
-    request_body: Optional[dict] = None
-    response_body: Optional[dict] = None
+    estimated_cost_usd: float | None = None
+    request_body: dict | None = None
+    response_body: dict | None = None
 
 
 @router.get("/api/requests/{request_id}", response_model=RequestDetailResponse)
@@ -195,7 +201,7 @@ async def get_request_detail(
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
 ) -> RequestDetailResponse:
     """Get detailed information about a specific request."""
-    from gateway.errors import GatewayError, ErrorCode, ErrorCategory
+    from gateway.errors import ErrorCategory, ErrorCode, GatewayError
 
     if audit_logger is None:
         raise GatewayError(
@@ -249,16 +255,18 @@ async def get_request_detail(
 
 class ModelUsageItem(BaseModel):
     """Usage statistics for a single model."""
+
     model: str
     request_count: int
     success_count: int
     error_count: int
     total_tokens: int
-    avg_latency_ms: Optional[float] = None
+    avg_latency_ms: float | None = None
 
 
 class ModelsUsageResponse(BaseModel):
     """Response for model usage breakdown."""
+
     period_hours: int
     models: list[ModelUsageItem]
 
@@ -284,16 +292,18 @@ async def get_models_usage(
 
 class EndpointUsageItem(BaseModel):
     """Usage statistics for a single endpoint."""
+
     endpoint: str
     request_count: int
     success_count: int
     error_count: int
     total_tokens: int
-    avg_latency_ms: Optional[float] = None
+    avg_latency_ms: float | None = None
 
 
 class EndpointsUsageResponse(BaseModel):
     """Response for endpoint usage breakdown."""
+
     period_hours: int
     endpoints: list[EndpointUsageItem]
 
@@ -319,6 +329,7 @@ async def get_endpoints_usage(
 
 class DailyUsageItem(BaseModel):
     """Usage statistics for a single day."""
+
     date: str
     request_count: int
     success_count: int
@@ -328,6 +339,7 @@ class DailyUsageItem(BaseModel):
 
 class DailyUsageResponse(BaseModel):
     """Response for daily usage breakdown."""
+
     days: int
     usage: list[DailyUsageItem]
 
@@ -338,7 +350,7 @@ async def get_daily_usage(
     client_id: Annotated[str, Depends(authenticate)],
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
     days: int = 30,
-    filter_client: Optional[str] = None,
+    filter_client: str | None = None,
 ) -> DailyUsageResponse:
     """Get daily usage from aggregated data."""
     if audit_logger is None:
@@ -357,7 +369,7 @@ async def trigger_aggregation(
     request: Request,
     client_id: Annotated[str, Depends(authenticate)],
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
-    date: Optional[str] = None,
+    date: str | None = None,
 ) -> dict[str, Any]:
     """Manually trigger usage aggregation for a specific date."""
     from datetime import datetime as dt
@@ -407,12 +419,14 @@ async def budget_config(
     model_classifications = []
     for model_name in sorted(set(discovered_models)):
         tier = tracker.resolve_tier(model_name)
-        model_classifications.append({
-            "model": model_name,
-            "tier": tier.name if tier else None,
-            "cost_multiplier": tier.cost_multiplier if tier else budget.default_cost_multiplier,
-            "classified": tier is not None,
-        })
+        model_classifications.append(
+            {
+                "model": model_name,
+                "tier": tier.name if tier else None,
+                "cost_multiplier": tier.cost_multiplier if tier else budget.default_cost_multiplier,
+                "classified": tier is not None,
+            }
+        )
 
     return {
         "enabled": budget.enabled,
@@ -437,7 +451,7 @@ async def budget_usage(
     request: Request,
     _client_id: Annotated[str, Depends(authenticate)],
     enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
-    key: Optional[str] = None,
+    key: str | None = None,
 ) -> dict:
     """Get token budget usage for a key (or all tracked keys)."""
     tracker = enforcer.token_budget
@@ -449,29 +463,33 @@ async def budget_usage(
         state = tracker.get_budget_state(key)
         return {
             "enabled": True,
-            "keys": [{
-                "key": key,
-                "daily_limit": state.daily_limit,
-                "tokens_used": state.tokens_used,
-                "tokens_remaining": state.tokens_remaining,
-                "tier_usage": state.tier_usage,
-                "resets_at": state.resets_at,
-            }],
+            "keys": [
+                {
+                    "key": key,
+                    "daily_limit": state.daily_limit,
+                    "tokens_used": state.tokens_used,
+                    "tokens_remaining": state.tokens_remaining,
+                    "tier_usage": state.tier_usage,
+                    "resets_at": state.resets_at,
+                }
+            ],
         }
 
     # Return all tracked keys
     keys = []
     for k, usage in tracker._usage.items():
         state = tracker.get_budget_state(k)
-        keys.append({
-            "key": k,
-            "daily_limit": state.daily_limit,
-            "tokens_used": state.tokens_used,
-            "tokens_remaining": state.tokens_remaining,
-            "tier_usage": state.tier_usage,
-            "request_count": usage.request_count,
-            "resets_at": state.resets_at,
-        })
+        keys.append(
+            {
+                "key": k,
+                "daily_limit": state.daily_limit,
+                "tokens_used": state.tokens_used,
+                "tokens_remaining": state.tokens_remaining,
+                "tier_usage": state.tier_usage,
+                "request_count": usage.request_count,
+                "resets_at": state.resets_at,
+            }
+        )
 
     return {
         "enabled": True,
@@ -481,6 +499,7 @@ async def budget_usage(
 
 class ModelAssignmentRequest(BaseModel):
     """Request to assign a model to a tier."""
+
     model: str = Field(description="Model name or glob pattern")
     tier: str = Field(description="Tier name to assign to")
 

@@ -1,21 +1,17 @@
 """Tests for policy enforcement - rate limiting, token limits, and enforcer."""
 
-import time
-from unittest.mock import patch
-
 import pytest
 
 from gateway.models.common import TaskType
 from gateway.models.internal import InternalRequest, Message, MessageRole
-from gateway.policy.rate_limiter import RateLimiter, RateLimitConfig, RateLimitExceeded
-from gateway.policy.token_limiter import TokenLimiter, TokenLimitConfig, TokenLimitExceeded
 from gateway.policy.enforcer import (
-    PolicyEnforcer,
     PolicyConfig,
+    PolicyEnforcer,
     PolicyViolation,
     TaskProviderPolicy,
 )
-
+from gateway.policy.rate_limiter import RateLimitConfig, RateLimiter, RateLimitExceeded
+from gateway.policy.token_limiter import TokenLimitConfig, TokenLimiter, TokenLimitExceeded
 
 # =============================================================================
 # Fixtures
@@ -254,9 +250,7 @@ class TestTokenLimiter:
         assert result.max_tokens == 500
 
         # Exceeds limits - check doesn't raise but indicates not allowed
-        result = limiter.check(
-            requested_max_tokens=token_limit_config.max_tokens_per_request + 100
-        )
+        result = limiter.check(requested_max_tokens=token_limit_config.max_tokens_per_request + 100)
         assert result.adjusted_max_tokens == token_limit_config.max_tokens_per_request
 
     def test_negative_max_tokens_uses_default(self, token_limit_config):

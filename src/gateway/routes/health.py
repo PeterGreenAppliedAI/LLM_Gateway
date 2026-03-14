@@ -5,8 +5,6 @@ Per PRD Section 7:
 - GET /metrics (Prometheus)
 """
 
-from typing import Optional
-
 from fastapi import APIRouter, Request, Response
 from pydantic import BaseModel, Field
 
@@ -16,6 +14,7 @@ from gateway.models.common import HealthStatus
 
 try:
     from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+
     PROMETHEUS_AVAILABLE = True
 except ImportError:
     PROMETHEUS_AVAILABLE = False
@@ -25,14 +24,16 @@ router = APIRouter(tags=["health"])
 
 class ProviderHealth(BaseModel):
     """Health status for a single provider."""
+
     name: str
     status: str
     healthy: bool
-    last_check: Optional[str] = None
+    last_check: str | None = None
 
 
 class HealthResponse(BaseModel):
     """Health check response."""
+
     status: str
     version: str
     config_loaded: bool
@@ -58,11 +59,13 @@ async def health_check(request: Request) -> HealthResponse:
             if is_healthy:
                 providers_healthy += 1
 
-            providers.append(ProviderHealth(
-                name=name,
-                status=status_enum.value if status_enum else "unknown",
-                healthy=is_healthy,
-            ))
+            providers.append(
+                ProviderHealth(
+                    name=name,
+                    status=status_enum.value if status_enum else "unknown",
+                    healthy=is_healthy,
+                )
+            )
 
     return HealthResponse(
         status="healthy" if providers_healthy > 0 or not providers else "degraded",
@@ -77,7 +80,7 @@ async def health_check(request: Request) -> HealthResponse:
 @router.get("/metrics")
 async def prometheus_metrics() -> Response:
     """Prometheus metrics endpoint."""
-    from gateway.errors import ProviderError, ErrorCode
+    from gateway.errors import ErrorCode, ProviderError
 
     if not PROMETHEUS_AVAILABLE:
         raise ProviderError(

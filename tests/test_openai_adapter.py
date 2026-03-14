@@ -18,7 +18,6 @@ from gateway.models.common import (
 from gateway.models.internal import InternalRequest, Message, MessageRole
 from gateway.providers import OpenAIAdapter, create_adapter
 
-
 # =============================================================================
 # Fixtures
 # =============================================================================
@@ -71,9 +70,7 @@ def sample_chat_request() -> InternalRequest:
     return InternalRequest(
         task=TaskType.CHAT,
         model="gpt-4",
-        messages=[
-            Message(role=MessageRole.USER, content="Hello, how are you?")
-        ],
+        messages=[Message(role=MessageRole.USER, content="Hello, how are you?")],
         max_tokens=100,
         temperature=0.7,
     )
@@ -206,14 +203,16 @@ class TestOpenAIResponseParsing:
             "object": "chat.completion",
             "created": 1677652288,
             "model": "gpt-4",
-            "choices": [{
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": "I'm doing great, thanks!",
-                },
-                "finish_reason": "stop",
-            }],
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "I'm doing great, thanks!",
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
             "usage": {
                 "prompt_tokens": 10,
                 "completion_tokens": 8,
@@ -244,10 +243,12 @@ class TestOpenAIResponseParsing:
             "id": "cmpl-123",
             "object": "text_completion",
             "model": "gpt-3.5-turbo-instruct",
-            "choices": [{
-                "text": " there was a brave knight",
-                "finish_reason": "length",
-            }],
+            "choices": [
+                {
+                    "text": " there was a brave knight",
+                    "finish_reason": "length",
+                }
+            ],
             "usage": {
                 "prompt_tokens": 5,
                 "completion_tokens": 6,
@@ -341,7 +342,7 @@ class TestOpenAIAdapterProperties:
         limitations = adapter.limitations
 
         assert len(limitations) > 0
-        assert any("API key" in l for l in limitations)
+        assert any("API key" in lim for lim in limitations)
 
     def test_get_capabilities(self, openai_config):
         """Adapter reports capabilities."""
@@ -457,10 +458,12 @@ class TestOpenAIAdapterIntegration:
         mock_response.raise_for_status = MagicMock()
         mock_response.json.return_value = {
             "model": "gpt-4",
-            "choices": [{
-                "message": {"role": "assistant", "content": "Hello!"},
-                "finish_reason": "stop",
-            }],
+            "choices": [
+                {
+                    "message": {"role": "assistant", "content": "Hello!"},
+                    "finish_reason": "stop",
+                }
+            ],
             "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7},
         }
 

@@ -17,14 +17,15 @@ Additional performance metrics:
 - tokens_per_second (histogram) - generation throughput
 """
 
+from collections.abc import Generator
 from contextlib import contextmanager
-from typing import Optional, Generator
-import time
+from typing import Optional
 
 from pydantic import BaseModel, Field
 
 try:
-    from prometheus_client import Counter, Histogram, Gauge, REGISTRY, CollectorRegistry
+    from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
+
     PROMETHEUS_AVAILABLE = True
 except ImportError:
     PROMETHEUS_AVAILABLE = False
@@ -39,19 +40,35 @@ class MetricsConfig(BaseModel):
 
 # Histogram buckets for latency metrics (in milliseconds)
 LATENCY_BUCKETS = (
-    5, 10, 25, 50, 75, 100, 150, 200, 300, 400, 500,
-    750, 1000, 1500, 2000, 3000, 5000, 7500, 10000, 15000, 30000, 60000
+    5,
+    10,
+    25,
+    50,
+    75,
+    100,
+    150,
+    200,
+    300,
+    400,
+    500,
+    750,
+    1000,
+    1500,
+    2000,
+    3000,
+    5000,
+    7500,
+    10000,
+    15000,
+    30000,
+    60000,
 )
 
 # Histogram buckets for TTFT (typically faster)
-TTFT_BUCKETS = (
-    5, 10, 25, 50, 75, 100, 150, 200, 300, 500, 750, 1000, 2000, 5000
-)
+TTFT_BUCKETS = (5, 10, 25, 50, 75, 100, 150, 200, 300, 500, 750, 1000, 2000, 5000)
 
 # Histogram buckets for tokens per second
-TPS_BUCKETS = (
-    1, 5, 10, 20, 30, 40, 50, 75, 100, 150, 200, 300, 500
-)
+TPS_BUCKETS = (1, 5, 10, 20, 30, 40, 50, 75, 100, 150, 200, 300, 500)
 
 
 class MetricsCollector:
@@ -68,7 +85,9 @@ class MetricsCollector:
     - active_requests: Gauge of concurrent requests per provider
     """
 
-    def __init__(self, config: Optional[MetricsConfig] = None, registry: Optional["CollectorRegistry"] = None):
+    def __init__(
+        self, config: MetricsConfig | None = None, registry: Optional["CollectorRegistry"] = None
+    ):
         """Initialize metrics collector.
 
         Args:
@@ -94,7 +113,7 @@ class MetricsCollector:
             f"{prefix}_requests_total",
             "Total number of requests",
             ["provider", "model", "task", "status"],
-            **reg_kwargs
+            **reg_kwargs,
         )
 
         # Latency histogram (milliseconds)
@@ -103,7 +122,7 @@ class MetricsCollector:
             "Request latency in milliseconds",
             ["provider", "model", "task"],
             buckets=LATENCY_BUCKETS,
-            **reg_kwargs
+            **reg_kwargs,
         )
 
         # Time to first token histogram (milliseconds)
@@ -112,7 +131,7 @@ class MetricsCollector:
             "Time to first token in milliseconds",
             ["provider", "model"],
             buckets=TTFT_BUCKETS,
-            **reg_kwargs
+            **reg_kwargs,
         )
 
         # Tokens per second histogram
@@ -121,7 +140,7 @@ class MetricsCollector:
             "Token generation throughput (tokens/second)",
             ["provider", "model"],
             buckets=TPS_BUCKETS,
-            **reg_kwargs
+            **reg_kwargs,
         )
 
         # Token counters
@@ -129,14 +148,14 @@ class MetricsCollector:
             f"{prefix}_tokens_prompt_total",
             "Total prompt/input tokens",
             ["provider", "model"],
-            **reg_kwargs
+            **reg_kwargs,
         )
 
         self._tokens_completion = Counter(
             f"{prefix}_tokens_completion_total",
             "Total completion/output tokens",
             ["provider", "model"],
-            **reg_kwargs
+            **reg_kwargs,
         )
 
         # Error counter
@@ -144,15 +163,12 @@ class MetricsCollector:
             f"{prefix}_provider_errors_total",
             "Total provider errors",
             ["provider", "error_type"],
-            **reg_kwargs
+            **reg_kwargs,
         )
 
         # Active requests gauge
         self._active_requests = Gauge(
-            f"{prefix}_active_requests",
-            "Number of active requests",
-            ["provider"],
-            **reg_kwargs
+            f"{prefix}_active_requests", "Number of active requests", ["provider"], **reg_kwargs
         )
 
     @property
@@ -167,10 +183,10 @@ class MetricsCollector:
         task: str,
         status: str,
         latency_ms: float,
-        prompt_tokens: Optional[int] = None,
-        completion_tokens: Optional[int] = None,
-        time_to_first_token_ms: Optional[float] = None,
-        tokens_per_second: Optional[float] = None,
+        prompt_tokens: int | None = None,
+        completion_tokens: int | None = None,
+        time_to_first_token_ms: float | None = None,
+        tokens_per_second: float | None = None,
     ) -> None:
         """Record a completed request with all metrics.
 
@@ -195,46 +211,27 @@ class MetricsCollector:
         status = self._sanitize_label(status)
 
         # Request counter
-        self._requests_total.labels(
-            provider=provider,
-            model=model,
-            task=task,
-            status=status
-        ).inc()
+        self._requests_total.labels(provider=provider, model=model, task=task, status=status).inc()
 
         # Latency histogram
-        self._request_latency.labels(
-            provider=provider,
-            model=model,
-            task=task
-        ).observe(latency_ms)
+        self._request_latency.labels(provider=provider, model=model, task=task).observe(latency_ms)
 
         # Token metrics
         if prompt_tokens is not None:
-            self._tokens_prompt.labels(
-                provider=provider,
-                model=model
-            ).inc(prompt_tokens)
+            self._tokens_prompt.labels(provider=provider, model=model).inc(prompt_tokens)
 
         if completion_tokens is not None:
-            self._tokens_completion.labels(
-                provider=provider,
-                model=model
-            ).inc(completion_tokens)
+            self._tokens_completion.labels(provider=provider, model=model).inc(completion_tokens)
 
         # TTFT
         if time_to_first_token_ms is not None:
-            self._ttft.labels(
-                provider=provider,
-                model=model
-            ).observe(time_to_first_token_ms)
+            self._ttft.labels(provider=provider, model=model).observe(time_to_first_token_ms)
 
         # Tokens per second
         if tokens_per_second is not None:
-            self._tokens_per_second.labels(
-                provider=provider,
-                model=model
-            ).observe(tokens_per_second)
+            self._tokens_per_second.labels(provider=provider, model=model).observe(
+                tokens_per_second
+            )
 
     def record_error(self, provider: str, error_type: str) -> None:
         """Record a provider error.
@@ -249,10 +246,7 @@ class MetricsCollector:
         provider = self._sanitize_label(provider)
         error_type = self._sanitize_label(error_type)
 
-        self._provider_errors.labels(
-            provider=provider,
-            error_type=error_type
-        ).inc()
+        self._provider_errors.labels(provider=provider, error_type=error_type).inc()
 
     @contextmanager
     def track_request(self, provider: str) -> Generator[None, None, None]:
@@ -306,10 +300,10 @@ class MetricsCollector:
 
 
 # Global metrics instance
-_metrics: Optional[MetricsCollector] = None
+_metrics: MetricsCollector | None = None
 
 
-def get_metrics(config: Optional[MetricsConfig] = None) -> MetricsCollector:
+def get_metrics(config: MetricsConfig | None = None) -> MetricsCollector:
     """Get the global metrics collector.
 
     Args:

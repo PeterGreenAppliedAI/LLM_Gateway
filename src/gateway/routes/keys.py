@@ -6,7 +6,7 @@ Endpoints:
 - DELETE /api/keys/{key_id}
 """
 
-from typing import Annotated, Any, Optional
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
@@ -27,17 +27,19 @@ def get_key_manager(request: Request) -> KeyManager | None:
 
 class CreateKeyRequest(BaseModel):
     """Request to create a new API key."""
+
     name: str = Field(..., min_length=1, max_length=128)
     client_id: str = Field(..., min_length=1, max_length=128)
-    environment: Optional[str] = None
-    description: Optional[str] = None
-    allowed_endpoints: Optional[list[str]] = None
-    allowed_models: Optional[list[str]] = None
-    rate_limit_rpm: Optional[int] = Field(default=None, ge=1)
+    environment: str | None = None
+    description: str | None = None
+    allowed_endpoints: list[str] | None = None
+    allowed_models: list[str] | None = None
+    rate_limit_rpm: int | None = Field(default=None, ge=1)
 
 
 class CreateKeyResponse(BaseModel):
     """Response after creating an API key. Contains plaintext key shown once."""
+
     key: str
     key_id: int
     prefix: str
@@ -48,22 +50,24 @@ class CreateKeyResponse(BaseModel):
 
 class KeyInfo(BaseModel):
     """API key info (no secret data)."""
+
     id: int
     prefix: str
     name: str
     client_id: str
-    environment: Optional[str] = None
-    created_at: Optional[str] = None
-    last_used_at: Optional[str] = None
+    environment: str | None = None
+    created_at: str | None = None
+    last_used_at: str | None = None
     is_active: bool
-    allowed_endpoints: Optional[list[str]] = None
-    allowed_models: Optional[list[str]] = None
-    rate_limit_rpm: Optional[int] = None
-    description: Optional[str] = None
+    allowed_endpoints: list[str] | None = None
+    allowed_models: list[str] | None = None
+    rate_limit_rpm: int | None = None
+    description: str | None = None
 
 
 class KeyListResponse(BaseModel):
     """Response for listing API keys."""
+
     keys: list[KeyInfo]
     total: int
 
@@ -75,7 +79,7 @@ async def create_api_key(
     client_id: Annotated[str, Depends(require_admin)],
 ) -> CreateKeyResponse:
     """Create a new database-backed API key."""
-    from gateway.errors import GatewayError, ErrorCode, ErrorCategory
+    from gateway.errors import ErrorCategory, ErrorCode, GatewayError
 
     km = get_key_manager(request)
     if km is None:
@@ -104,7 +108,7 @@ async def list_api_keys(
     client_id: Annotated[str, Depends(require_admin)],
 ) -> KeyListResponse:
     """List all API keys (masked - no secret data)."""
-    from gateway.errors import GatewayError, ErrorCode, ErrorCategory
+    from gateway.errors import ErrorCategory, ErrorCode, GatewayError
 
     km = get_key_manager(request)
     if km is None:
@@ -129,7 +133,7 @@ async def revoke_api_key(
     client_id: Annotated[str, Depends(require_admin)],
 ) -> dict[str, Any]:
     """Revoke an API key by ID."""
-    from gateway.errors import GatewayError, ErrorCode, ErrorCategory
+    from gateway.errors import ErrorCategory, ErrorCode, GatewayError
 
     km = get_key_manager(request)
     if km is None:

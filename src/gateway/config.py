@@ -10,7 +10,6 @@ from pydantic import AfterValidator, BaseModel, Field, model_validator
 
 from gateway.models.common import ProviderType
 
-
 # =============================================================================
 # Validation Helpers
 # =============================================================================
@@ -79,14 +78,18 @@ class ProviderConfig(BaseModel):
     base_url: ProviderUrl
     enabled: bool = True
     timeout: float = Field(default=30.0, gt=0, le=300.0)  # Max 5 minutes
-    max_retries: int = Field(default=3, ge=0, le=10)  # TODO: Not yet used in dispatcher - reserved for retry+backoff implementation
+    max_retries: int = Field(
+        default=3, ge=0, le=10
+    )  # TODO: Not yet used in dispatcher - reserved for retry+backoff implementation
     capabilities: list[str] = Field(default_factory=list, max_length=20)
     models: list[str] = Field(default_factory=list, max_length=100)
     default_model: str | None = None  # Default model for this provider
     # API key authentication (for cloud providers)
     api_key: str | None = None  # Direct key or ${ENV_VAR} syntax
     api_key_env: str | None = None  # Environment variable name for API key
-    headers: dict[str, str] = Field(default_factory=dict)  # Custom headers (e.g., anthropic-version)
+    headers: dict[str, str] = Field(
+        default_factory=dict
+    )  # Custom headers (e.g., anthropic-version)
 
 
 # =============================================================================
@@ -142,8 +145,7 @@ class ResolutionConfig(BaseModel):
     model_defaults: list[ModelDefault] = Field(default_factory=list, max_length=500)
     endpoint_priority: list[SafeIdentifier] = Field(default_factory=list, max_length=50)
     ambiguous_behavior: str = Field(
-        default="error",
-        pattern="^(error|first_priority)$"
+        default="error", pattern="^(error|first_priority)$"
     )  # error or first_priority
 
 
@@ -154,7 +156,9 @@ class ApiKeyConfig(BaseModel):
     client_id: SafeIdentifier
     description: str = ""
     environment: SafeIdentifier | None = None  # dev, prod - determines which env this key uses
-    target_endpoint: SafeIdentifier | None = None  # Force all requests from this key to a specific endpoint
+    target_endpoint: SafeIdentifier | None = (
+        None  # Force all requests from this key to a specific endpoint
+    )
 
 
 class AuthConfig(BaseModel):
@@ -292,9 +296,7 @@ class GatewayConfig(BaseModel):
 
             for rule in self.routing.rules:
                 if rule.provider not in provider_names:
-                    raise ValueError(
-                        f"Routing rule references unknown provider '{rule.provider}'"
-                    )
+                    raise ValueError(f"Routing rule references unknown provider '{rule.provider}'")
                 for fallback in rule.fallback_providers:
                     if fallback not in provider_names:
                         raise ValueError(
@@ -382,7 +384,9 @@ class ConfigLoader:
         """
         if isinstance(data, str):
             import re
-            pattern = re.compile(r'\$\{([^}]+)\}')
+
+            pattern = re.compile(r"\$\{([^}]+)\}")
+
             def replacer(match: re.Match) -> str:
                 expr = match.group(1)
                 if ":-" in expr:
@@ -391,8 +395,11 @@ class ConfigLoader:
                 else:
                     value = os.environ.get(expr)
                     if value is None:
-                        raise ValueError(f"Environment variable '{expr}' not set (referenced in config)")
+                        raise ValueError(
+                            f"Environment variable '{expr}' not set (referenced in config)"
+                        )
                     return value
+
             return pattern.sub(replacer, data)
         elif isinstance(data, dict):
             return {k: ConfigLoader._resolve_env_vars(v) for k, v in data.items()}
@@ -426,9 +433,7 @@ class ConfigLoader:
         return GatewayConfig(**config_data)
 
 
-def load_config(
-    config_path: str | Path, providers_path: str | Path | None = None
-) -> GatewayConfig:
+def load_config(config_path: str | Path, providers_path: str | Path | None = None) -> GatewayConfig:
     """Convenience function to load gateway configuration."""
     loader = ConfigLoader(config_path, providers_path)
     return loader.load()

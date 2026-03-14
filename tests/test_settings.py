@@ -1,7 +1,5 @@
 """Tests for application settings."""
 
-import os
-
 import pytest
 
 from gateway.settings import Settings, get_settings

@@ -11,6 +11,7 @@ class TaskType(str, Enum):
     These represent the semantic intent of a request, independent of
     the API format or provider used.
     """
+
     CHAT = "chat"
     COMPLETION = "completion"
     SUMMARIZE = "summarize"
@@ -22,15 +23,17 @@ class TaskType(str, Enum):
 
 class FinishReason(str, Enum):
     """Reasons why generation stopped."""
-    STOP = "stop"              # Natural stop or stop sequence hit
-    LENGTH = "length"          # Max tokens reached
+
+    STOP = "stop"  # Natural stop or stop sequence hit
+    LENGTH = "length"  # Max tokens reached
     CONTENT_FILTER = "content_filter"  # Content was filtered
     TOOL_CALLS = "tool_calls"  # Model wants to call tools
-    ERROR = "error"            # Error during generation
+    ERROR = "error"  # Error during generation
 
 
 class UsageStats(BaseModel):
     """Token usage statistics."""
+
     prompt_tokens: int = Field(default=0, ge=0)
     completion_tokens: int = Field(default=0, ge=0)
     total_tokens: int = Field(default=0, ge=0)
@@ -47,6 +50,7 @@ class UsageStats(BaseModel):
 
 class ModelCapability(str, Enum):
     """Capabilities that a model/provider may support."""
+
     CHAT = "chat"
     COMPLETION = "completion"
     EMBEDDINGS = "embeddings"
@@ -58,6 +62,7 @@ class ModelCapability(str, Enum):
 
 class ProviderType(str, Enum):
     """Supported provider runtime types."""
+
     OLLAMA = "ollama"
     VLLM = "vllm"
     TRTLLM = "trtllm"
@@ -67,6 +72,7 @@ class ProviderType(str, Enum):
 
 class HealthStatus(str, Enum):
     """Provider health status."""
+
     HEALTHY = "healthy"
     DEGRADED = "degraded"  # Partially working (e.g., some models unavailable)
     UNHEALTHY = "unhealthy"
@@ -79,6 +85,7 @@ class ModelInfo(BaseModel):
     Per PRD Section 12: Adapters must declare capabilities,
     max context length, streaming support, and known limitations.
     """
+
     name: str  # Model identifier (e.g., "llama3.2", "mistral")
     provider: str  # Provider name this model is from
 
@@ -123,6 +130,7 @@ class ProviderInfo(BaseModel):
     Per PRD Section 12: Adapters must declare capabilities,
     max context length, streaming support, and known limitations.
     """
+
     name: str  # Provider identifier (e.g., "ollama", "vllm-local")
     type: ProviderType
     base_url: str

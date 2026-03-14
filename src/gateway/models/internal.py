@@ -20,7 +20,6 @@ from pydantic import AfterValidator, BaseModel, Field
 
 from gateway.models.common import FinishReason, TaskType, UsageStats
 
-
 # =============================================================================
 # Security Validation
 # =============================================================================
@@ -64,6 +63,7 @@ BoundedContent = Annotated[str, AfterValidator(validate_content_length)]
 
 class MessageRole(str, Enum):
     """Role of a message in a conversation."""
+
     SYSTEM = "system"
     USER = "user"
     ASSISTANT = "assistant"
@@ -72,6 +72,7 @@ class MessageRole(str, Enum):
 
 class ToolCall(BaseModel):
     """A tool call requested by the model."""
+
     id: str | None = None
     type: str = "function"
     function: dict[str, Any] = Field(default_factory=dict)  # {"name": ..., "arguments": ...}
@@ -79,9 +80,14 @@ class ToolCall(BaseModel):
 
 class Message(BaseModel):
     """A single message in a conversation."""
+
     role: MessageRole
-    content: BoundedContent | None = None  # Length-limited for security; None when tool_calls present
-    content_parts: list[dict[str, Any]] | None = None  # OpenAI multimodal content parts (preserved raw)
+    content: BoundedContent | None = (
+        None  # Length-limited for security; None when tool_calls present
+    )
+    content_parts: list[dict[str, Any]] | None = (
+        None  # OpenAI multimodal content parts (preserved raw)
+    )
     name: str | None = Field(default=None, max_length=64)  # Bounded name
     tool_calls: list[ToolCall] | None = None  # Tool calls from assistant
     tool_call_id: str | None = None  # For tool role: which call this responds to
@@ -219,6 +225,7 @@ class InternalResponse(BaseModel):
 
 class StreamChunk(BaseModel):
     """A single chunk in a streaming response."""
+
     request_id: str
     index: int = 0
     delta: str  # Incremental content

@@ -6,14 +6,12 @@ Uses async SQLAlchemy for non-blocking database I/O.
 """
 
 from datetime import datetime, timedelta, timezone
-from typing import Optional
 
-from sqlalchemy import insert, select, func, and_, Integer, cast, delete
+from sqlalchemy import Integer, and_, bindparam, case, cast, delete, func, insert, select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from gateway.storage.schema import audit_log, usage_daily
-from sqlalchemy import bindparam, case
 from gateway.observability import get_logger, get_metrics
+from gateway.storage.schema import audit_log, usage_daily
 
 logger = get_logger(__name__)
 
@@ -44,22 +42,22 @@ class AuditLogger:
         endpoint: str,
         status: str,
         *,
-        user_id: Optional[str] = None,
-        environment: Optional[str] = None,
-        provider_type: Optional[str] = None,
+        user_id: str | None = None,
+        environment: str | None = None,
+        provider_type: str | None = None,
         stream: bool = False,
-        max_tokens: Optional[int] = None,
-        temperature: Optional[float] = None,
-        latency_ms: Optional[float] = None,
-        time_to_first_token_ms: Optional[float] = None,
-        tokens_per_second: Optional[float] = None,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        latency_ms: float | None = None,
+        time_to_first_token_ms: float | None = None,
+        tokens_per_second: float | None = None,
         prompt_tokens: int = 0,
         completion_tokens: int = 0,
-        error_code: Optional[str] = None,
-        error_message: Optional[str] = None,
-        estimated_cost_usd: Optional[float] = None,
-        request_body: Optional[dict] = None,
-        response_body: Optional[dict] = None,
+        error_code: str | None = None,
+        error_message: str | None = None,
+        estimated_cost_usd: float | None = None,
+        request_body: dict | None = None,
+        response_body: dict | None = None,
     ) -> None:
         """Log a request to the audit table."""
         values = {
@@ -101,8 +99,11 @@ class AuditLogger:
             logger.error("Failed to write audit log", error=str(e), request_id=request_id)
             try:
                 get_metrics().record_request(
-                    provider="audit", model="", task="audit_write",
-                    status="error", latency_ms=0,
+                    provider="audit",
+                    model="",
+                    task="audit_write",
+                    status="error",
+                    latency_ms=0,
                 )
             except Exception:
                 pass
@@ -110,9 +111,9 @@ class AuditLogger:
     async def get_recent_requests(
         self,
         limit: int = 100,
-        client_id: Optional[str] = None,
-        environment: Optional[str] = None,
-        status: Optional[str] = None,
+        client_id: str | None = None,
+        environment: str | None = None,
+        status: str | None = None,
     ) -> list[dict]:
         """Get recent requests from the audit log."""
         stmt = select(audit_log).order_by(audit_log.c.timestamp.desc()).limit(limit)
@@ -135,7 +136,7 @@ class AuditLogger:
     async def get_stats(
         self,
         hours: int = 24,
-        client_id: Optional[str] = None,
+        client_id: str | None = None,
     ) -> dict:
         """Get usage statistics for the specified time period."""
         cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
@@ -192,9 +193,7 @@ class AuditLogger:
                 .where(base_filter)
                 .group_by(audit_log.c.endpoint)
             )
-            endpoints = {
-                row[0]: row[1] for row in (await conn.execute(endpoint_stmt)).fetchall()
-            }
+            endpoints = {row[0]: row[1] for row in (await conn.execute(endpoint_stmt)).fetchall()}
 
             # Requests by model
             model_stmt = (
@@ -204,9 +203,7 @@ class AuditLogger:
                 .order_by(func.count().desc())
                 .limit(10)
             )
-            top_models = {
-                row[0]: row[1] for row in (await conn.execute(model_stmt)).fetchall()
-            }
+            top_models = {row[0]: row[1] for row in (await conn.execute(model_stmt)).fetchall()}
 
             return {
                 "period_hours": hours,
@@ -214,9 +211,7 @@ class AuditLogger:
                 "success_count": success_count,
                 "error_count": error_count,
                 "success_rate": (
-                    round(success_count / total_requests * 100, 2)
-                    if total_requests > 0
-                    else 0
+                    round(success_count / total_requests * 100, 2) if total_requests > 0 else 0
                 ),
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
@@ -229,7 +224,7 @@ class AuditLogger:
                 "top_models": top_models,
             }
 
-    async def get_request_by_id(self, request_id: str) -> Optional[dict]:
+    async def get_request_by_id(self, request_id: str) -> dict | None:
         """Get a specific request by its ID."""
         stmt = select(audit_log).where(audit_log.c.request_id == request_id)
 
@@ -249,9 +244,7 @@ class AuditLogger:
                 select(
                     audit_log.c.model,
                     func.count().label("request_count"),
-                    func.sum(
-                        cast(audit_log.c.status == "success", Integer)
-                    ).label("success_count"),
+                    func.sum(cast(audit_log.c.status == "success", Integer)).label("success_count"),
                     func.sum(audit_log.c.total_tokens).label("total_tokens"),
                     func.avg(audit_log.c.latency_ms).label("avg_latency_ms"),
                 )
@@ -264,14 +257,18 @@ class AuditLogger:
             for row in (await conn.execute(stmt)).fetchall():
                 request_count = row.request_count or 0
                 success_count = row.success_count or 0
-                results.append({
-                    "model": row.model,
-                    "request_count": request_count,
-                    "success_count": success_count,
-                    "error_count": request_count - success_count,
-                    "total_tokens": row.total_tokens or 0,
-                    "avg_latency_ms": round(row.avg_latency_ms, 2) if row.avg_latency_ms else None,
-                })
+                results.append(
+                    {
+                        "model": row.model,
+                        "request_count": request_count,
+                        "success_count": success_count,
+                        "error_count": request_count - success_count,
+                        "total_tokens": row.total_tokens or 0,
+                        "avg_latency_ms": round(row.avg_latency_ms, 2)
+                        if row.avg_latency_ms
+                        else None,
+                    }
+                )
 
             return results
 
@@ -284,9 +281,7 @@ class AuditLogger:
                 select(
                     audit_log.c.endpoint,
                     func.count().label("request_count"),
-                    func.sum(
-                        cast(audit_log.c.status == "success", Integer)
-                    ).label("success_count"),
+                    func.sum(cast(audit_log.c.status == "success", Integer)).label("success_count"),
                     func.sum(audit_log.c.total_tokens).label("total_tokens"),
                     func.avg(audit_log.c.latency_ms).label("avg_latency_ms"),
                 )
@@ -299,25 +294,31 @@ class AuditLogger:
             for row in (await conn.execute(stmt)).fetchall():
                 request_count = row.request_count or 0
                 success_count = row.success_count or 0
-                results.append({
-                    "endpoint": row.endpoint,
-                    "request_count": request_count,
-                    "success_count": success_count,
-                    "error_count": request_count - success_count,
-                    "total_tokens": row.total_tokens or 0,
-                    "avg_latency_ms": round(row.avg_latency_ms, 2) if row.avg_latency_ms else None,
-                })
+                results.append(
+                    {
+                        "endpoint": row.endpoint,
+                        "request_count": request_count,
+                        "success_count": success_count,
+                        "error_count": request_count - success_count,
+                        "total_tokens": row.total_tokens or 0,
+                        "avg_latency_ms": round(row.avg_latency_ms, 2)
+                        if row.avg_latency_ms
+                        else None,
+                    }
+                )
 
             return results
 
-    async def aggregate_daily_usage(self, date: Optional[datetime] = None) -> dict:
+    async def aggregate_daily_usage(self, date: datetime | None = None) -> dict:
         """Aggregate usage from audit_log into usage_daily table.
 
         Computes daily rollups by client, endpoint, and model for faster
         dashboard queries over long time periods.
         """
         if date is None:
-            date = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
+            date = datetime.now(timezone.utc).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            ) - timedelta(days=1)
 
         start_of_day = date.replace(hour=0, minute=0, second=0, microsecond=0)
         end_of_day = start_of_day + timedelta(days=1)
@@ -340,9 +341,9 @@ class AuditLogger:
                     audit_log.c.endpoint,
                     audit_log.c.model,
                     func.count().label("request_count"),
-                    func.sum(
-                        case((audit_log.c.status == "success", 1), else_=0)
-                    ).label("success_count"),
+                    func.sum(case((audit_log.c.status == "success", 1), else_=0)).label(
+                        "success_count"
+                    ),
                     func.sum(audit_log.c.total_tokens).label("total_tokens"),
                     func.sum(audit_log.c.estimated_cost_usd).label("total_cost_usd"),
                     func.avg(audit_log.c.latency_ms).label("avg_latency_ms"),
@@ -390,7 +391,7 @@ class AuditLogger:
     async def get_daily_usage(
         self,
         days: int = 30,
-        client_id: Optional[str] = None,
+        client_id: str | None = None,
     ) -> list[dict]:
         """Get daily usage from the aggregated table."""
         cutoff = datetime.now(timezone.utc) - timedelta(days=days)
@@ -414,13 +415,15 @@ class AuditLogger:
         async with self._engine.connect() as conn:
             results = []
             for row in (await conn.execute(stmt)).fetchall():
-                results.append({
-                    "date": row.date.isoformat() if row.date else None,
-                    "request_count": row.request_count or 0,
-                    "success_count": row.success_count or 0,
-                    "total_tokens": row.total_tokens or 0,
-                    "total_cost_usd": float(row.total_cost_usd or 0),
-                })
+                results.append(
+                    {
+                        "date": row.date.isoformat() if row.date else None,
+                        "request_count": row.request_count or 0,
+                        "success_count": row.success_count or 0,
+                        "total_tokens": row.total_tokens or 0,
+                        "total_cost_usd": float(row.total_cost_usd or 0),
+                    }
+                )
             return results
 
     async def cleanup_old_records(self, retention_days: int) -> int:
@@ -432,9 +435,7 @@ class AuditLogger:
 
         try:
             async with self._engine.connect() as conn:
-                result = await conn.execute(
-                    delete(audit_log).where(audit_log.c.timestamp < cutoff)
-                )
+                result = await conn.execute(delete(audit_log).where(audit_log.c.timestamp < cutoff))
                 await conn.commit()
                 deleted = result.rowcount
                 if deleted > 0:

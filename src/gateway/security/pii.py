@@ -14,24 +14,25 @@ Scrubbing (replacement with placeholders) is per-route configurable.
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Optional
 
 
 @dataclass
 class PIIMatch:
     """A single PII detection."""
-    pii_type: str          # EMAIL, PHONE, SSN, CREDIT_CARD, IP_ADDRESS
-    start: int             # Position in text
+
+    pii_type: str  # EMAIL, PHONE, SSN, CREDIT_CARD, IP_ADDRESS
+    start: int  # Position in text
     end: int
-    placeholder: str       # e.g., "[EMAIL]"
+    placeholder: str  # e.g., "[EMAIL]"
 
 
 @dataclass
 class PIIScanResult:
     """Result of PII scanning on a single text."""
+
     has_pii: bool
     detections: list[PIIMatch] = field(default_factory=list)
-    scrubbed_text: Optional[str] = None  # Only populated when scrubbing is requested
+    scrubbed_text: str | None = None  # Only populated when scrubbing is requested
     scan_time_ms: float = 0.0
 
     @property
@@ -51,19 +52,18 @@ class PIIScanResult:
 # Order matters — more specific patterns first to avoid partial matches
 _PII_PATTERNS: list[tuple[str, re.Pattern]] = [
     # SSN: 123-45-6789 or 123 45 6789 (but NOT 9 digits with no separators to reduce false positives)
-    ("SSN", re.compile(r'\b\d{3}[-\s]\d{2}[-\s]\d{4}\b')),
-
+    ("SSN", re.compile(r"\b\d{3}[-\s]\d{2}[-\s]\d{4}\b")),
     # Credit card: 4 groups of 4 digits, with optional separators
-    ("CREDIT_CARD", re.compile(r'\b(?:\d{4}[-\s]){3}\d{4}\b')),
-
+    ("CREDIT_CARD", re.compile(r"\b(?:\d{4}[-\s]){3}\d{4}\b")),
     # Email
-    ("EMAIL", re.compile(r'\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b')),
-
+    ("EMAIL", re.compile(r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b")),
     # Phone: US formats - (123) 456-7890, 123-456-7890, +1 123 456 7890, etc.
-    ("PHONE", re.compile(r'\b(?:\+1[-.\s]?)?\(?[2-9]\d{2}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b')),
-
+    ("PHONE", re.compile(r"\b(?:\+1[-.\s]?)?\(?[2-9]\d{2}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b")),
     # IP address (v4) - but not version numbers like 1.2.3
-    ("IP_ADDRESS", re.compile(r'\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b')),
+    (
+        "IP_ADDRESS",
+        re.compile(r"\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b"),
+    ),
 ]
 
 
@@ -100,19 +100,21 @@ class PIIScrubber:
         start = time.perf_counter()
 
         # Truncate for safety
-        scan_text = text[:self._max_input_length]
+        scan_text = text[: self._max_input_length]
 
         # Collect all matches with positions
         all_matches: list[PIIMatch] = []
         for pii_type, pattern in _PII_PATTERNS:
             placeholder = f"[{pii_type}]"
             for m in pattern.finditer(scan_text):
-                all_matches.append(PIIMatch(
-                    pii_type=pii_type,
-                    start=m.start(),
-                    end=m.end(),
-                    placeholder=placeholder,
-                ))
+                all_matches.append(
+                    PIIMatch(
+                        pii_type=pii_type,
+                        start=m.start(),
+                        end=m.end(),
+                        placeholder=placeholder,
+                    )
+                )
 
         # Sort by position (for scrubbing) and remove overlaps
         all_matches.sort(key=lambda x: x.start)
@@ -131,7 +133,7 @@ class PIIScrubber:
             parts = []
             pos = 0
             for match in filtered:
-                parts.append(scan_text[pos:match.start])
+                parts.append(scan_text[pos : match.start])
                 parts.append(match.placeholder)
                 pos = match.end
             parts.append(scan_text[pos:])

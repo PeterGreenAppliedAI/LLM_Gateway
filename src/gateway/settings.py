@@ -1,7 +1,7 @@
 """Application settings using Pydantic Settings."""
 
 from functools import lru_cache
-from typing import Literal, Optional
+from typing import Literal
 
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -48,7 +48,9 @@ class DatabaseSettings(BaseSettings):
 
     # Data retention
     retention_days: int = Field(
-        default=90, ge=1, le=3650,
+        default=90,
+        ge=1,
+        le=3650,
         description="Days to retain audit log entries (0 = no cleanup)",
     )
 
@@ -74,7 +76,10 @@ class GuardModelSettings(BaseSettings):
         default="http://localhost:11434",
         description="Ollama server URL hosting guard model",
     )
-    model_name: str = Field(default="ibm/granite3.2-guardian:5b", description="Guard model name (e.g. ibm/granite3.2-guardian:5b, llama-guard3:8b)")
+    model_name: str = Field(
+        default="ibm/granite3.2-guardian:5b",
+        description="Guard model name (e.g. ibm/granite3.2-guardian:5b, llama-guard3:8b)",
+    )
     timeout: float = Field(default=15.0, ge=1.0, le=60.0, description="Inference timeout seconds")
 
 
@@ -92,7 +97,9 @@ class PIISettings(BaseSettings):
     )
 
     enabled: bool = Field(default=False, description="Enable PII detection (always flags)")
-    scrub_enabled: bool = Field(default=False, description="Enable PII scrubbing (replace with placeholders)")
+    scrub_enabled: bool = Field(
+        default=False, description="Enable PII scrubbing (replace with placeholders)"
+    )
     scrub_routes: list[str] = Field(
         default_factory=list,
         description="Routes where scrubbing is active (e.g. ['/v1/chat/completions', '/api/chat']). Empty = all routes.",
@@ -150,7 +157,9 @@ class Settings(BaseSettings):
     # Security
     # SecretStr prevents accidental exposure in logs, repr, etc.
     api_key: SecretStr | None = Field(default=None, description="API key for authentication")
-    admin_api_key: SecretStr | None = Field(default=None, description="Admin API key for key management endpoints")
+    admin_api_key: SecretStr | None = Field(
+        default=None, description="Admin API key for key management endpoints"
+    )
     api_key_header: str = Field(default="X-API-Key", description="Header name for API key")
     require_api_key: bool = Field(default=False, description="Require API key for all requests")
 

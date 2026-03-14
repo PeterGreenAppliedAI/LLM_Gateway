@@ -3,18 +3,17 @@
 import pytest
 
 from gateway.config import ProviderConfig
-from gateway.models.common import HealthStatus, ModelCapability, ProviderType, TaskType
+from gateway.models.common import HealthStatus, ProviderType, TaskType
 from gateway.models.internal import InternalRequest, Message, MessageRole
 from gateway.providers import (
-    ProviderAdapter,
     OllamaAdapter,
-    VLLMAdapter,
-    TRTLLMAdapter,
+    ProviderAdapter,
     SGLangAdapter,
+    TRTLLMAdapter,
+    VLLMAdapter,
     create_adapter,
     get_supported_provider_types,
 )
-
 
 # =============================================================================
 # Fixtures
@@ -76,9 +75,7 @@ def sample_chat_request() -> InternalRequest:
     return InternalRequest(
         task=TaskType.CHAT,
         model="llama3.2",
-        messages=[
-            Message(role=MessageRole.USER, content="Hello, how are you?")
-        ],
+        messages=[Message(role=MessageRole.USER, content="Hello, how are you?")],
         max_tokens=100,
         temperature=0.7,
     )

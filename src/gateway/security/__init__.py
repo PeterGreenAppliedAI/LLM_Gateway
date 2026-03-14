@@ -7,22 +7,22 @@ Provides layered defense against prompt injection attacks:
 - Async background analysis (zero request latency)
 """
 
-from gateway.security.sanitizer import Sanitizer, SanitizationResult
-from gateway.security.injection import (
-    InjectionDetector,
-    DetectionResult,
-    ThreatLevel,
-    ContentWrapper,
-)
 from gateway.security.analyzer import AsyncSecurityAnalyzer, SecurityAlert
-from gateway.security.pii import PIIScrubber, PIIScanResult, PIIMatch
 from gateway.security.guard import (
     CircuitBreaker,
+    GraniteGuardianClient,
     GuardResult,
     LlamaGuardClient,
-    GraniteGuardianClient,
     create_guard_client,
 )
+from gateway.security.injection import (
+    ContentWrapper,
+    DetectionResult,
+    InjectionDetector,
+    ThreatLevel,
+)
+from gateway.security.pii import PIIMatch, PIIScanResult, PIIScrubber
+from gateway.security.sanitizer import SanitizationResult, Sanitizer
 
 __all__ = [
     "Sanitizer",

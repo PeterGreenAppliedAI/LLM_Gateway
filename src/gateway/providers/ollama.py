@@ -7,7 +7,8 @@ Per PRD Section 6: Ollama is a required local runtime with full support.
 
 import asyncio
 import time
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
 import httpx
 
@@ -135,8 +136,12 @@ class OllamaAdapter(ProviderAdapter):
                 imgs = m.get("images", [])
                 if imgs:
                     image_info.append(
-                        {"msg_index": i, "role": m.get("role"), "image_count": len(imgs),
-                         "image_sizes": [len(img) for img in imgs]}
+                        {
+                            "msg_index": i,
+                            "role": m.get("role"),
+                            "image_count": len(imgs),
+                            "image_sizes": [len(img) for img in imgs],
+                        }
                     )
             if image_info:
                 logger.info(
@@ -262,9 +267,7 @@ class OllamaAdapter(ProviderAdapter):
     # Per-chunk timeout: if no chunk arrives within this window, the stream is dead
     STREAM_CHUNK_TIMEOUT = 120.0  # seconds between chunks
 
-    async def chat_stream(
-        self, request: InternalRequest
-    ) -> AsyncIterator[StreamChunk]:
+    async def chat_stream(self, request: InternalRequest) -> AsyncIterator[StreamChunk]:
         """Stream chat completion via Ollama /api/chat with stream=true."""
         try:
             client = await self._get_client()
@@ -277,8 +280,12 @@ class OllamaAdapter(ProviderAdapter):
                 imgs = m.get("images", [])
                 if imgs:
                     stream_image_info.append(
-                        {"msg_index": i, "role": m.get("role"), "image_count": len(imgs),
-                         "image_sizes": [len(img) for img in imgs]}
+                        {
+                            "msg_index": i,
+                            "role": m.get("role"),
+                            "image_count": len(imgs),
+                            "image_sizes": [len(img) for img in imgs],
+                        }
                     )
             if stream_image_info:
                 logger.info(
@@ -303,6 +310,7 @@ class OllamaAdapter(ProviderAdapter):
                     if not line:
                         continue
                     import json
+
                     chunk_data = json.loads(line)
 
                     message = chunk_data.get("message", {})
@@ -342,7 +350,7 @@ class OllamaAdapter(ProviderAdapter):
                 delta="",
                 finish_reason=FinishReason.ERROR,
             )
-        except Exception as e:
+        except Exception:
             yield StreamChunk(
                 request_id=request.request_id,
                 index=0,
@@ -417,10 +425,7 @@ class OllamaAdapter(ProviderAdapter):
                         m["images"] = images
                 # Include tool_calls for assistant messages
                 if msg.tool_calls:
-                    m["tool_calls"] = [
-                        {"function": tc.function}
-                        for tc in msg.tool_calls
-                    ]
+                    m["tool_calls"] = [{"function": tc.function} for tc in msg.tool_calls]
                 messages.append(m)
 
         result: dict[str, Any] = {
@@ -496,9 +501,7 @@ class OllamaAdapter(ProviderAdapter):
             usage=UsageStats(
                 prompt_tokens=data.get("prompt_eval_count", 0),
                 completion_tokens=data.get("eval_count", 0),
-                total_tokens=(
-                    data.get("prompt_eval_count", 0) + data.get("eval_count", 0)
-                ),
+                total_tokens=(data.get("prompt_eval_count", 0) + data.get("eval_count", 0)),
             ),
             latency_ms=latency_ms,
         )
@@ -517,9 +520,7 @@ class OllamaAdapter(ProviderAdapter):
             usage=UsageStats(
                 prompt_tokens=data.get("prompt_eval_count", 0),
                 completion_tokens=data.get("eval_count", 0),
-                total_tokens=(
-                    data.get("prompt_eval_count", 0) + data.get("eval_count", 0)
-                ),
+                total_tokens=(data.get("prompt_eval_count", 0) + data.get("eval_count", 0)),
             ),
             latency_ms=latency_ms,
         )
@@ -546,8 +547,7 @@ class OllamaAdapter(ProviderAdapter):
     def _infer_context_length(self, model_data: dict[str, Any]) -> int:
         """Infer context length from model metadata."""
         # Ollama doesn't always provide this, use sensible default
-        details = model_data.get("details", {})
-        # Some models expose parameter_size which can hint at context
+        # model_data.get("details", {}) could provide hints in future
         return 4096  # Conservative default
 
     def _extract_quantization(self, model_data: dict[str, Any]) -> str | None:

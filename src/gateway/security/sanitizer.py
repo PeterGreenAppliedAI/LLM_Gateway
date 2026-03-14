@@ -6,7 +6,6 @@ malicious instructions in seemingly innocent text.
 Zero latency overhead - pure string operations.
 """
 
-import re
 import unicodedata
 from dataclasses import dataclass, field
 from enum import Enum
@@ -14,6 +13,7 @@ from enum import Enum
 
 class SanitizationType(str, Enum):
     """Types of sanitization performed."""
+
     ZERO_WIDTH = "zero_width"
     DIRECTIONAL = "directional"
     CONTROL_CHAR = "control_char"
@@ -24,6 +24,7 @@ class SanitizationType(str, Enum):
 @dataclass
 class SanitizationResult:
     """Result of sanitization operation."""
+
     original: str
     sanitized: str
     modified: bool
@@ -57,34 +58,34 @@ class Sanitizer:
 
     # Zero-width characters - can hide text between visible characters
     ZERO_WIDTH_CHARS = {
-        '\u200b',  # Zero-width space
-        '\u200c',  # Zero-width non-joiner
-        '\u200d',  # Zero-width joiner
-        '\u2060',  # Word joiner
-        '\u2061',  # Function application
-        '\u2062',  # Invisible times
-        '\u2063',  # Invisible separator
-        '\u2064',  # Invisible plus
-        '\ufeff',  # BOM / Zero-width no-break space
+        "\u200b",  # Zero-width space
+        "\u200c",  # Zero-width non-joiner
+        "\u200d",  # Zero-width joiner
+        "\u2060",  # Word joiner
+        "\u2061",  # Function application
+        "\u2062",  # Invisible times
+        "\u2063",  # Invisible separator
+        "\u2064",  # Invisible plus
+        "\ufeff",  # BOM / Zero-width no-break space
     }
 
     # Directional override - can reverse text display
     DIRECTIONAL_CHARS = {
-        '\u200e',  # Left-to-right mark
-        '\u200f',  # Right-to-left mark
-        '\u202a',  # Left-to-right embedding
-        '\u202b',  # Right-to-left embedding
-        '\u202c',  # Pop directional formatting
-        '\u202d',  # Left-to-right override
-        '\u202e',  # Right-to-left override
-        '\u2066',  # Left-to-right isolate
-        '\u2067',  # Right-to-left isolate
-        '\u2068',  # First strong isolate
-        '\u2069',  # Pop directional isolate
+        "\u200e",  # Left-to-right mark
+        "\u200f",  # Right-to-left mark
+        "\u202a",  # Left-to-right embedding
+        "\u202b",  # Right-to-left embedding
+        "\u202c",  # Pop directional formatting
+        "\u202d",  # Left-to-right override
+        "\u202e",  # Right-to-left override
+        "\u2066",  # Left-to-right isolate
+        "\u2067",  # Right-to-left isolate
+        "\u2068",  # First strong isolate
+        "\u2069",  # Pop directional isolate
     }
 
     # Control characters (except tab, newline, carriage return)
-    ALLOWED_CONTROL = {'\t', '\n', '\r'}
+    ALLOWED_CONTROL = {"\t", "\n", "\r"}
 
     # Tags block - deprecated Unicode block sometimes used for hiding
     TAGS_RANGE = range(0xE0000, 0xE007F + 1)
@@ -151,40 +152,40 @@ class Sanitizer:
         for char in text:
             # Check zero-width
             if self.remove_zero_width and char in self.ZERO_WIDTH_CHARS:
-                removals[SanitizationType.ZERO_WIDTH] = removals.get(
-                    SanitizationType.ZERO_WIDTH, 0
-                ) + 1
+                removals[SanitizationType.ZERO_WIDTH] = (
+                    removals.get(SanitizationType.ZERO_WIDTH, 0) + 1
+                )
                 continue
 
             # Check directional
             if self.remove_directional and char in self.DIRECTIONAL_CHARS:
-                removals[SanitizationType.DIRECTIONAL] = removals.get(
-                    SanitizationType.DIRECTIONAL, 0
-                ) + 1
+                removals[SanitizationType.DIRECTIONAL] = (
+                    removals.get(SanitizationType.DIRECTIONAL, 0) + 1
+                )
                 continue
 
             # Check control characters
             if self.remove_control:
-                if unicodedata.category(char) == 'Cc' and char not in self.ALLOWED_CONTROL:
-                    removals[SanitizationType.CONTROL_CHAR] = removals.get(
-                        SanitizationType.CONTROL_CHAR, 0
-                    ) + 1
+                if unicodedata.category(char) == "Cc" and char not in self.ALLOWED_CONTROL:
+                    removals[SanitizationType.CONTROL_CHAR] = (
+                        removals.get(SanitizationType.CONTROL_CHAR, 0) + 1
+                    )
                     continue
 
             # Check tags block
             if self.remove_tags and ord(char) in self.TAGS_RANGE:
-                removals[SanitizationType.CONTROL_CHAR] = removals.get(
-                    SanitizationType.CONTROL_CHAR, 0
-                ) + 1
+                removals[SanitizationType.CONTROL_CHAR] = (
+                    removals.get(SanitizationType.CONTROL_CHAR, 0) + 1
+                )
                 continue
 
             result_chars.append(char)
 
-        sanitized = ''.join(result_chars)
+        sanitized = "".join(result_chars)
 
         # Normalize Unicode if enabled
         if self.normalize_unicode:
-            sanitized = unicodedata.normalize('NFC', sanitized)
+            sanitized = unicodedata.normalize("NFC", sanitized)
 
         return SanitizationResult(
             original=text,
@@ -209,11 +210,11 @@ class Sanitizer:
         sanitized_messages: list[dict] = []
 
         for msg in messages:
-            content = msg.get('content', '')
+            content = msg.get("content", "")
             if isinstance(content, str):
                 result = self.sanitize(content)
                 results.append(result)
-                sanitized_msg = {**msg, 'content': result.sanitized}
+                sanitized_msg = {**msg, "content": result.sanitized}
             else:
                 # Handle non-string content (e.g., multimodal)
                 sanitized_msg = msg

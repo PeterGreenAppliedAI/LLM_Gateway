@@ -7,7 +7,8 @@ vLLM exposes an OpenAI-compatible API, so we use those endpoints.
 """
 
 import time
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
 import httpx
 
@@ -18,7 +19,6 @@ from gateway.models.common import (
     ModelCapability,
     ModelInfo,
     ProviderType,
-    TaskType,
     UsageStats,
 )
 from gateway.models.internal import (
@@ -184,18 +184,14 @@ class VLLMAdapter(ProviderAdapter):
     # Streaming
     # =========================================================================
 
-    async def chat_stream(
-        self, request: InternalRequest
-    ) -> AsyncIterator[StreamChunk]:
+    async def chat_stream(self, request: InternalRequest) -> AsyncIterator[StreamChunk]:
         """Stream chat completion via vLLM /v1/chat/completions with stream=true."""
         try:
             client = await self._get_client()
             vllm_request = self._build_chat_request(request)
             vllm_request["stream"] = True
 
-            async with client.stream(
-                "POST", "/v1/chat/completions", json=vllm_request
-            ) as response:
+            async with client.stream("POST", "/v1/chat/completions", json=vllm_request) as response:
                 response.raise_for_status()
                 index = 0
                 async for line in response.aiter_lines():
@@ -347,14 +343,16 @@ class VLLMAdapter(ProviderAdapter):
                             arguments = json.loads(arguments)
                         except json.JSONDecodeError:
                             arguments = {"raw": arguments}
-                    tool_calls.append(ToolCall(
-                        id=tc.get("id"),
-                        type="function",
-                        function={
-                            "name": func.get("name", ""),
-                            "arguments": arguments,
-                        },
-                    ))
+                    tool_calls.append(
+                        ToolCall(
+                            id=tc.get("id"),
+                            type="function",
+                            function={
+                                "name": func.get("name", ""),
+                                "arguments": arguments,
+                            },
+                        )
+                    )
 
         usage_data = data.get("usage", {})
 

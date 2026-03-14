@@ -9,10 +9,10 @@ Providers are plugins, not core logic (PRD Section 5).
 from gateway.providers.base import ProviderAdapter
 from gateway.providers.factory import create_adapter, get_supported_provider_types, register_adapter
 from gateway.providers.ollama import OllamaAdapter
-from gateway.providers.vllm import VLLMAdapter
-from gateway.providers.trtllm import TRTLLMAdapter
-from gateway.providers.sglang import SGLangAdapter
 from gateway.providers.openai import OpenAIAdapter
+from gateway.providers.sglang import SGLangAdapter
+from gateway.providers.trtllm import TRTLLMAdapter
+from gateway.providers.vllm import VLLMAdapter
 
 __all__ = [
     # Base class

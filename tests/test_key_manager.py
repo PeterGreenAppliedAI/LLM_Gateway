@@ -1,15 +1,12 @@
 """Tests for KeyManager (database-backed API key management)."""
 
 import pytest
-from datetime import datetime, timezone, timedelta
 
 from gateway.storage import (
     DatabaseConfig,
     create_async_db_engine,
-    metadata,
 )
-from gateway.storage.keys import KeyManager, _hash_key, _generate_key
-
+from gateway.storage.keys import KeyManager, _generate_key, _hash_key
 
 # =============================================================================
 # Helper Functions Tests

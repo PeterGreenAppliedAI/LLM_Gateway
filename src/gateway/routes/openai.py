@@ -20,7 +20,8 @@ Per API Error Handling Architecture:
 """
 
 import json
-from typing import Annotated, AsyncGenerator
+from collections.abc import AsyncGenerator
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
@@ -42,8 +43,8 @@ from gateway.observability.logging import clear_request_context
 from gateway.policy import PolicyEnforcer, PolicyViolation
 from gateway.routes.dependencies import (
     AuthResult,
-    get_auth,
     get_audit_logger,
+    get_auth,
     get_dispatcher,
     get_enforcer,
     get_pii_scrubber,
@@ -191,7 +192,9 @@ async def chat_completions(
     )
 
     # Record token usage for daily budget tracking
-    total_tokens = (result.response.usage.prompt_tokens or 0) + (result.response.usage.completion_tokens or 0)
+    total_tokens = (result.response.usage.prompt_tokens or 0) + (
+        result.response.usage.completion_tokens or 0
+    )
     if total_tokens > 0:
         enforcer.record_token_usage(client_id, result.response.model, total_tokens)
 
@@ -412,20 +415,32 @@ async def completions(
         if isinstance(sanitized_prompt, str):
             pii_result = pii_scrubber.scan(sanitized_prompt, scrub=scrub)
             if pii_result.has_pii:
-                logger.warning("PII detected in request", request_id=ctx.request_id, pii_count=pii_result.detection_count, scrubbed=scrub)
+                logger.warning(
+                    "PII detected in request",
+                    request_id=ctx.request_id,
+                    pii_count=pii_result.detection_count,
+                    scrubbed=scrub,
+                )
                 if scrub and pii_result.scrubbed_text:
                     sanitized_prompt = pii_result.scrubbed_text
         elif isinstance(sanitized_prompt, list):
             for idx, p in enumerate(sanitized_prompt):
                 pii_result = pii_scrubber.scan(p, scrub=scrub)
                 if pii_result.has_pii:
-                    logger.warning("PII detected in request", request_id=ctx.request_id, pii_count=pii_result.detection_count, scrubbed=scrub)
+                    logger.warning(
+                        "PII detected in request",
+                        request_id=ctx.request_id,
+                        pii_count=pii_result.detection_count,
+                        scrubbed=scrub,
+                    )
                     if scrub and pii_result.scrubbed_text:
                         sanitized_prompt[idx] = pii_result.scrubbed_text
 
     # Queue for async security analysis
     if security_analyzer:
-        prompt_content = sanitized_prompt if isinstance(sanitized_prompt, str) else "\n".join(sanitized_prompt)
+        prompt_content = (
+            sanitized_prompt if isinstance(sanitized_prompt, str) else "\n".join(sanitized_prompt)
+        )
         security_analyzer.queue_request(
             request_id=ctx.request_id,
             client_id=client_id,
@@ -476,7 +491,9 @@ async def completions(
     )
 
     # Record token usage for daily budget tracking
-    total_tokens = (result.response.usage.prompt_tokens or 0) + (result.response.usage.completion_tokens or 0)
+    total_tokens = (result.response.usage.prompt_tokens or 0) + (
+        result.response.usage.completion_tokens or 0
+    )
     if total_tokens > 0:
         enforcer.record_token_usage(client_id, result.response.model, total_tokens)
 
@@ -538,7 +555,9 @@ async def embeddings(
     if isinstance(body.input, str):
         sanitized_input = sanitizer.sanitize(body.input).sanitized
     elif isinstance(body.input, list):
-        sanitized_input = [sanitizer.sanitize(i).sanitized if isinstance(i, str) else i for i in body.input]
+        sanitized_input = [
+            sanitizer.sanitize(i).sanitized if isinstance(i, str) else i for i in body.input
+        ]
 
     # PII detection (always flags) + optional scrubbing (per-route)
     if pii_scrubber:
@@ -576,7 +595,11 @@ async def embeddings(
 
     # Queue for async security analysis
     if security_analyzer:
-        input_content = sanitized_input if isinstance(sanitized_input, str) else "\n".join(str(i) for i in sanitized_input)
+        input_content = (
+            sanitized_input
+            if isinstance(sanitized_input, str)
+            else "\n".join(str(i) for i in sanitized_input)
+        )
         security_analyzer.queue_request(
             request_id=ctx.request_id,
             client_id=client_id,
@@ -627,7 +650,9 @@ async def embeddings(
 
     # Record token usage for daily budget tracking
     if result.response.usage.prompt_tokens:
-        enforcer.record_token_usage(client_id, result.response.model, result.response.usage.prompt_tokens)
+        enforcer.record_token_usage(
+            client_id, result.response.model, result.response.usage.prompt_tokens
+        )
 
     # Audit log the request
     if audit_logger:

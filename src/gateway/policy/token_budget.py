@@ -15,8 +15,7 @@ Design:
 import fnmatch
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timezone, timedelta
-from typing import Dict, List, Optional
+from datetime import datetime, timedelta, timezone
 
 from pydantic import BaseModel, Field
 
@@ -35,7 +34,7 @@ class ModelTierConfig(BaseModel):
         le=1000.0,
         description="Token cost multiplier (1.0 = baseline, 15.0 = 15x cost)",
     )
-    daily_limit: Optional[int] = Field(
+    daily_limit: int | None = Field(
         default=None,
         ge=0,
         description="Optional daily token limit for this tier globally (None = no tier cap)",
@@ -64,12 +63,12 @@ class TokenBudgetConfig(BaseModel):
         le=1000.0,
         description="Cost multiplier for models not assigned to any tier (safe default — classify to lower)",
     )
-    model_tiers: List[ModelTierConfig] = Field(
+    model_tiers: list[ModelTierConfig] = Field(
         default_factory=list,
         max_length=50,
         description="Named cost tiers",
     )
-    model_assignments: List[ModelAssignment] = Field(
+    model_assignments: list[ModelAssignment] = Field(
         default_factory=list,
         max_length=500,
         description="Model-to-tier mappings (exact name or glob pattern)",
@@ -106,7 +105,7 @@ class KeyUsage:
 
     date: str  # YYYY-MM-DD in UTC
     total_tokens: int = 0
-    tokens_by_tier: Dict[str, int] = field(default_factory=lambda: defaultdict(int))
+    tokens_by_tier: dict[str, int] = field(default_factory=lambda: defaultdict(int))
     request_count: int = 0
 
 
@@ -117,7 +116,7 @@ class BudgetState:
     daily_limit: int
     tokens_used: int
     tokens_remaining: int
-    tier_usage: Dict[str, int]
+    tier_usage: dict[str, int]
     resets_at: str
     cost_multiplier_applied: float = 1.0
 
@@ -139,22 +138,20 @@ class TokenBudgetTracker:
     swap with a Redis-backed implementation.
     """
 
-    def __init__(self, config: Optional[TokenBudgetConfig] = None):
+    def __init__(self, config: TokenBudgetConfig | None = None):
         self._config = config or TokenBudgetConfig()
         # key -> KeyUsage
-        self._usage: Dict[str, KeyUsage] = {}
+        self._usage: dict[str, KeyUsage] = {}
         # tier_name -> total tokens used today (for global tier caps)
-        self._tier_totals: Dict[str, int] = defaultdict(int)
+        self._tier_totals: dict[str, int] = defaultdict(int)
         self._tier_totals_date: str = ""
 
         # Build tier lookup
-        self._tiers: Dict[str, ModelTierConfig] = {
-            t.name: t for t in self._config.model_tiers
-        }
+        self._tiers: dict[str, ModelTierConfig] = {t.name: t for t in self._config.model_tiers}
 
         # Runtime model assignments (mutable — can be updated via API)
         # model_pattern -> tier_name
-        self._model_assignments: Dict[str, str] = {
+        self._model_assignments: dict[str, str] = {
             a.model: a.tier for a in self._config.model_assignments
         }
 
@@ -163,12 +160,12 @@ class TokenBudgetTracker:
         return self._config.enabled
 
     @property
-    def model_assignments(self) -> Dict[str, str]:
+    def model_assignments(self) -> dict[str, str]:
         """Current model-to-tier assignments."""
         return dict(self._model_assignments)
 
     @property
-    def tiers(self) -> Dict[str, ModelTierConfig]:
+    def tiers(self) -> dict[str, ModelTierConfig]:
         """Configured tiers."""
         return dict(self._tiers)
 
@@ -219,7 +216,7 @@ class TokenBudgetTracker:
             self._tier_totals = defaultdict(int)
             self._tier_totals_date = today
 
-    def resolve_tier(self, model: str) -> Optional[ModelTierConfig]:
+    def resolve_tier(self, model: str) -> ModelTierConfig | None:
         """Find the tier for a model.
 
         Resolution order:
@@ -264,7 +261,7 @@ class TokenBudgetTracker:
         key: str,
         model: str = "",
         estimated_tokens: int = 0,
-        daily_limit_override: Optional[int] = None,
+        daily_limit_override: int | None = None,
     ) -> BudgetState:
         """Check if a request fits within budget. Raises if not.
 
@@ -371,7 +368,7 @@ class TokenBudgetTracker:
         if tier:
             self._tier_totals[tier.name] += tokens
 
-    def get_budget_state(self, key: str, daily_limit_override: Optional[int] = None) -> BudgetState:
+    def get_budget_state(self, key: str, daily_limit_override: int | None = None) -> BudgetState:
         """Get current budget state for a key without checking/consuming."""
         usage = self._get_key_usage(key)
         daily_limit = daily_limit_override or self._config.default_daily_limit

@@ -3,30 +3,25 @@
 import json
 import logging
 from datetime import datetime, timedelta, timezone
-from unittest.mock import patch
 
 import pytest
 from prometheus_client import CollectorRegistry
 
 from gateway.observability.logging import (
     LogConfig,
-    LogLevel,
     RequestContext,
     StructuredJsonFormatter,
-    configure_logging,
+    clear_request_context,
     get_logger,
     get_request_context,
-    set_request_context,
-    clear_request_context,
     sanitize_log_value,
+    set_request_context,
 )
 from gateway.observability.metrics import (
     MetricsCollector,
     MetricsConfig,
     get_metrics,
-    reset_metrics,
 )
-
 
 # =============================================================================
 # RequestContext Tests

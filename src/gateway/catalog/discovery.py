@@ -6,7 +6,6 @@ Provides background discovery of models from various endpoint types
 
 import asyncio
 from datetime import datetime, timezone
-from typing import Optional
 
 import httpx
 
@@ -44,9 +43,9 @@ class ModelDiscoveryService:
         self._catalog = catalog
         self._discovery_interval = discovery_interval
         self._timeout = timeout
-        self._task: Optional[asyncio.Task] = None
+        self._task: asyncio.Task | None = None
         self._shutdown = False
-        self._client: Optional[httpx.AsyncClient] = None
+        self._client: httpx.AsyncClient | None = None
 
     @property
     def catalog(self) -> ModelCatalog:
@@ -112,9 +111,7 @@ class ModelDiscoveryService:
             for i, endpoint in enumerate(e for e in self._endpoints if e.enabled):
                 result = endpoint_results[i]
                 if isinstance(result, Exception):
-                    logger.warning(
-                        f"Discovery failed for {endpoint.name}: {result}"
-                    )
+                    logger.warning(f"Discovery failed for {endpoint.name}: {result}")
                     results[endpoint.name] = []
                 else:
                     results[endpoint.name] = result
@@ -204,9 +201,7 @@ class ModelDiscoveryService:
                 self._catalog.add_model(model)
                 model_names.append(name)
 
-            logger.debug(
-                f"Discovered {len(model_names)} models from {endpoint.name}"
-            )
+            logger.debug(f"Discovered {len(model_names)} models from {endpoint.name}")
             return model_names
 
         except httpx.HTTPError as e:
@@ -255,9 +250,7 @@ class ModelDiscoveryService:
                 self._catalog.add_model(model)
                 model_names.append(name)
 
-            logger.debug(
-                f"Discovered {len(model_names)} models from {endpoint.name}"
-            )
+            logger.debug(f"Discovered {len(model_names)} models from {endpoint.name}")
             return model_names
 
         except httpx.HTTPError as e:
@@ -304,9 +297,7 @@ class ModelDiscoveryService:
                 self._catalog.add_model(model)
                 model_names.append(name)
 
-            logger.debug(
-                f"Discovered {len(model_names)} models from {endpoint.name}"
-            )
+            logger.debug(f"Discovered {len(model_names)} models from {endpoint.name}")
             return model_names
 
         except httpx.HTTPError as e:

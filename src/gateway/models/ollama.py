@@ -4,9 +4,9 @@ These models provide compatibility with the native Ollama API format,
 allowing clients that use the Ollama SDK to work with the gateway.
 """
 
-from typing import Any, Optional
-from pydantic import BaseModel, Field
+from typing import Any
 
+from pydantic import BaseModel, Field
 
 # =============================================================================
 # Ollama Request Models
@@ -15,17 +15,20 @@ from pydantic import BaseModel, Field
 
 class OllamaToolCallFunction(BaseModel):
     """Function details within an Ollama tool call."""
+
     name: str
     arguments: dict[str, Any] = Field(default_factory=dict)
 
 
 class OllamaToolCall(BaseModel):
     """A tool call in Ollama format."""
+
     function: OllamaToolCallFunction
 
 
 class OllamaMessage(BaseModel):
     """A single message in Ollama chat format."""
+
     role: str
     content: str = ""
     images: list[str] | None = None
@@ -35,6 +38,7 @@ class OllamaMessage(BaseModel):
 
 class OllamaChatRequest(BaseModel):
     """Ollama /api/chat request format."""
+
     model: str
     messages: list[OllamaMessage]
     stream: bool = True
@@ -46,6 +50,7 @@ class OllamaChatRequest(BaseModel):
 
 class OllamaGenerateRequest(BaseModel):
     """Ollama /api/generate request format."""
+
     model: str
     prompt: str
     stream: bool = True
@@ -59,6 +64,7 @@ class OllamaGenerateRequest(BaseModel):
 
 class OllamaEmbeddingsRequest(BaseModel):
     """Ollama /api/embeddings request format."""
+
     model: str
     prompt: str | list[str]
     options: dict[str, Any] | None = None
@@ -72,6 +78,7 @@ class OllamaEmbeddingsRequest(BaseModel):
 
 class OllamaChatResponse(BaseModel):
     """Ollama /api/chat response format (non-streaming)."""
+
     model: str
     created_at: str
     message: OllamaMessage
@@ -86,6 +93,7 @@ class OllamaChatResponse(BaseModel):
 
 class OllamaChatStreamChunk(BaseModel):
     """Ollama /api/chat streaming chunk."""
+
     model: str
     created_at: str
     message: OllamaMessage
@@ -94,6 +102,7 @@ class OllamaChatStreamChunk(BaseModel):
 
 class OllamaGenerateResponse(BaseModel):
     """Ollama /api/generate response format (non-streaming)."""
+
     model: str
     created_at: str
     response: str
@@ -109,11 +118,13 @@ class OllamaGenerateResponse(BaseModel):
 
 class OllamaEmbeddingsResponse(BaseModel):
     """Ollama /api/embeddings response format."""
+
     embedding: list[float] | list[list[float]]
 
 
 class OllamaModelInfo(BaseModel):
     """Model info for /api/tags response."""
+
     name: str
     model: str
     modified_at: str
@@ -124,4 +135,5 @@ class OllamaModelInfo(BaseModel):
 
 class OllamaTagsResponse(BaseModel):
     """Ollama /api/tags response format."""
+
     models: list[OllamaModelInfo]

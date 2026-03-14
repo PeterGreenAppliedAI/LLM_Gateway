@@ -15,7 +15,8 @@ import asyncio
 import json
 import os
 import time
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
 import httpx
 
@@ -200,9 +201,7 @@ class OpenAIAdapter(ProviderAdapter):
         except httpx.HTTPStatusError as e:
             error_detail = self._parse_error_response(e.response)
             return self._error_response(
-                request,
-                f"HTTP {e.response.status_code}: {error_detail}",
-                "http_error"
+                request, f"HTTP {e.response.status_code}: {error_detail}", "http_error"
             )
         except Exception as e:
             return self._error_response(request, str(e), "unknown_error")
@@ -237,9 +236,7 @@ class OpenAIAdapter(ProviderAdapter):
                 return await super().generate(request)
             error_detail = self._parse_error_response(e.response)
             return self._error_response(
-                request,
-                f"HTTP {e.response.status_code}: {error_detail}",
-                "http_error"
+                request, f"HTTP {e.response.status_code}: {error_detail}", "http_error"
             )
         except Exception as e:
             return self._error_response(request, str(e), "unknown_error")
@@ -289,9 +286,7 @@ class OpenAIAdapter(ProviderAdapter):
         except httpx.HTTPStatusError as e:
             error_detail = self._parse_error_response(e.response)
             return self._error_response(
-                request,
-                f"HTTP {e.response.status_code}: {error_detail}",
-                "http_error"
+                request, f"HTTP {e.response.status_code}: {error_detail}", "http_error"
             )
         except Exception as e:
             return self._error_response(request, str(e), "unknown_error")
@@ -316,9 +311,7 @@ class OpenAIAdapter(ProviderAdapter):
             except StopAsyncIteration:
                 break
 
-    async def chat_stream(
-        self, request: InternalRequest
-    ) -> AsyncIterator[StreamChunk]:
+    async def chat_stream(self, request: InternalRequest) -> AsyncIterator[StreamChunk]:
         """Stream chat completion via /v1/chat/completions with stream=true."""
         try:
             client = await self._get_client()
@@ -376,7 +369,7 @@ class OpenAIAdapter(ProviderAdapter):
                     )
                     index += 1
 
-        except Exception as e:
+        except Exception:
             yield StreamChunk(
                 request_id=request.request_id,
                 index=0,
@@ -501,14 +494,16 @@ class OpenAIAdapter(ProviderAdapter):
                         arguments = json.loads(arguments)
                     except json.JSONDecodeError:
                         arguments = {"raw": arguments}
-                tool_calls.append(ToolCall(
-                    id=tc.get("id"),
-                    type="function",
-                    function={
-                        "name": func.get("name", ""),
-                        "arguments": arguments,
-                    },
-                ))
+                tool_calls.append(
+                    ToolCall(
+                        id=tc.get("id"),
+                        type="function",
+                        function={
+                            "name": func.get("name", ""),
+                            "arguments": arguments,
+                        },
+                    )
+                )
 
         usage_data = data.get("usage", {})
 

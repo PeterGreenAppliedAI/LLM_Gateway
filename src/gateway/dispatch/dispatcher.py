@@ -19,8 +19,8 @@ Per API Error Handling Architecture:
 
 import fnmatch
 import re
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Optional, List, AsyncIterator
 
 from gateway.config import (
     SAFE_IDENTIFIER_PATTERN,
@@ -29,14 +29,11 @@ from gateway.config import (
 )
 from gateway.dispatch.registry import ProviderRegistry
 from gateway.errors import (
-    DispatchError,
-    NoProviderError,
-    ProviderNotFoundError,
-    ProviderUnavailableError,
     AllProvidersUnavailableError,
     AmbiguousModelError,
-    ModelNotFoundError,
     EndpointNotFoundError,
+    NoProviderError,
+    ProviderUnavailableError,
 )
 from gateway.models.common import HealthStatus
 from gateway.models.internal import InternalRequest, InternalResponse, StreamChunk
@@ -54,11 +51,12 @@ MAX_FALLBACK_ATTEMPTS = 10
 @dataclass
 class DispatchResult:
     """Result of a dispatch operation."""
+
     response: InternalResponse
     provider_used: str
     was_fallback: bool = False
     # Security: Bounded list to prevent memory exhaustion
-    attempted_providers: List[str] = field(default_factory=list)
+    attempted_providers: list[str] = field(default_factory=list)
 
     def __post_init__(self):
         if not self.attempted_providers:
@@ -100,7 +98,7 @@ class Dispatcher:
         self._registry = registry
         self._resolution_config = resolution_config or ResolutionConfig()
 
-    def parse_provider_from_model(self, model: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    def parse_provider_from_model(self, model: str | None) -> tuple[str | None, str | None]:
         """Parse provider and model from model string.
 
         Supports formats:
@@ -219,9 +217,7 @@ class Dispatcher:
         )
 
         if not candidate_endpoints:
-            raise NoProviderError(
-                message="No endpoints available for this environment"
-            )
+            raise NoProviderError(message="No endpoints available for this environment")
 
         # If only one endpoint, use it
         if len(candidate_endpoints) == 1:
@@ -280,7 +276,7 @@ class Dispatcher:
             if environment.endpoint_filter:
                 endpoint_config = self._registry.get_endpoint_config(ep_name)
                 if endpoint_config:
-                    labels = getattr(endpoint_config, 'labels', {})
+                    labels = getattr(endpoint_config, "labels", {})
                     if not self._labels_match(labels, environment.endpoint_filter):
                         continue
 
@@ -332,7 +328,7 @@ class Dispatcher:
             DispatchError: If dispatch fails and no fallback available
         """
         provider_name, model_name = self.resolve_provider(request)
-        attempted: List[str] = []
+        attempted: list[str] = []
 
         # Update request with resolved model (strip provider prefix)
         if model_name and model_name != request.model:
@@ -347,7 +343,7 @@ class Dispatcher:
                 response=result,
                 provider_used=provider_name,
                 was_fallback=False,
-                attempted_providers=attempted
+                attempted_providers=attempted,
             )
 
         # Primary failed - try fallbacks if allowed
@@ -368,7 +364,7 @@ class Dispatcher:
                     response=result,
                     provider_used=fallback_name,
                     was_fallback=True,
-                    attempted_providers=attempted
+                    attempted_providers=attempted,
                 )
 
         # All providers failed
@@ -376,7 +372,7 @@ class Dispatcher:
 
     async def _try_provider(
         self, provider_name: str, request: InternalRequest
-    ) -> Optional[InternalResponse]:
+    ) -> InternalResponse | None:
         """Attempt to dispatch request to a specific provider.
 
         Args:
@@ -444,7 +440,10 @@ class Dispatcher:
     # =========================================================================
 
     def _get_stream_provider_order(
-        self, primary: str, model_name: str | None, request: InternalRequest,
+        self,
+        primary: str,
+        model_name: str | None,
+        request: InternalRequest,
     ) -> list[str]:
         """Build ordered list of providers to try for streaming.
 
@@ -508,7 +507,9 @@ class Dispatcher:
             request = request.model_copy(update={"model": model_name})
 
         providers_to_try = self._get_stream_provider_order(
-            provider_name, model_name, request,
+            provider_name,
+            model_name,
+            request,
         )
 
         if not providers_to_try:
@@ -536,11 +537,17 @@ class Dispatcher:
 
             # If first chunk is an error, try next provider
             # (thinking-only chunks are valid for reasoning models)
-            if first_chunk.finish_reason == FinishReason.ERROR and not first_chunk.delta and not first_chunk.thinking:
+            if (
+                first_chunk.finish_reason == FinishReason.ERROR
+                and not first_chunk.delta
+                and not first_chunk.thinking
+            ):
                 continue
 
             # Success - return a chained stream (first_chunk + rest)
-            async def _chain(first: StreamChunk, rest: AsyncIterator[StreamChunk]) -> AsyncIterator[StreamChunk]:
+            async def _chain(
+                first: StreamChunk, rest: AsyncIterator[StreamChunk]
+            ) -> AsyncIterator[StreamChunk]:
                 yield first
                 async for chunk in rest:
                     yield chunk

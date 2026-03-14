@@ -7,9 +7,9 @@ Uses async SQLAlchemy for non-blocking database I/O.
 from pathlib import Path
 
 from pydantic import BaseModel, Field
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import NullPool, StaticPool
-from sqlalchemy import text
 
 from gateway.storage.schema import metadata
 

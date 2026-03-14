@@ -12,7 +12,7 @@ Tests the PIIScrubber module:
 
 import pytest
 
-from gateway.security.pii import PIIScrubber, PIIScanResult, PIIMatch
+from gateway.security.pii import PIIScrubber
 
 
 @pytest.fixture
@@ -212,10 +212,10 @@ class TestPolicyEnforcementPerKey:
     """Tests for per-key policy enforcement (model/endpoint allowlists, rate limit overrides)."""
 
     def test_model_allowlist_blocks_disallowed(self):
-        from gateway.policy.enforcer import PolicyEnforcer, PolicyConfig
+        from gateway.models.internal import InternalRequest
+        from gateway.policy.enforcer import PolicyConfig, PolicyEnforcer
         from gateway.policy.rate_limiter import RateLimitConfig as PolicyRateLimitConfig
         from gateway.policy.token_limiter import TokenLimitConfig
-        from gateway.models.internal import InternalRequest
 
         config = PolicyConfig(
             rate_limit=PolicyRateLimitConfig(requests_per_minute=100),
@@ -231,15 +231,16 @@ class TestPolicyEnforcementPerKey:
         )
 
         from gateway.policy.enforcer import PolicyViolation
+
         with pytest.raises(PolicyViolation) as exc_info:
             enforcer.enforce(req, allowed_models=["llama-*"])
         assert exc_info.value.policy_type == "model_not_allowed"
 
     def test_model_allowlist_allows_glob(self):
-        from gateway.policy.enforcer import PolicyEnforcer, PolicyConfig
+        from gateway.models.internal import InternalRequest
+        from gateway.policy.enforcer import PolicyConfig, PolicyEnforcer
         from gateway.policy.rate_limiter import RateLimitConfig as PolicyRateLimitConfig
         from gateway.policy.token_limiter import TokenLimitConfig
-        from gateway.models.internal import InternalRequest
 
         config = PolicyConfig(
             rate_limit=PolicyRateLimitConfig(requests_per_minute=100),
@@ -258,10 +259,10 @@ class TestPolicyEnforcementPerKey:
         enforcer.enforce(req, rate_limit_key="test", allowed_models=["llama-*"])
 
     def test_endpoint_allowlist_blocks(self):
-        from gateway.policy.enforcer import PolicyEnforcer, PolicyConfig
+        from gateway.models.internal import InternalRequest
+        from gateway.policy.enforcer import PolicyConfig, PolicyEnforcer
         from gateway.policy.rate_limiter import RateLimitConfig as PolicyRateLimitConfig
         from gateway.policy.token_limiter import TokenLimitConfig
-        from gateway.models.internal import InternalRequest
 
         config = PolicyConfig(
             rate_limit=PolicyRateLimitConfig(requests_per_minute=100),
@@ -278,15 +279,16 @@ class TestPolicyEnforcementPerKey:
         )
 
         from gateway.policy.enforcer import PolicyViolation
+
         with pytest.raises(PolicyViolation) as exc_info:
             enforcer.enforce(req, allowed_endpoints=["openai-main"])
         assert exc_info.value.policy_type == "endpoint_not_allowed"
 
     def test_endpoint_allowlist_allows(self):
-        from gateway.policy.enforcer import PolicyEnforcer, PolicyConfig
+        from gateway.models.internal import InternalRequest
+        from gateway.policy.enforcer import PolicyConfig, PolicyEnforcer
         from gateway.policy.rate_limiter import RateLimitConfig as PolicyRateLimitConfig
         from gateway.policy.token_limiter import TokenLimitConfig
-        from gateway.models.internal import InternalRequest
 
         config = PolicyConfig(
             rate_limit=PolicyRateLimitConfig(requests_per_minute=100),
@@ -303,4 +305,6 @@ class TestPolicyEnforcementPerKey:
         )
 
         # Should not raise
-        enforcer.enforce(req, rate_limit_key="test", allowed_endpoints=["openai-main", "ollama-server"])
+        enforcer.enforce(
+            req, rate_limit_key="test", allowed_endpoints=["openai-main", "ollama-server"]
+        )

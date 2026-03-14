@@ -5,23 +5,29 @@ Stores results for alerting and pattern analysis.
 """
 
 import asyncio
-import json
+from collections import deque
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Optional, Callable, Awaitable
-from collections import deque
 
-from gateway.security.sanitizer import Sanitizer, SanitizationResult
-from gateway.security.injection import InjectionDetector, DetectionResult, ThreatLevel
-from gateway.security.guard import GuardResult, LlamaGuardClient, GraniteGuardianClient
+# Import conditionally to avoid circular imports
+from typing import TYPE_CHECKING, Optional
+
 from gateway.observability import get_logger
+from gateway.security.guard import GraniteGuardianClient, GuardResult, LlamaGuardClient
+from gateway.security.injection import DetectionResult, InjectionDetector, ThreatLevel
+from gateway.security.sanitizer import SanitizationResult, Sanitizer
+
+if TYPE_CHECKING:
+    from gateway.storage.security_store import SecurityScanStore
 
 logger = get_logger(__name__)
 
 
 class AlertSeverity(str, Enum):
     """Alert severity levels."""
+
     INFO = "info"
     WARNING = "warning"
     CRITICAL = "critical"
@@ -30,6 +36,7 @@ class AlertSeverity(str, Enum):
 @dataclass
 class SecurityAlert:
     """A security alert generated from analysis."""
+
     timestamp: str
     request_id: str
     client_id: str
@@ -53,23 +60,25 @@ class SecurityAlert:
 @dataclass
 class AnalysisRequest:
     """A request queued for security analysis."""
+
     request_id: str
     client_id: str
     model: str
     messages: list[dict]
-    task: Optional[str] = None
-    response_content: Optional[str] = None
-    source_ip: Optional[str] = None
+    task: str | None = None
+    response_content: str | None = None
+    source_ip: str | None = None
     timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 
 @dataclass
 class AnalysisResult:
     """Result of security analysis."""
+
     request_id: str
-    sanitization: Optional[SanitizationResult]
-    injection_scan: Optional[DetectionResult]
-    guard_scan: Optional[GuardResult] = None
+    sanitization: SanitizationResult | None
+    injection_scan: DetectionResult | None
+    guard_scan: GuardResult | None = None
     alerts: list[SecurityAlert] = field(default_factory=list)
     analyzed_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
@@ -105,13 +114,14 @@ class AsyncSecurityAnalyzer:
 
     def __init__(
         self,
-        sanitizer: Optional[Sanitizer] = None,
-        detector: Optional[InjectionDetector] = None,
-        guard_client: Optional[LlamaGuardClient | GraniteGuardianClient] = None,
-        scan_allowlist_ips: Optional[list[str]] = None,
+        sanitizer: Sanitizer | None = None,
+        detector: InjectionDetector | None = None,
+        guard_client: LlamaGuardClient | GraniteGuardianClient | None = None,
+        scan_store: Optional["SecurityScanStore"] = None,
+        scan_allowlist_ips: list[str] | None = None,
         max_queue_size: int = 1000,
         max_alerts: int = 1000,
-        alert_callback: Optional[Callable[[SecurityAlert], Awaitable[None]]] = None,
+        alert_callback: Callable[[SecurityAlert], Awaitable[None]] | None = None,
     ):
         """Initialize the analyzer.
 
@@ -127,6 +137,7 @@ class AsyncSecurityAnalyzer:
         self.sanitizer = sanitizer or Sanitizer()
         self.detector = detector or InjectionDetector()
         self.guard_client = guard_client
+        self.scan_store = scan_store
         self._scan_allowlist_ips: set[str] = set(scan_allowlist_ips or [])
         # Detector for embeddings: skip delimiter attacks to avoid false positives
         # from model vocabulary tokens like [SYSTEM], [INST] etc.
@@ -139,7 +150,7 @@ class AsyncSecurityAnalyzer:
         self._alerts: deque[SecurityAlert] = deque(maxlen=max_alerts)
         self._results: deque[AnalysisResult] = deque(maxlen=max_alerts)
         self._running = False
-        self._task: Optional[asyncio.Task] = None
+        self._task: asyncio.Task | None = None
 
         # Statistics
         self._stats = {
@@ -180,9 +191,9 @@ class AsyncSecurityAnalyzer:
         client_id: str,
         model: str,
         messages: list[dict],
-        task: Optional[str] = None,
-        response_content: Optional[str] = None,
-        source_ip: Optional[str] = None,
+        task: str | None = None,
+        response_content: str | None = None,
+        source_ip: str | None = None,
     ) -> bool:
         """Queue a request for background analysis.
 
@@ -236,10 +247,7 @@ class AsyncSecurityAnalyzer:
             try:
                 # Wait for next request with timeout
                 try:
-                    request = await asyncio.wait_for(
-                        self._queue.get(),
-                        timeout=1.0
-                    )
+                    request = await asyncio.wait_for(self._queue.get(), timeout=1.0)
                 except asyncio.TimeoutError:
                     continue
 
@@ -298,15 +306,17 @@ class AsyncSecurityAnalyzer:
 
         # Check if sanitization found anything
         if sanitization.modified:
-            alerts.append(SecurityAlert(
-                timestamp=datetime.now(timezone.utc).isoformat(),
-                request_id=request.request_id,
-                client_id=request.client_id,
-                severity=AlertSeverity.WARNING,
-                alert_type="unicode_manipulation",
-                description=f"Found {sanitization.total_removals} suspicious Unicode characters",
-                details=sanitization.to_dict(),
-            ))
+            alerts.append(
+                SecurityAlert(
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    request_id=request.request_id,
+                    client_id=request.client_id,
+                    severity=AlertSeverity.WARNING,
+                    alert_type="unicode_manipulation",
+                    description=f"Found {sanitization.total_removals} suspicious Unicode characters",
+                    details=sanitization.to_dict(),
+                )
+            )
 
         # Run injection pattern scan
         # Use embedding-specific detector (no delimiter attack patterns) for embedding
@@ -316,35 +326,41 @@ class AsyncSecurityAnalyzer:
 
         # Generate alerts based on threat level
         if injection_scan.threat_level == ThreatLevel.CRITICAL:
-            alerts.append(SecurityAlert(
-                timestamp=datetime.now(timezone.utc).isoformat(),
-                request_id=request.request_id,
-                client_id=request.client_id,
-                severity=AlertSeverity.CRITICAL,
-                alert_type="injection_critical",
-                description=f"Critical injection pattern detected: {injection_scan.matches[0].pattern_name if injection_scan.matches else 'unknown'}",
-                details=injection_scan.to_dict(),
-            ))
+            alerts.append(
+                SecurityAlert(
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    request_id=request.request_id,
+                    client_id=request.client_id,
+                    severity=AlertSeverity.CRITICAL,
+                    alert_type="injection_critical",
+                    description=f"Critical injection pattern detected: {injection_scan.matches[0].pattern_name if injection_scan.matches else 'unknown'}",
+                    details=injection_scan.to_dict(),
+                )
+            )
         elif injection_scan.threat_level == ThreatLevel.HIGH:
-            alerts.append(SecurityAlert(
-                timestamp=datetime.now(timezone.utc).isoformat(),
-                request_id=request.request_id,
-                client_id=request.client_id,
-                severity=AlertSeverity.WARNING,
-                alert_type="injection_high",
-                description=f"High-threat injection pattern detected: {injection_scan.matches[0].pattern_name if injection_scan.matches else 'unknown'}",
-                details=injection_scan.to_dict(),
-            ))
+            alerts.append(
+                SecurityAlert(
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    request_id=request.request_id,
+                    client_id=request.client_id,
+                    severity=AlertSeverity.WARNING,
+                    alert_type="injection_high",
+                    description=f"High-threat injection pattern detected: {injection_scan.matches[0].pattern_name if injection_scan.matches else 'unknown'}",
+                    details=injection_scan.to_dict(),
+                )
+            )
         elif injection_scan.threat_level == ThreatLevel.MEDIUM:
-            alerts.append(SecurityAlert(
-                timestamp=datetime.now(timezone.utc).isoformat(),
-                request_id=request.request_id,
-                client_id=request.client_id,
-                severity=AlertSeverity.INFO,
-                alert_type="injection_medium",
-                description=f"Medium-threat injection pattern detected: {injection_scan.matches[0].pattern_name if injection_scan.matches else 'unknown'}",
-                details=injection_scan.to_dict(),
-            ))
+            alerts.append(
+                SecurityAlert(
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    request_id=request.request_id,
+                    client_id=request.client_id,
+                    severity=AlertSeverity.INFO,
+                    alert_type="injection_medium",
+                    description=f"Medium-threat injection pattern detected: {injection_scan.matches[0].pattern_name if injection_scan.matches else 'unknown'}",
+                    details=injection_scan.to_dict(),
+                )
+            )
 
         # Run guard model shadow scan (informational only — no alerts)
         guard_scan = None
@@ -367,6 +383,48 @@ class AsyncSecurityAnalyzer:
                 regex_threat_level=injection_scan.threat_level.value,
                 regex_match_count=injection_scan.match_count,
             )
+
+        # Persist scan to database for training data collection
+        if self.scan_store:
+            try:
+                guard_kwargs = {}
+                if guard_scan:
+                    guard_kwargs = {
+                        "guard_safe": guard_scan.safe,
+                        "guard_skipped": guard_scan.skipped,
+                        "guard_category_code": guard_scan.category_code,
+                        "guard_category_name": guard_scan.category_name,
+                        "guard_confidence": guard_scan.confidence,
+                        "guard_inference_ms": guard_scan.inference_time_ms,
+                        "guard_raw_response": guard_scan.raw_response,
+                        "guard_error": guard_scan.error,
+                    }
+
+                await self.scan_store.store_scan(
+                    request_id=request.request_id,
+                    client_id=request.client_id,
+                    messages=request.messages,
+                    regex_threat_level=injection_scan.threat_level.value,
+                    regex_match_count=injection_scan.match_count,
+                    model=request.model,
+                    task=request.task,
+                    regex_matches=[
+                        m.to_dict()
+                        if hasattr(m, "to_dict")
+                        else {
+                            "pattern": m.pattern_name,
+                            "category": m.pattern_category,
+                            "text": m.matched_text[:100],
+                            "level": m.threat_level.value,
+                        }
+                        for m in injection_scan.matches
+                    ]
+                    if injection_scan.matches
+                    else None,
+                    **guard_kwargs,
+                )
+            except Exception as e:
+                logger.error("Failed to persist security scan", error=str(e))
 
         return AnalysisResult(
             request_id=request.request_id,
@@ -422,7 +480,7 @@ class AsyncSecurityAnalyzer:
 
 
 # Global analyzer instance (lazy initialization)
-_analyzer: Optional[AsyncSecurityAnalyzer] = None
+_analyzer: AsyncSecurityAnalyzer | None = None
 
 
 def get_analyzer() -> AsyncSecurityAnalyzer:

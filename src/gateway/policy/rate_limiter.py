@@ -14,10 +14,8 @@ import re
 import time
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field
-
 
 # Maximum unique keys to track (prevents memory exhaustion)
 MAX_TRACKED_KEYS = 10000
@@ -99,7 +97,7 @@ class RateLimiter:
     MINUTE_WINDOW = 60
     HOUR_WINDOW = 3600
 
-    def __init__(self, config: Optional[RateLimitConfig] = None):
+    def __init__(self, config: RateLimitConfig | None = None):
         """Initialize rate limiter.
 
         Args:
@@ -109,7 +107,7 @@ class RateLimiter:
 
         # Track request timestamps per key
         # Key -> list of timestamps
-        self._requests: Dict[str, List[float]] = defaultdict(list)
+        self._requests: dict[str, list[float]] = defaultdict(list)
 
     def _sanitize_key(self, key: str) -> str:
         """Sanitize rate limit key to prevent injection attacks.
@@ -121,6 +119,7 @@ class RateLimiter:
             return key
         # For invalid keys, use a safe hash representation
         import hashlib
+
         return f"hashed_{hashlib.sha256(key.encode()).hexdigest()[:16]}"
 
     def _check_key_limit(self) -> None:
@@ -134,10 +133,11 @@ class RateLimiter:
             now = time.time()
             # Remove keys with no recent requests
             stale_keys = [
-                k for k, timestamps in self._requests.items()
+                k
+                for k, timestamps in self._requests.items()
                 if not timestamps or (now - max(timestamps)) > self.HOUR_WINDOW
             ]
-            for k in stale_keys[:len(stale_keys) // 2 + 1]:  # Remove at least half
+            for k in stale_keys[: len(stale_keys) // 2 + 1]:  # Remove at least half
                 del self._requests[k]
 
     @property
@@ -174,7 +174,7 @@ class RateLimiter:
             reset_burst=now + self.BURST_WINDOW,
         )
 
-    def acquire(self, key: str, rpm_override: Optional[int] = None) -> RateLimitState:
+    def acquire(self, key: str, rpm_override: int | None = None) -> RateLimitState:
         """Record a request and check if it's allowed.
 
         Args:
@@ -228,7 +228,9 @@ class RateLimiter:
 
         # Check minute limit (uses per-key override)
         if minute_count >= effective_rpm:
-            oldest_minute = min((ts for ts in requests if now - ts < self.MINUTE_WINDOW), default=now)
+            oldest_minute = min(
+                (ts for ts in requests if now - ts < self.MINUTE_WINDOW), default=now
+            )
             retry_after = self.MINUTE_WINDOW - (now - oldest_minute)
             raise RateLimitExceeded(
                 f"Rate limit exceeded: {effective_rpm} requests per minute",

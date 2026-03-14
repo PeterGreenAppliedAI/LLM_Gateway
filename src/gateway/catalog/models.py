@@ -6,7 +6,6 @@ and their availability across endpoints.
 
 import fnmatch
 from datetime import datetime, timezone
-from typing import Optional
 
 from pydantic import BaseModel, Field
 
@@ -61,7 +60,8 @@ class ModelCatalog(BaseModel):
         """
         # Remove existing entry if present
         self.discovered = [
-            m for m in self.discovered
+            m
+            for m in self.discovered
             if not (m.name == model.name and m.endpoint == model.endpoint)
         ]
         self.discovered.append(model)

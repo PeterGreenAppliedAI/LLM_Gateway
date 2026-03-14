@@ -1,21 +1,17 @@
 """Tests for guard model clients and circuit breaker."""
 
-import asyncio
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from gateway.security.guard import (
     CircuitBreaker,
+    GraniteGuardianClient,
     GuardResult,
     LlamaGuardClient,
-    GraniteGuardianClient,
     create_guard_client,
-    LLAMA_GUARD_CATEGORIES,
-    GRANITE_CATEGORIES,
 )
-
 
 # =============================================================================
 # CircuitBreaker Tests
@@ -116,9 +112,7 @@ class TestLlamaGuardClient:
     async def test_classify_returns_safe(self):
         client = LlamaGuardClient()
         mock_response = MagicMock()
-        mock_response.json.return_value = {
-            "message": {"content": "safe"}
-        }
+        mock_response.json.return_value = {"message": {"content": "safe"}}
         mock_response.raise_for_status = MagicMock()
 
         mock_http = AsyncMock()
@@ -132,9 +126,7 @@ class TestLlamaGuardClient:
     async def test_classify_returns_unsafe(self):
         client = LlamaGuardClient()
         mock_response = MagicMock()
-        mock_response.json.return_value = {
-            "message": {"content": "unsafe\nS4"}
-        }
+        mock_response.json.return_value = {"message": {"content": "unsafe\nS4"}}
         mock_response.raise_for_status = MagicMock()
 
         mock_http = AsyncMock()
@@ -148,6 +140,7 @@ class TestLlamaGuardClient:
     @pytest.mark.asyncio
     async def test_classify_timeout_returns_skipped(self):
         import httpx
+
         client = LlamaGuardClient()
 
         mock_http = AsyncMock()
@@ -162,6 +155,7 @@ class TestLlamaGuardClient:
     @pytest.mark.asyncio
     async def test_classify_connection_error(self):
         import httpx
+
         client = LlamaGuardClient()
 
         mock_http = AsyncMock()
@@ -183,6 +177,7 @@ class TestLlamaGuardClient:
     @pytest.mark.asyncio
     async def test_circuit_breaker_skips_when_open(self):
         import httpx
+
         client = LlamaGuardClient()
         client.circuit_breaker = CircuitBreaker(failure_threshold=2)
 
@@ -292,6 +287,7 @@ class TestGraniteGuardianClient:
     @pytest.mark.asyncio
     async def test_classify_timeout(self):
         import httpx
+
         client = GraniteGuardianClient()
 
         mock_http = AsyncMock()
@@ -345,8 +341,10 @@ class TestGuardResult:
 
     def test_to_dict_unsafe_with_category(self):
         result = GuardResult(
-            safe=False, raw_response="unsafe\nS1",
-            category_code="S1", category_name="Violent Crimes",
+            safe=False,
+            raw_response="unsafe\nS1",
+            category_code="S1",
+            category_name="Violent Crimes",
             inference_time_ms=15.0,
         )
         d = result.to_dict()
@@ -356,8 +354,10 @@ class TestGuardResult:
 
     def test_to_dict_with_confidence(self):
         result = GuardResult(
-            safe=False, raw_response="Yes",
-            category_code="jailbreak", confidence="High",
+            safe=False,
+            raw_response="Yes",
+            category_code="jailbreak",
+            confidence="High",
             inference_time_ms=20.0,
         )
         d = result.to_dict()

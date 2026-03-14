@@ -3,11 +3,11 @@
 import pytest
 
 from gateway.policy.token_budget import (
-    TokenBudgetTracker,
+    ModelAssignment,
+    ModelTierConfig,
     TokenBudgetConfig,
     TokenBudgetExceeded,
-    ModelTierConfig,
-    ModelAssignment,
+    TokenBudgetTracker,
 )
 
 
@@ -148,7 +148,9 @@ class TestBudgetCheck:
         tracker.record_usage("key1", "llama3.1:70b", 40000)
         with pytest.raises(TokenBudgetExceeded) as exc_info:
             tracker.check_budget(
-                "key2", model="llama3.1:70b", estimated_tokens=15000,
+                "key2",
+                model="llama3.1:70b",
+                estimated_tokens=15000,
                 daily_limit_override=10_000_000,
             )
         assert "tier" in exc_info.value.budget_type
@@ -160,7 +162,9 @@ class TestBudgetCheck:
 
     def test_override_daily_limit(self, tracker):
         tracker.record_usage("key1", "llama3.1:8b", 9000)
-        state = tracker.check_budget("key1", model="llama3.1:8b", estimated_tokens=1000, daily_limit_override=50000)
+        state = tracker.check_budget(
+            "key1", model="llama3.1:8b", estimated_tokens=1000, daily_limit_override=50000
+        )
         assert state.daily_limit == 50000
 
 
@@ -172,9 +176,9 @@ class TestRecordUsage:
         assert state.tokens_used == 3000
 
     def test_tracks_by_tier(self, tracker):
-        tracker.record_usage("key1", "llama3.1:8b", 1000)       # standard 1x = 1000
-        tracker.record_usage("key1", "llama3.1:70b", 100)        # frontier 15x = 1500
-        tracker.record_usage("key1", "nomic-embed-text", 5000)   # embedding 0.1x = 500
+        tracker.record_usage("key1", "llama3.1:8b", 1000)  # standard 1x = 1000
+        tracker.record_usage("key1", "llama3.1:70b", 100)  # frontier 15x = 1500
+        tracker.record_usage("key1", "nomic-embed-text", 5000)  # embedding 0.1x = 500
         state = tracker.get_budget_state("key1")
         assert state.tokens_used == 3000
         assert state.tier_usage["standard"] == 1000

@@ -6,7 +6,7 @@ This module provides:
 - ModelDiscoveryService: Background service that queries endpoints for available models
 """
 
-from gateway.catalog.models import DiscoveredModel, ModelCatalog
 from gateway.catalog.discovery import ModelDiscoveryService
+from gateway.catalog.models import DiscoveredModel, ModelCatalog
 
 __all__ = ["DiscoveredModel", "ModelCatalog", "ModelDiscoveryService"]

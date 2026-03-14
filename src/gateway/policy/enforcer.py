@@ -13,15 +13,14 @@ Per PRD Section 10:
 """
 
 from dataclasses import dataclass
-from typing import Optional, Set, Dict, List
 
 from pydantic import BaseModel, Field
 
 from gateway.models.common import TaskType
 from gateway.models.internal import InternalRequest
-from gateway.policy.rate_limiter import RateLimiter, RateLimitConfig, RateLimitExceeded
-from gateway.policy.token_limiter import TokenLimiter, TokenLimitConfig, TokenLimitExceeded
-from gateway.policy.token_budget import TokenBudgetTracker, TokenBudgetConfig, TokenBudgetExceeded
+from gateway.policy.rate_limiter import RateLimitConfig, RateLimiter, RateLimitExceeded
+from gateway.policy.token_budget import TokenBudgetConfig, TokenBudgetExceeded, TokenBudgetTracker
+from gateway.policy.token_limiter import TokenLimitConfig, TokenLimiter, TokenLimitExceeded
 
 
 class PolicyViolation(Exception):
@@ -32,7 +31,7 @@ class PolicyViolation(Exception):
         message: str,
         policy_type: str,
         code: str,
-        retry_after: Optional[float] = None,
+        retry_after: float | None = None,
     ):
         super().__init__(message)
         self.policy_type = policy_type
@@ -44,8 +43,8 @@ class TaskProviderPolicy(BaseModel):
     """Policy for which providers can handle which tasks."""
 
     task: TaskType
-    allowed_providers: Set[str] = Field(default_factory=set)
-    denied_providers: Set[str] = Field(default_factory=set)
+    allowed_providers: set[str] = Field(default_factory=set)
+    denied_providers: set[str] = Field(default_factory=set)
 
 
 class PolicyConfig(BaseModel):
@@ -57,7 +56,7 @@ class PolicyConfig(BaseModel):
     token_budget: TokenBudgetConfig = Field(default_factory=TokenBudgetConfig)
 
     # Provider-task mapping (optional - empty means all providers allowed for all tasks)
-    task_policies: List[TaskProviderPolicy] = Field(
+    task_policies: list[TaskProviderPolicy] = Field(
         default_factory=list,
         max_length=50,
         description="Task-specific provider policies",
@@ -69,11 +68,11 @@ class PolicyCheckResult:
     """Result of policy check."""
 
     allowed: bool
-    rate_limit_remaining: Optional[int] = None
-    rate_limit_reset: Optional[float] = None
-    adjusted_max_tokens: Optional[int] = None
-    violation_message: Optional[str] = None
-    violation_code: Optional[str] = None
+    rate_limit_remaining: int | None = None
+    rate_limit_reset: float | None = None
+    adjusted_max_tokens: int | None = None
+    violation_message: str | None = None
+    violation_code: str | None = None
 
 
 class PolicyEnforcer:
@@ -89,7 +88,7 @@ class PolicyEnforcer:
         enforcer.enforce(request, rate_limit_key="client_123")
     """
 
-    def __init__(self, config: Optional[PolicyConfig] = None):
+    def __init__(self, config: PolicyConfig | None = None):
         """Initialize policy enforcer.
 
         Args:
@@ -101,7 +100,7 @@ class PolicyEnforcer:
         self._token_budget = TokenBudgetTracker(self._config.token_budget)
 
         # Build task -> provider policy lookup
-        self._task_policies: Dict[TaskType, TaskProviderPolicy] = {}
+        self._task_policies: dict[TaskType, TaskProviderPolicy] = {}
         for policy in self._config.task_policies:
             self._task_policies[policy.task] = policy
 
@@ -113,11 +112,11 @@ class PolicyEnforcer:
     def enforce(
         self,
         request: InternalRequest,
-        rate_limit_key: Optional[str] = None,
-        provider: Optional[str] = None,
-        allowed_models: Optional[List[str]] = None,
-        allowed_endpoints: Optional[List[str]] = None,
-        rate_limit_rpm: Optional[int] = None,
+        rate_limit_key: str | None = None,
+        provider: str | None = None,
+        allowed_models: list[str] | None = None,
+        allowed_endpoints: list[str] | None = None,
+        rate_limit_rpm: int | None = None,
     ) -> PolicyCheckResult:
         """Enforce all policies on a request.
 
@@ -165,9 +164,9 @@ class PolicyEnforcer:
         # 3. Check per-key model allowlist
         if allowed_models and request.model:
             import fnmatch
+
             model_allowed = any(
-                fnmatch.fnmatch(request.model, pattern)
-                for pattern in allowed_models
+                fnmatch.fnmatch(request.model, pattern) for pattern in allowed_models
             )
             if not model_allowed:
                 raise PolicyViolation(

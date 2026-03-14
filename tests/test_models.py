@@ -31,7 +31,6 @@ from gateway.models.openai import (
     OpenAIEmbeddingResponse,
 )
 
-
 # =============================================================================
 # Fixtures
 # =============================================================================
@@ -100,7 +99,15 @@ class TestTaskType:
 
     def test_all_task_types_exist(self) -> None:
         """Verify all expected task types are defined."""
-        expected = ["chat", "completion", "summarize", "extract", "classify", "embeddings", "generate"]
+        expected = [
+            "chat",
+            "completion",
+            "summarize",
+            "extract",
+            "classify",
+            "embeddings",
+            "generate",
+        ]
         actual = [t.value for t in TaskType]
         for task in expected:
             assert task in actual

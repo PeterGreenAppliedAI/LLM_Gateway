@@ -14,19 +14,12 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError as PydanticValidationError
 
 from gateway.errors import (
-    GatewayError,
     ErrorCategory,
     ErrorCode,
-    AuthenticationError,
-    RateLimitError,
-    PolicyError,
-    DispatchError,
-    ValidationError,
-    ProviderError,
-    InternalError,
+    GatewayError,
 )
 from gateway.observability import get_logger, get_metrics
-from gateway.observability.logging import get_request_context, clear_request_context
+from gateway.observability.logging import clear_request_context, get_request_context
 
 logger = get_logger(__name__)
 metrics = get_metrics()

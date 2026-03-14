@@ -9,7 +9,6 @@ Per PRD Section 10: Max tokens per request is a required policy.
 """
 
 from dataclasses import dataclass
-from typing import Optional
 
 from pydantic import BaseModel, Field
 
@@ -61,7 +60,7 @@ class TokenLimitResult:
     allowed: bool
     max_tokens: int
     context_limit: int
-    adjusted_max_tokens: Optional[int] = None  # If we capped the request
+    adjusted_max_tokens: int | None = None  # If we capped the request
 
 
 class TokenLimiter:
@@ -73,7 +72,7 @@ class TokenLimiter:
     - Context length validation (when token counts are known)
     """
 
-    def __init__(self, config: Optional[TokenLimitConfig] = None):
+    def __init__(self, config: TokenLimitConfig | None = None):
         """Initialize token limiter.
 
         Args:
@@ -96,7 +95,7 @@ class TokenLimiter:
         """Get maximum allowed tokens per request."""
         return self._config.max_tokens_per_request
 
-    def validate_max_tokens(self, requested_max_tokens: Optional[int]) -> int:
+    def validate_max_tokens(self, requested_max_tokens: int | None) -> int:
         """Validate and return max_tokens for a request.
 
         Args:
@@ -152,8 +151,8 @@ class TokenLimiter:
 
     def check(
         self,
-        requested_max_tokens: Optional[int] = None,
-        context_tokens: Optional[int] = None,
+        requested_max_tokens: int | None = None,
+        context_tokens: int | None = None,
     ) -> TokenLimitResult:
         """Check token limits without raising exceptions.
 

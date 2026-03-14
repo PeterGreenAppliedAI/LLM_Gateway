@@ -7,7 +7,6 @@ import pytest
 import yaml
 
 from gateway.config import (
-    ConfigLoader,
     GatewayConfig,
     ProviderConfig,
     RateLimitConfig,
@@ -15,7 +14,6 @@ from gateway.config import (
     RoutingRule,
     load_config,
 )
-
 
 # ============================================================================
 # Test Fixtures - Centralized test data
@@ -347,7 +345,10 @@ class TestConfigLoader:
 
         assert len(config.providers) == 2
         assert config.routing is not None
-        assert config.routing.default_provider == full_gateway_config_data["routing"]["default_provider"]
+        assert (
+            config.routing.default_provider
+            == full_gateway_config_data["routing"]["default_provider"]
+        )
         assert len(config.routing.rules) == 1
 
     def test_providers_file_overrides_main_config(

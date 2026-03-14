@@ -8,11 +8,10 @@ from gateway.config import ProviderConfig
 from gateway.models.common import ProviderType
 from gateway.providers.base import ProviderAdapter
 from gateway.providers.ollama import OllamaAdapter
-from gateway.providers.vllm import VLLMAdapter
-from gateway.providers.trtllm import TRTLLMAdapter
-from gateway.providers.sglang import SGLangAdapter
 from gateway.providers.openai import OpenAIAdapter
-
+from gateway.providers.sglang import SGLangAdapter
+from gateway.providers.trtllm import TRTLLMAdapter
+from gateway.providers.vllm import VLLMAdapter
 
 # Registry mapping ProviderType enum to adapter classes
 _ADAPTER_REGISTRY: dict[ProviderType, type[ProviderAdapter]] = {
@@ -40,9 +39,7 @@ def create_adapter(config: ProviderConfig) -> ProviderAdapter:
     if adapter_class is None:
         # This should never happen if config.type is properly validated as enum
         supported = ", ".join(pt.value for pt in _ADAPTER_REGISTRY.keys())
-        raise ValueError(
-            f"Unknown provider type: {config.type}. Supported types: {supported}"
-        )
+        raise ValueError(f"Unknown provider type: {config.type}. Supported types: {supported}")
 
     return adapter_class(config)
 

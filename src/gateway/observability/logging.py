@@ -9,24 +9,23 @@ Per PRD Section 11:
 - No raw prompts stored (configurable redaction)
 """
 
-import logging
 import json
+import logging
 import re
 import sys
 from contextvars import ContextVar
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, Literal, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
-
 
 # Safe pattern for logged identifiers (prevents log injection)
 SAFE_LOG_VALUE_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_\-.:]{0,127}$")
 
 
-def sanitize_log_value(value: Optional[str]) -> Optional[str]:
+def sanitize_log_value(value: str | None) -> str | None:
     """Sanitize a value for safe logging.
 
     Security: Prevents log injection attacks by ensuring logged values
@@ -49,6 +48,7 @@ _request_context: ContextVar[Optional["RequestContext"]] = ContextVar(
 
 class LogLevel(str, Enum):
     """Valid log levels."""
+
     DEBUG = "DEBUG"
     INFO = "INFO"
     WARNING = "WARNING"
@@ -80,31 +80,31 @@ class RequestContext:
     """
 
     request_id: str
-    client_id: Optional[str] = None
-    user_id: Optional[str] = None
-    provider: Optional[str] = None
-    model: Optional[str] = None
-    task: Optional[str] = None
+    client_id: str | None = None
+    user_id: str | None = None
+    provider: str | None = None
+    model: str | None = None
+    task: str | None = None
     start_time: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     # Timing metrics (populated as request progresses)
-    time_to_first_token_ms: Optional[float] = None
-    total_latency_ms: Optional[float] = None
+    time_to_first_token_ms: float | None = None
+    total_latency_ms: float | None = None
 
     # Token counts (populated from response)
-    prompt_tokens: Optional[int] = None
-    completion_tokens: Optional[int] = None
-    total_tokens: Optional[int] = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
 
     # Throughput (calculated)
-    tokens_per_second: Optional[float] = None
+    tokens_per_second: float | None = None
 
     # Status
     status: str = "pending"
-    error_type: Optional[str] = None
-    error_message: Optional[str] = None
+    error_type: str | None = None
+    error_message: str | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for logging, excluding None values."""
         result = {}
         for k, v in asdict(self).items():
@@ -122,8 +122,8 @@ class RequestContext:
 
     def record_complete(
         self,
-        prompt_tokens: Optional[int] = None,
-        completion_tokens: Optional[int] = None,
+        prompt_tokens: int | None = None,
+        completion_tokens: int | None = None,
     ) -> None:
         """Record request completion with token counts."""
         elapsed = datetime.now(timezone.utc) - self.start_time
@@ -157,7 +157,7 @@ def set_request_context(ctx: RequestContext) -> None:
     _request_context.set(ctx)
 
 
-def get_request_context() -> Optional[RequestContext]:
+def get_request_context() -> RequestContext | None:
     """Get the current request context."""
     return _request_context.get()
 
@@ -179,7 +179,7 @@ class StructuredJsonFormatter(logging.Formatter):
 
         Security: All user-provided values are sanitized to prevent log injection.
         """
-        log_data: Dict[str, Any] = {
+        log_data: dict[str, Any] = {
             "level": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),
@@ -250,7 +250,7 @@ class StructuredTextFormatter(logging.Formatter):
 class ContextLogger(logging.LoggerAdapter):
     """Logger adapter that automatically includes request context."""
 
-    def process(self, msg: str, kwargs: Dict[str, Any]) -> tuple:
+    def process(self, msg: str, kwargs: dict[str, Any]) -> tuple:
         """Add request context to log records."""
         extra = kwargs.get("extra", {})
 
@@ -270,12 +270,12 @@ class ContextLogger(logging.LoggerAdapter):
 
 
 # Global logger cache
-_loggers: Dict[str, ContextLogger] = {}
+_loggers: dict[str, ContextLogger] = {}
 _configured = False
 _config: LogConfig = LogConfig()
 
 
-def configure_logging(config: Optional[LogConfig] = None) -> None:
+def configure_logging(config: LogConfig | None = None) -> None:
     """Configure the logging system.
 
     Args:

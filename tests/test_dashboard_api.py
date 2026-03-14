@@ -11,7 +11,6 @@ Tests cover:
 """
 
 import pytest
-from datetime import datetime, timedelta
 from httpx import ASGITransport, AsyncClient
 
 from gateway.main import create_app

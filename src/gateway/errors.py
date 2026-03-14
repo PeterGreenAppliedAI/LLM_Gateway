@@ -11,7 +11,6 @@ by the exception handler middleware.
 """
 
 from enum import Enum
-from typing import Optional
 
 
 class ErrorCode(str, Enum):
@@ -102,8 +101,8 @@ class GatewayError(Exception):
         message: str,
         code: ErrorCode,
         category: ErrorCategory,
-        details: Optional[dict] = None,
-        retry_after: Optional[float] = None,
+        details: dict | None = None,
+        retry_after: float | None = None,
     ):
         super().__init__(message)
         self.message = message
@@ -137,7 +136,7 @@ class AuthenticationError(GatewayError):
         self,
         message: str = "Authentication required",
         code: ErrorCode = ErrorCode.AUTHENTICATION_REQUIRED,
-        details: Optional[dict] = None,
+        details: dict | None = None,
     ):
         super().__init__(
             message=message,
@@ -180,7 +179,7 @@ class RateLimitError(GatewayError):
         message: str,
         retry_after: float,
         code: ErrorCode = ErrorCode.RATE_LIMIT_EXCEEDED,
-        details: Optional[dict] = None,
+        details: dict | None = None,
     ):
         super().__init__(
             message=message,
@@ -203,7 +202,7 @@ class PolicyError(GatewayError):
         self,
         message: str,
         code: ErrorCode = ErrorCode.POLICY_VIOLATION,
-        details: Optional[dict] = None,
+        details: dict | None = None,
     ):
         super().__init__(
             message=message,
@@ -257,8 +256,8 @@ class DispatchError(GatewayError):
         self,
         message: str,
         code: ErrorCode = ErrorCode.DISPATCH_ERROR,
-        provider: Optional[str] = None,
-        details: Optional[dict] = None,
+        provider: str | None = None,
+        details: dict | None = None,
     ):
         details = details or {}
         if provider:
@@ -366,7 +365,7 @@ class ValidationError(GatewayError):
     def __init__(
         self,
         message: str,
-        details: Optional[dict] = None,
+        details: dict | None = None,
     ):
         super().__init__(
             message=message,
@@ -389,7 +388,7 @@ class ProviderError(GatewayError):
         message: str,
         provider: str,
         code: ErrorCode = ErrorCode.PROVIDER_ERROR,
-        details: Optional[dict] = None,
+        details: dict | None = None,
     ):
         details = details or {}
         details["provider"] = provider
@@ -412,7 +411,7 @@ class InternalError(GatewayError):
     def __init__(
         self,
         message: str = "An unexpected error occurred",
-        details: Optional[dict] = None,
+        details: dict | None = None,
     ):
         super().__init__(
             message=message,
@@ -428,7 +427,7 @@ class StreamError(GatewayError):
     def __init__(
         self,
         message: str = "Stream interrupted",
-        details: Optional[dict] = None,
+        details: dict | None = None,
     ):
         super().__init__(
             message=message,

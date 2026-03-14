@@ -8,16 +8,13 @@ Tests the 5-step resolution policy:
 5. Ambiguous → error: when no resolution strategy applies
 """
 
-from datetime import datetime
-from unittest.mock import MagicMock, AsyncMock
-
 import pytest
 
 from gateway.catalog.models import DiscoveredModel, ModelCatalog
 from gateway.config import (
-    GatewayConfig,
     EndpointConfig,
     EnvironmentConfig,
+    GatewayConfig,
     ModelDefault,
     ResolutionConfig,
 )
@@ -30,7 +27,6 @@ from gateway.errors import (
 )
 from gateway.models.common import ProviderType, TaskType
 from gateway.models.internal import InternalRequest, Message, MessageRole
-
 
 # =============================================================================
 # Fixtures

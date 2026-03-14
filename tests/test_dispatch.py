@@ -1,16 +1,15 @@
 """Tests for provider dispatch - registry, health monitoring, and dispatcher."""
 
-import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from gateway.config import GatewayConfig, ProviderConfig, RoutingConfig
-from gateway.dispatch.registry import ProviderRegistry, ProviderHealth
-from gateway.dispatch.dispatcher import Dispatcher, DispatchResult, DispatchError
-from gateway.models.common import HealthStatus, ProviderType, TaskType, FinishReason
+from gateway.dispatch.dispatcher import Dispatcher, DispatchResult
+from gateway.dispatch.registry import ProviderHealth, ProviderRegistry
+from gateway.errors import DispatchError
+from gateway.models.common import FinishReason, HealthStatus, ProviderType, TaskType
 from gateway.models.internal import InternalRequest, InternalResponse, Message, MessageRole
-
 
 # =============================================================================
 # Fixtures
@@ -360,7 +359,9 @@ class TestDispatcher:
         registry._adapters["primary"] = mock_adapter
 
         dispatcher = Dispatcher(registry)
-        result = await dispatcher.dispatch(sample_request.model_copy(update={"model": "primary/llama3.2"}))
+        result = await dispatcher.dispatch(
+            sample_request.model_copy(update={"model": "primary/llama3.2"})
+        )
 
         assert isinstance(result, DispatchResult)
         assert result.provider_used == "primary"
@@ -387,7 +388,9 @@ class TestDispatcher:
         registry._adapters["fallback1"] = mock_adapter
 
         dispatcher = Dispatcher(registry)
-        result = await dispatcher.dispatch(sample_request.model_copy(update={"model": "primary/llama3.2"}))
+        result = await dispatcher.dispatch(
+            sample_request.model_copy(update={"model": "primary/llama3.2"})
+        )
 
         assert result.provider_used == "fallback1"
         assert result.was_fallback is True
@@ -397,9 +400,7 @@ class TestDispatcher:
         await registry.close()
 
     @pytest.mark.asyncio
-    async def test_dispatch_no_fallback_when_disabled(
-        self, multi_provider_config, sample_request
-    ):
+    async def test_dispatch_no_fallback_when_disabled(self, multi_provider_config, sample_request):
         """Dispatch fails without fallback when disabled."""
         registry = ProviderRegistry(multi_provider_config)
         await registry.initialize()
@@ -408,10 +409,9 @@ class TestDispatcher:
         registry._health["primary"].record_unhealthy(HealthStatus.UNHEALTHY)
 
         dispatcher = Dispatcher(registry)
-        request = sample_request.model_copy(update={
-            "model": "primary/llama3.2",
-            "fallback_allowed": False
-        })
+        request = sample_request.model_copy(
+            update={"model": "primary/llama3.2", "fallback_allowed": False}
+        )
 
         with pytest.raises(DispatchError) as exc_info:
             await dispatcher.dispatch(request)
@@ -422,9 +422,7 @@ class TestDispatcher:
         await registry.close()
 
     @pytest.mark.asyncio
-    async def test_dispatch_all_providers_unavailable(
-        self, multi_provider_config, sample_request
-    ):
+    async def test_dispatch_all_providers_unavailable(self, multi_provider_config, sample_request):
         """Dispatch fails when all providers unavailable."""
         registry = ProviderRegistry(multi_provider_config)
         await registry.initialize()

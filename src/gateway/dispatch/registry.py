@@ -10,10 +10,9 @@ backward compatibility during the migration period.
 
 import asyncio
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional
 
 from gateway.catalog.models import ModelCatalog
-from gateway.config import GatewayConfig, ProviderConfig, EndpointConfig
+from gateway.config import EndpointConfig, GatewayConfig, ProviderConfig
 from gateway.models.common import HealthStatus
 from gateway.providers import ProviderAdapter, create_adapter
 
@@ -24,10 +23,10 @@ class ProviderHealth:
     def __init__(self, provider_name: str):
         self.provider_name = provider_name
         self.status: HealthStatus = HealthStatus.UNKNOWN
-        self.last_check: Optional[datetime] = None
-        self.last_healthy: Optional[datetime] = None
+        self.last_check: datetime | None = None
+        self.last_healthy: datetime | None = None
         self.consecutive_failures: int = 0
-        self.error_message: Optional[str] = None
+        self.error_message: str | None = None
 
     def record_healthy(self) -> None:
         """Record a successful health check."""
@@ -37,7 +36,7 @@ class ProviderHealth:
         self.consecutive_failures = 0
         self.error_message = None
 
-    def record_unhealthy(self, status: HealthStatus, error: Optional[str] = None) -> None:
+    def record_unhealthy(self, status: HealthStatus, error: str | None = None) -> None:
         """Record a failed health check."""
         self.status = status
         self.last_check = datetime.now(timezone.utc)
@@ -48,7 +47,7 @@ class ProviderHealth:
         """Check if provider is available for requests."""
         return self.status == HealthStatus.HEALTHY
 
-    def time_since_healthy(self) -> Optional[timedelta]:
+    def time_since_healthy(self) -> timedelta | None:
         """Get time since last healthy state."""
         if self.last_healthy is None:
             return None
@@ -73,10 +72,10 @@ class ProviderRegistry:
             config: Validated gateway configuration
         """
         self._config = config
-        self._adapters: Dict[str, ProviderAdapter] = {}
-        self._health: Dict[str, ProviderHealth] = {}
-        self._endpoint_configs: Dict[str, EndpointConfig] = {}
-        self._health_task: Optional[asyncio.Task] = None
+        self._adapters: dict[str, ProviderAdapter] = {}
+        self._health: dict[str, ProviderHealth] = {}
+        self._endpoint_configs: dict[str, EndpointConfig] = {}
+        self._health_task: asyncio.Task | None = None
         self._shutdown = False
         self._catalog: ModelCatalog = ModelCatalog()
 
@@ -125,7 +124,7 @@ class ProviderRegistry:
         self._health[config.name] = ProviderHealth(config.name)
         self._endpoint_configs[config.name] = config
 
-    def get(self, name: str) -> Optional[ProviderAdapter]:
+    def get(self, name: str) -> ProviderAdapter | None:
         """Get provider adapter by name.
 
         Args:
@@ -136,7 +135,7 @@ class ProviderRegistry:
         """
         return self._adapters.get(name)
 
-    def get_health(self, name: str) -> Optional[ProviderHealth]:
+    def get_health(self, name: str) -> ProviderHealth | None:
         """Get health state for a provider.
 
         Args:
@@ -159,15 +158,15 @@ class ProviderRegistry:
         health = self._health.get(name)
         return health is not None and health.is_available()
 
-    def list_providers(self) -> List[str]:
+    def list_providers(self) -> list[str]:
         """List all registered provider names."""
         return list(self._adapters.keys())
 
-    def list_healthy_providers(self) -> List[str]:
+    def list_healthy_providers(self) -> list[str]:
         """List all healthy provider names."""
         return [name for name in self._adapters if self.is_healthy(name)]
 
-    def get_default_provider(self) -> Optional[str]:
+    def get_default_provider(self) -> str | None:
         """Get the default provider name from config.
 
         Returns first enabled provider if no routing config specified.
@@ -181,7 +180,7 @@ class ProviderRegistry:
             return enabled[0].name
         return None
 
-    def get_fallback_chain(self, exclude: Optional[str] = None) -> List[str]:
+    def get_fallback_chain(self, exclude: str | None = None) -> list[str]:
         """Get ordered list of providers for fallback.
 
         Args:
@@ -196,7 +195,7 @@ class ProviderRegistry:
                 chain.append(provider_config.name)
         return chain
 
-    def get_endpoint_config(self, name: str) -> Optional[EndpointConfig]:
+    def get_endpoint_config(self, name: str) -> EndpointConfig | None:
         """Get endpoint configuration by name.
 
         Args:
@@ -210,8 +209,8 @@ class ProviderRegistry:
     def get_endpoints_with_model(
         self,
         model: str,
-        environment_filter: Optional[Dict[str, str]] = None,
-    ) -> List[str]:
+        environment_filter: dict[str, str] | None = None,
+    ) -> list[str]:
         """Get endpoints that have a specific model.
 
         Uses the catalog to find which endpoints have the model.
@@ -237,8 +236,8 @@ class ProviderRegistry:
 
     def _matches_filter(
         self,
-        labels: Dict[str, str],
-        required: Dict[str, str],
+        labels: dict[str, str],
+        required: dict[str, str],
     ) -> bool:
         """Check if labels match required filter."""
         for key, value in required.items():
@@ -246,16 +245,13 @@ class ProviderRegistry:
                 return False
         return True
 
-    def get_endpoint_labels(self) -> Dict[str, Dict[str, str]]:
+    def get_endpoint_labels(self) -> dict[str, dict[str, str]]:
         """Get all endpoint labels as a dict.
 
         Returns:
             Dict mapping endpoint name to its labels dict
         """
-        return {
-            name: config.labels
-            for name, config in self._endpoint_configs.items()
-        }
+        return {name: config.labels for name, config in self._endpoint_configs.items()}
 
     # =========================================================================
     # Health Monitoring
@@ -286,7 +282,7 @@ class ProviderRegistry:
             await self.check_all_health()
             await asyncio.sleep(self._health_interval_seconds)
 
-    async def check_all_health(self) -> Dict[str, HealthStatus]:
+    async def check_all_health(self) -> dict[str, HealthStatus]:
         """Check health of all registered providers.
 
         Returns:
@@ -305,15 +301,10 @@ class ProviderRegistry:
 
         return results
 
-    async def _check_provider_health(
-        self, name: str, adapter: ProviderAdapter
-    ) -> None:
+    async def _check_provider_health(self, name: str, adapter: ProviderAdapter) -> None:
         """Check health of a single provider and update state."""
         try:
-            status = await asyncio.wait_for(
-                adapter.health(),
-                timeout=self._health_timeout_seconds
-            )
+            status = await asyncio.wait_for(adapter.health(), timeout=self._health_timeout_seconds)
 
             if status == HealthStatus.HEALTHY:
                 self._health[name].record_healthy()
@@ -322,14 +313,10 @@ class ProviderRegistry:
 
         except asyncio.TimeoutError:
             self._health[name].record_unhealthy(
-                HealthStatus.UNHEALTHY,
-                error="Health check timed out"
+                HealthStatus.UNHEALTHY, error="Health check timed out"
             )
         except Exception as e:
-            self._health[name].record_unhealthy(
-                HealthStatus.UNHEALTHY,
-                error=str(e)
-            )
+            self._health[name].record_unhealthy(HealthStatus.UNHEALTHY, error=str(e))
 
     async def check_health(self, name: str) -> HealthStatus:
         """Check health of a specific provider (on-demand).

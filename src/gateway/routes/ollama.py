@@ -11,8 +11,9 @@ Endpoints:
 """
 
 import json
+from collections.abc import AsyncGenerator
 from datetime import datetime, timezone
-from typing import Annotated, AsyncGenerator
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
@@ -24,13 +25,13 @@ from gateway.models.ollama import (
     OllamaChatRequest,
     OllamaChatResponse,
     OllamaChatStreamChunk,
-    OllamaGenerateRequest,
-    OllamaGenerateResponse,
     OllamaEmbeddingsRequest,
     OllamaEmbeddingsResponse,
+    OllamaGenerateRequest,
+    OllamaGenerateResponse,
     OllamaMessage,
-    OllamaTagsResponse,
     OllamaModelInfo,
+    OllamaTagsResponse,
     OllamaToolCall,
     OllamaToolCallFunction,
 )
@@ -38,8 +39,8 @@ from gateway.observability import get_logger, get_metrics
 from gateway.policy import PolicyEnforcer, PolicyViolation
 from gateway.routes.dependencies import (
     AuthResult,
-    get_auth,
     get_audit_logger,
+    get_auth,
     get_dispatcher,
     get_enforcer,
     get_pii_scrubber,
@@ -99,10 +100,7 @@ async def ollama_chat(
             "Received chat request with images",
             model=body.model,
             messages_with_images=incoming_images,
-            image_sizes=[
-                [len(img) for img in m.images]
-                for m in body.messages if m.images
-            ],
+            image_sizes=[[len(img) for img in m.images] for m in body.messages if m.images],
         )
 
     # Security: Sanitize message content
@@ -115,10 +113,7 @@ async def ollama_chat(
         if m.images:
             msg_dict["images"] = m.images
         if m.tool_calls:
-            msg_dict["tool_calls"] = [
-                {"function": tc.function.model_dump()}
-                for tc in m.tool_calls
-            ]
+            msg_dict["tool_calls"] = [{"function": tc.function.model_dump()} for tc in m.tool_calls]
         sanitized_messages.append(msg_dict)
 
     # PII detection (always flags) + optional scrubbing (per-route)
@@ -148,6 +143,7 @@ async def ollama_chat(
 
     # Convert Ollama messages to internal format (using sanitized content)
     from gateway.models.internal import ToolCall
+
     messages = []
     for m in sanitized_messages:
         msg_kwargs: dict = {"role": m["role"], "content": m["content"]}
@@ -155,8 +151,7 @@ async def ollama_chat(
             msg_kwargs["images"] = m["images"]
         if m.get("tool_calls"):
             msg_kwargs["tool_calls"] = [
-                ToolCall(type="function", function=tc["function"])
-                for tc in m["tool_calls"]
+                ToolCall(type="function", function=tc["function"]) for tc in m["tool_calls"]
             ]
         messages.append(Message(**msg_kwargs))
 
@@ -202,7 +197,11 @@ async def ollama_chat(
 
     if body.stream:
         return await _stream_ollama_chat(
-            dispatcher, internal_request, body.model, ctx, audit_logger,
+            dispatcher,
+            internal_request,
+            body.model,
+            ctx,
+            audit_logger,
             request_body={"messages": sanitized_messages},
         )
 
@@ -224,7 +223,9 @@ async def ollama_chat(
     )
 
     # Record token usage for daily budget tracking
-    total_tokens = (result.response.usage.prompt_tokens or 0) + (result.response.usage.completion_tokens or 0)
+    total_tokens = (result.response.usage.prompt_tokens or 0) + (
+        result.response.usage.completion_tokens or 0
+    )
     if total_tokens > 0:
         enforcer.record_token_usage(client_id, result.response.model, total_tokens)
 
@@ -329,7 +330,7 @@ async def _stream_ollama_chat(
                             request_body=request_body,
                         )
 
-        except Exception as e:
+        except Exception:
             logger.exception("Error in Ollama chat stream")
             error_response = {
                 "error": "Stream interrupted",
@@ -381,9 +382,7 @@ async def ollama_generate(
 
     if pii_scrubber:
         scrub = should_scrub_pii(request)
-        analysis_messages, pii_results = pii_scrubber.scan_messages(
-            analysis_messages, scrub=scrub
-        )
+        analysis_messages, pii_results = pii_scrubber.scan_messages(analysis_messages, scrub=scrub)
         pii_found = sum(r.detection_count for r in pii_results)
         if pii_found:
             logger.warning(
@@ -451,7 +450,11 @@ async def ollama_generate(
 
     if body.stream:
         return await _stream_ollama_generate(
-            dispatcher, internal_request, body.model, ctx, audit_logger,
+            dispatcher,
+            internal_request,
+            body.model,
+            ctx,
+            audit_logger,
             request_body={"messages": [m for m in analysis_messages]},
         )
 
@@ -473,7 +476,9 @@ async def ollama_generate(
     )
 
     # Record token usage for daily budget tracking
-    total_tokens = (result.response.usage.prompt_tokens or 0) + (result.response.usage.completion_tokens or 0)
+    total_tokens = (result.response.usage.prompt_tokens or 0) + (
+        result.response.usage.completion_tokens or 0
+    )
     if total_tokens > 0:
         enforcer.record_token_usage(client_id, result.response.model, total_tokens)
 
@@ -545,7 +550,7 @@ async def _stream_ollama_generate(
 
                 yield json.dumps(response) + "\n"
 
-        except Exception as e:
+        except Exception:
             logger.exception("Error in Ollama generate stream")
             yield json.dumps({"error": "Stream interrupted", "done": True}) + "\n"
 
@@ -574,18 +579,22 @@ async def ollama_tags(request: Request):
     models = []
 
     for discovered in catalog.discovered:
-        models.append(OllamaModelInfo(
-            name=discovered.name,
-            model=discovered.name,
-            modified_at=discovered.discovered_at.isoformat() if discovered.discovered_at else _now_iso(),
-            size=discovered.size_bytes or 0,
-            digest="",
-            details={
-                "family": discovered.family or "",
-                "parameter_size": discovered.parameter_size or "",
-                "quantization_level": discovered.quantization or "",
-            },
-        ))
+        models.append(
+            OllamaModelInfo(
+                name=discovered.name,
+                model=discovered.name,
+                modified_at=discovered.discovered_at.isoformat()
+                if discovered.discovered_at
+                else _now_iso(),
+                size=discovered.size_bytes or 0,
+                digest="",
+                details={
+                    "family": discovered.family or "",
+                    "parameter_size": discovered.parameter_size or "",
+                    "quantization_level": discovered.quantization or "",
+                },
+            )
+        )
 
     return OllamaTagsResponse(models=models)
 
@@ -626,9 +635,7 @@ async def ollama_embeddings(
     if pii_scrubber:
         scrub = should_scrub_pii(request)
         embed_messages = [{"role": "user", "content": p} for p in sanitized_prompts]
-        embed_messages, pii_results = pii_scrubber.scan_messages(
-            embed_messages, scrub=scrub
-        )
+        embed_messages, pii_results = pii_scrubber.scan_messages(embed_messages, scrub=scrub)
         pii_found = sum(r.detection_count for r in pii_results)
         if pii_found:
             logger.warning(
@@ -689,7 +696,9 @@ async def ollama_embeddings(
 
     # Record token usage for daily budget tracking
     if result.response.usage.prompt_tokens:
-        enforcer.record_token_usage(client_id, result.response.model, result.response.usage.prompt_tokens)
+        enforcer.record_token_usage(
+            client_id, result.response.model, result.response.usage.prompt_tokens
+        )
 
     if audit_logger:
         await audit_logger.log_request(

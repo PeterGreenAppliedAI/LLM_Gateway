@@ -11,8 +11,8 @@ Per API Error Handling Architecture:
 - DispatchError and subclasses are imported from gateway.errors
 """
 
-from gateway.dispatch.registry import ProviderRegistry
 from gateway.dispatch.dispatcher import Dispatcher, DispatchResult
+from gateway.dispatch.registry import ProviderRegistry
 from gateway.errors import DispatchError
 
 __all__ = [

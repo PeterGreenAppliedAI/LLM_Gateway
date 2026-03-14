@@ -15,7 +15,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field, model_serializer
 
-from gateway.models.common import FinishReason, TaskType, UsageStats
+from gateway.models.common import FinishReason, TaskType
 from gateway.models.internal import (
     InternalRequest,
     InternalResponse,
@@ -25,7 +25,6 @@ from gateway.models.internal import (
     ToolCall,
 )
 
-
 # =============================================================================
 # Chat Completion Models (POST /v1/chat/completions)
 # =============================================================================
@@ -33,12 +32,14 @@ from gateway.models.internal import (
 
 class OpenAIToolCallFunction(BaseModel):
     """Function details in an OpenAI tool call."""
+
     name: str
     arguments: str  # JSON string of arguments
 
 
 class OpenAIToolCall(BaseModel):
     """A tool call in OpenAI format."""
+
     id: str
     type: Literal["function"] = "function"
     function: OpenAIToolCallFunction
@@ -46,6 +47,7 @@ class OpenAIToolCall(BaseModel):
 
 class OpenAIChatMessage(BaseModel):
     """OpenAI chat message format."""
+
     role: Literal["system", "user", "assistant", "tool"]
     content: str | list[dict[str, Any]] | None = None  # string, content parts array, or null
     name: str | None = None
@@ -77,6 +79,7 @@ class OpenAIChatMessage(BaseModel):
 
 class OpenAIChatRequest(BaseModel):
     """OpenAI-compatible chat completion request."""
+
     model: str
     messages: list[OpenAIChatMessage]
     max_tokens: int | None = None
@@ -151,6 +154,7 @@ class OpenAIChatRequest(BaseModel):
 
 class OpenAIChatChoice(BaseModel):
     """A single choice in chat completion response."""
+
     index: int
     message: OpenAIChatMessage
     finish_reason: str | None = None
@@ -158,6 +162,7 @@ class OpenAIChatChoice(BaseModel):
 
 class OpenAIChatUsage(BaseModel):
     """Token usage in chat completion response."""
+
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int
@@ -165,6 +170,7 @@ class OpenAIChatUsage(BaseModel):
 
 class OpenAIChatResponse(BaseModel):
     """OpenAI-compatible chat completion response."""
+
     id: str = Field(default_factory=lambda: f"chatcmpl-{uuid4().hex[:24]}")
     object: Literal["chat.completion"] = "chat.completion"
     created: int = Field(default_factory=lambda: int(time.time()))
@@ -222,12 +228,14 @@ class OpenAIChatResponse(BaseModel):
 
 class OpenAIChatStreamDelta(BaseModel):
     """Delta content in streaming chat response."""
+
     role: str | None = None
     content: str | None = None
 
 
 class OpenAIChatStreamChoice(BaseModel):
     """Streaming choice in chat completion."""
+
     index: int
     delta: OpenAIChatStreamDelta
     finish_reason: str | None = None
@@ -235,6 +243,7 @@ class OpenAIChatStreamChoice(BaseModel):
 
 class OpenAIChatStreamResponse(BaseModel):
     """OpenAI-compatible streaming chat completion chunk."""
+
     id: str
     object: Literal["chat.completion.chunk"] = "chat.completion.chunk"
     created: int = Field(default_factory=lambda: int(time.time()))
@@ -266,6 +275,7 @@ class OpenAIChatStreamResponse(BaseModel):
 
 class OpenAICompletionRequest(BaseModel):
     """OpenAI-compatible completion request."""
+
     model: str
     prompt: str | list[str]
     max_tokens: int | None = Field(default=None, le=32768)
@@ -306,6 +316,7 @@ class OpenAICompletionRequest(BaseModel):
 
 class OpenAICompletionChoice(BaseModel):
     """A single choice in completion response."""
+
     index: int
     text: str
     finish_reason: str | None = None
@@ -313,6 +324,7 @@ class OpenAICompletionChoice(BaseModel):
 
 class OpenAICompletionResponse(BaseModel):
     """OpenAI-compatible completion response."""
+
     id: str = Field(default_factory=lambda: f"cmpl-{uuid4().hex[:24]}")
     object: Literal["text_completion"] = "text_completion"
     created: int = Field(default_factory=lambda: int(time.time()))
@@ -348,6 +360,7 @@ class OpenAICompletionResponse(BaseModel):
 
 class OpenAIEmbeddingRequest(BaseModel):
     """OpenAI-compatible embedding request."""
+
     model: str
     input: str | list[str]
     user: str | None = None
@@ -370,6 +383,7 @@ class OpenAIEmbeddingRequest(BaseModel):
 
 class OpenAIEmbeddingData(BaseModel):
     """Single embedding in response."""
+
     object: Literal["embedding"] = "embedding"
     index: int
     embedding: list[float]
@@ -377,6 +391,7 @@ class OpenAIEmbeddingData(BaseModel):
 
 class OpenAIEmbeddingResponse(BaseModel):
     """OpenAI-compatible embedding response."""
+
     object: Literal["list"] = "list"
     model: str
     data: list[OpenAIEmbeddingData]

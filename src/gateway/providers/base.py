@@ -20,7 +20,7 @@ Per rule.md:
 """
 
 from abc import ABC, abstractmethod
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 
 from gateway.config import ProviderConfig
 from gateway.models.common import (
@@ -111,9 +111,7 @@ class ProviderAdapter(ABC):
 
         if request.prompt and not request.messages:
             request = request.model_copy(
-                update={
-                    "messages": [Message(role=MessageRole.USER, content=request.prompt)]
-                }
+                update={"messages": [Message(role=MessageRole.USER, content=request.prompt)]}
             )
         return await self.chat(request)
 
@@ -135,9 +133,7 @@ class ProviderAdapter(ABC):
     # Streaming Support
     # =========================================================================
 
-    async def chat_stream(
-        self, request: InternalRequest
-    ) -> AsyncIterator[StreamChunk]:
+    async def chat_stream(self, request: InternalRequest) -> AsyncIterator[StreamChunk]:
         """Stream chat completion response.
 
         Default implementation yields single chunk from non-streaming chat().

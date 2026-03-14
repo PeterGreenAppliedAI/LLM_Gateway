@@ -9,7 +9,7 @@ Endpoints:
 - POST /v1/devmesh/catalog/refresh
 """
 
-from typing import Annotated, Any, Optional
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
@@ -39,6 +39,7 @@ router = APIRouter(tags=["catalog"])
 
 class ModelInfo(BaseModel):
     """Information about a model."""
+
     id: str
     object: str = "model"
     owned_by: str
@@ -48,6 +49,7 @@ class ModelInfo(BaseModel):
 
 class ModelsResponse(BaseModel):
     """Response for list models endpoint."""
+
     object: str = "list"
     data: list[ModelInfo]
 
@@ -74,16 +76,16 @@ async def list_models(
             capabilities = adapter.get_capabilities()
 
             for model_name in provider_models:
-                models.append(ModelInfo(
-                    id=f"{provider_name}/{model_name}",
-                    owned_by=provider_name,
-                    provider=provider_name,
-                    capabilities=capabilities,
-                ))
+                models.append(
+                    ModelInfo(
+                        id=f"{provider_name}/{model_name}",
+                        owned_by=provider_name,
+                        provider=provider_name,
+                        capabilities=capabilities,
+                    )
+                )
         except Exception as e:
-            logger.warning(
-                f"Failed to list models from provider {provider_name}: {e}"
-            )
+            logger.warning(f"Failed to list models from provider {provider_name}: {e}")
             continue
 
     return ModelsResponse(data=models)
@@ -96,20 +98,22 @@ async def list_models(
 
 class RouteRequest(BaseModel):
     """Request for route debugging."""
+
     model: str
     task: str = "chat"
-    preferred_provider: Optional[str] = None
+    preferred_provider: str | None = None
     fallback_allowed: bool = True
 
 
 class RouteResponse(BaseModel):
     """Response for route debugging."""
+
     resolved_provider: str
     resolved_model: str
     fallback_chain: list[str]
     provider_healthy: bool
     would_fallback: bool
-    reason: Optional[str] = None
+    reason: str | None = None
 
 
 @router.post("/v1/devmesh/route", response_model=RouteResponse)
@@ -163,6 +167,7 @@ async def debug_route(
 
 class ProviderStatus(BaseModel):
     """Detailed provider status."""
+
     name: str
     type: str
     enabled: bool
@@ -175,6 +180,7 @@ class ProviderStatus(BaseModel):
 
 class ProvidersResponse(BaseModel):
     """Response for providers list."""
+
     providers: list[ProviderStatus]
 
 
@@ -203,16 +209,18 @@ async def list_providers(
             except Exception:
                 pass
 
-        providers.append(ProviderStatus(
-            name=provider_config.name,
-            type=provider_config.type.value,
-            enabled=provider_config.enabled,
-            healthy=status_enum == HealthStatus.HEALTHY if status_enum else False,
-            status=status_enum.value if status_enum else "unknown",
-            base_url=provider_config.base_url,
-            models=models,
-            capabilities=capabilities,
-        ))
+        providers.append(
+            ProviderStatus(
+                name=provider_config.name,
+                type=provider_config.type.value,
+                enabled=provider_config.enabled,
+                healthy=status_enum == HealthStatus.HEALTHY if status_enum else False,
+                status=status_enum.value if status_enum else "unknown",
+                base_url=provider_config.base_url,
+                models=models,
+                capabilities=capabilities,
+            )
+        )
 
     return ProvidersResponse(providers=providers)
 
@@ -243,17 +251,19 @@ async def check_provider_health(
 
 class CatalogModel(BaseModel):
     """Model discovered from an endpoint."""
+
     name: str
     endpoint: str
     discovered_at: str
-    size_bytes: Optional[int] = None
-    family: Optional[str] = None
-    parameter_size: Optional[str] = None
-    quantization: Optional[str] = None
+    size_bytes: int | None = None
+    family: str | None = None
+    parameter_size: str | None = None
+    quantization: str | None = None
 
 
 class CatalogEndpoint(BaseModel):
     """Endpoint with its discovered models."""
+
     name: str
     type: str
     url: str
@@ -265,7 +275,8 @@ class CatalogEndpoint(BaseModel):
 
 class CatalogResponse(BaseModel):
     """Response for catalog endpoint."""
-    last_discovery: Optional[str] = None
+
+    last_discovery: str | None = None
     endpoints: list[CatalogEndpoint]
     models: list[CatalogModel]
     total_models: int
@@ -289,27 +300,31 @@ async def get_catalog(
 
         models = catalog.get_models_for_endpoint(endpoint_config.name)
 
-        endpoints.append(CatalogEndpoint(
-            name=endpoint_config.name,
-            type=endpoint_config.type.value,
-            url=endpoint_config.url,
-            enabled=endpoint_config.enabled,
-            healthy=status_enum == HealthStatus.HEALTHY,
-            labels=endpoint_config.labels,
-            models=models,
-        ))
+        endpoints.append(
+            CatalogEndpoint(
+                name=endpoint_config.name,
+                type=endpoint_config.type.value,
+                url=endpoint_config.url,
+                enabled=endpoint_config.enabled,
+                healthy=status_enum == HealthStatus.HEALTHY,
+                labels=endpoint_config.labels,
+                models=models,
+            )
+        )
 
     models = []
     for discovered in catalog.discovered:
-        models.append(CatalogModel(
-            name=discovered.name,
-            endpoint=discovered.endpoint,
-            discovered_at=discovered.discovered_at.isoformat(),
-            size_bytes=discovered.size_bytes,
-            family=discovered.family,
-            parameter_size=discovered.parameter_size,
-            quantization=discovered.quantization,
-        ))
+        models.append(
+            CatalogModel(
+                name=discovered.name,
+                endpoint=discovered.endpoint,
+                discovered_at=discovered.discovered_at.isoformat(),
+                size_bytes=discovered.size_bytes,
+                family=discovered.family,
+                parameter_size=discovered.parameter_size,
+                quantization=discovered.quantization,
+            )
+        )
 
     return CatalogResponse(
         last_discovery=catalog.last_discovery.isoformat() if catalog.last_discovery else None,

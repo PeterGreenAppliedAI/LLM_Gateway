@@ -9,10 +9,11 @@ Default: SQLite (zero config)
 Production: PostgreSQL recommended
 """
 
-from gateway.storage.schema import metadata, audit_log, usage_daily, api_keys
-from gateway.storage.engine import create_async_db_engine, DatabaseConfig
 from gateway.storage.audit import AuditLogger
+from gateway.storage.engine import DatabaseConfig, create_async_db_engine
 from gateway.storage.keys import KeyManager
+from gateway.storage.schema import api_keys, audit_log, metadata, security_scans, usage_daily
+from gateway.storage.security_store import SecurityScanStore
 
 __all__ = [
     # Schema
@@ -20,6 +21,7 @@ __all__ = [
     "audit_log",
     "usage_daily",
     "api_keys",
+    "security_scans",
     # Engine
     "create_async_db_engine",
     "DatabaseConfig",
@@ -27,4 +29,6 @@ __all__ = [
     "AuditLogger",
     # Keys
     "KeyManager",
+    # Security scans
+    "SecurityScanStore",
 ]

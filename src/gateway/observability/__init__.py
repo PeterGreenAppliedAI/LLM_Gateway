@@ -20,15 +20,15 @@ Metrics tracked:
 """
 
 from gateway.observability.logging import (
-    get_logger,
-    configure_logging,
-    RequestContext,
     LogConfig,
+    RequestContext,
+    configure_logging,
+    get_logger,
 )
 from gateway.observability.metrics import (
     MetricsCollector,
-    get_metrics,
     MetricsConfig,
+    get_metrics,
 )
 
 __all__ = [

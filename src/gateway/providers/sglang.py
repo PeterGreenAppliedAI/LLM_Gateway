@@ -7,15 +7,13 @@ This adapter provides the interface but methods return NotImplementedError
 until full support is added.
 """
 
-from typing import AsyncIterator
-
 from gateway.config import ProviderConfig
 from gateway.models.common import (
     HealthStatus,
     ModelInfo,
     ProviderType,
 )
-from gateway.models.internal import InternalRequest, InternalResponse, StreamChunk
+from gateway.models.internal import InternalRequest, InternalResponse
 from gateway.providers.base import ProviderAdapter
 
 

@@ -14,28 +14,26 @@ Per Endpoints/Environments Architecture:
 
 import re
 import secrets
-from typing import Annotated, Optional
+from typing import Annotated
 from uuid import uuid4
 
 from fastapi import Depends, Header, Request
 
-from gateway.config import GatewayConfig, EnvironmentConfig
+from gateway.config import EnvironmentConfig, GatewayConfig
 from gateway.dispatch import Dispatcher, ProviderRegistry
 from gateway.errors import (
     AuthenticationError,
+    ErrorCode,
     InvalidApiKeyError,
     InvalidApiKeyFormatError,
-    RateLimitError,
     PolicyError,
-    TokenLimitError,
-    ProviderNotAllowedError,
-    ErrorCode,
+    RateLimitError,
 )
-from gateway.observability import get_logger, get_metrics, RequestContext
-from gateway.observability.logging import set_request_context, clear_request_context
+from gateway.observability import RequestContext, get_logger
+from gateway.observability.logging import clear_request_context, set_request_context
 from gateway.policy import PolicyEnforcer, PolicyViolation
-from gateway.policy.token_budget import TokenBudgetTracker, TokenBudgetExceeded
-from gateway.security import AsyncSecurityAnalyzer, Sanitizer, PIIScrubber
+from gateway.policy.token_budget import TokenBudgetTracker
+from gateway.security import AsyncSecurityAnalyzer, PIIScrubber, Sanitizer
 from gateway.storage import AuditLogger
 
 logger = get_logger(__name__)
@@ -76,8 +74,7 @@ async def get_registry(request: Request) -> ProviderRegistry:
 
 
 def get_dispatcher(
-    request: Request,
-    registry: Annotated[ProviderRegistry, Depends(get_registry)]
+    request: Request, registry: Annotated[ProviderRegistry, Depends(get_registry)]
 ) -> Dispatcher:
     """Get dispatcher instance with resolution config."""
     config = get_config(request)
@@ -99,8 +96,12 @@ def get_enforcer(request: Request) -> PolicyEnforcer:
             # Bridge gateway.yaml rate_limits + token_budgets into PolicyConfig
             from gateway.policy.enforcer import PolicyConfig
             from gateway.policy.rate_limiter import RateLimitConfig as PolicyRateLimitConfig
+            from gateway.policy.token_budget import (
+                ModelAssignment,
+                ModelTierConfig,
+                TokenBudgetConfig,
+            )
             from gateway.policy.token_limiter import TokenLimitConfig
-            from gateway.policy.token_budget import TokenBudgetConfig, ModelTierConfig, ModelAssignment
 
             # Build token budget config from yaml
             budget_cfg = config.token_budgets
@@ -138,7 +139,7 @@ def get_enforcer(request: Request) -> PolicyEnforcer:
     return enforcer
 
 
-def get_audit_logger(request: Request) -> Optional[AuditLogger]:
+def get_audit_logger(request: Request) -> AuditLogger | None:
     """Get audit logger from app state.
 
     Returns None if database is not configured or failed to initialize.
@@ -196,6 +197,7 @@ async def validate_api_key(
     # Source 2: DB-backed keys (async hash lookup)
     if db_engine is not None:
         from gateway.storage.keys import KeyManager
+
         km = KeyManager(db_engine)
         key_info = await km.validate_plaintext_key(api_key)
         if key_info is not None:
@@ -232,8 +234,8 @@ class AuthResult:
 
 async def authenticate(
     request: Request,
-    authorization: Annotated[Optional[str], Header()] = None,
-    x_api_key: Annotated[Optional[str], Header(alias="X-API-Key")] = None,
+    authorization: Annotated[str | None, Header()] = None,
+    x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
 ) -> str:
     """Authenticate request and return client_id.
 
@@ -257,8 +259,8 @@ async def authenticate(
 
 async def require_admin(
     request: Request,
-    authorization: Annotated[Optional[str], Header()] = None,
-    x_api_key: Annotated[Optional[str], Header(alias="X-API-Key")] = None,
+    authorization: Annotated[str | None, Header()] = None,
+    x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
 ) -> str:
     """Require admin authentication for sensitive management endpoints.
 
@@ -271,6 +273,7 @@ async def require_admin(
         AuthenticationError: If admin auth fails
     """
     from gateway.settings import get_settings
+
     settings = get_settings()
 
     # If no admin key configured, fall back to standard auth
@@ -299,8 +302,8 @@ async def require_admin(
 
 async def get_auth(
     request: Request,
-    authorization: Annotated[Optional[str], Header()] = None,
-    x_api_key: Annotated[Optional[str], Header(alias="X-API-Key")] = None,
+    authorization: Annotated[str | None, Header()] = None,
+    x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
 ) -> AuthResult:
     """Authenticate request and return full AuthResult.
 
@@ -317,8 +320,8 @@ async def get_auth(
 
 async def authenticate_with_environment(
     request: Request,
-    authorization: Annotated[Optional[str], Header()] = None,
-    x_api_key: Annotated[Optional[str], Header(alias="X-API-Key")] = None,
+    authorization: Annotated[str | None, Header()] = None,
+    x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
 ) -> AuthResult:
     """Authenticate request and return client_id with environment.
 
@@ -369,9 +372,9 @@ async def authenticate_with_environment(
 
 async def get_environment(
     request: Request,
-    x_environment: Annotated[Optional[str], Header(alias="X-Environment")] = None,
-    authorization: Annotated[Optional[str], Header()] = None,
-    x_api_key: Annotated[Optional[str], Header(alias="X-API-Key")] = None,
+    x_environment: Annotated[str | None, Header(alias="X-Environment")] = None,
+    authorization: Annotated[str | None, Header()] = None,
+    x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
 ) -> EnvironmentConfig | None:
     """Get environment configuration for the request.
 
@@ -404,9 +407,7 @@ async def get_environment(
     # Priority 2: From API key
     if not env_name:
         try:
-            auth_result = await authenticate_with_environment(
-                request, authorization, x_api_key
-            )
+            auth_result = await authenticate_with_environment(request, authorization, x_api_key)
             env_name = auth_result.environment
         except AuthenticationError:
             # Auth failed, will use default
@@ -422,12 +423,12 @@ async def get_environment(
 
 
 def setup_request_context(
-    request_id: Optional[str] = None,
+    request_id: str | None = None,
     client_id: str = "default",
-    user_id: Optional[str] = None,
-    provider: Optional[str] = None,
-    model: Optional[str] = None,
-    task: Optional[str] = None,
+    user_id: str | None = None,
+    provider: str | None = None,
+    model: str | None = None,
+    task: str | None = None,
 ) -> RequestContext:
     """Create and set request context for logging and metrics.
 
@@ -522,7 +523,7 @@ def get_sanitizer() -> Sanitizer:
     return _sanitizer
 
 
-def get_security_analyzer(request: Request) -> Optional[AsyncSecurityAnalyzer]:
+def get_security_analyzer(request: Request) -> AsyncSecurityAnalyzer | None:
     """Get the security analyzer from app state.
 
     Returns None if analyzer is not initialized.
@@ -531,12 +532,12 @@ def get_security_analyzer(request: Request) -> Optional[AsyncSecurityAnalyzer]:
     return getattr(request.app.state, "security_analyzer", None)
 
 
-def get_token_budget(request: Request) -> Optional[TokenBudgetTracker]:
+def get_token_budget(request: Request) -> TokenBudgetTracker | None:
     """Get token budget tracker from app state, or None if not enabled."""
     return getattr(request.app.state, "token_budget_tracker", None)
 
 
-def get_pii_scrubber(request: Request) -> Optional[PIIScrubber]:
+def get_pii_scrubber(request: Request) -> PIIScrubber | None:
     """Get PII scrubber from app state, or None if not enabled."""
     return getattr(request.app.state, "pii_scrubber", None)
 
