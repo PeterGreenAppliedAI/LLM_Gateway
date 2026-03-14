@@ -499,8 +499,12 @@ class TierCreateRequest(BaseModel):
     """Request to create or update a cost tier."""
 
     name: str = Field(description="Tier name (e.g., frontier, standard, embedding)")
-    cost_multiplier: float = Field(description="Cost multiplier (1.0 = baseline)", ge=0.0, le=1000.0)
-    daily_limit: int | None = Field(default=None, description="Optional daily token cap for this tier", ge=0)
+    cost_multiplier: float = Field(
+        description="Cost multiplier (1.0 = baseline)", ge=0.0, le=1000.0
+    )
+    daily_limit: int | None = Field(
+        default=None, description="Optional daily token cap for this tier", ge=0
+    )
 
 
 @router.post("/api/budget/tiers")
@@ -535,7 +539,10 @@ async def delete_tier(
     if not removed:
         if tier_name not in tracker.tiers:
             return {"status": "error", "message": f"Tier '{tier_name}' not found"}
-        return {"status": "error", "message": f"Tier '{tier_name}' still has models assigned — unassign them first"}
+        return {
+            "status": "error",
+            "message": f"Tier '{tier_name}' still has models assigned — unassign them first",
+        }
 
     return {"status": "success", "tier": tier_name}
 
