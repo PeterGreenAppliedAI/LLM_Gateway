@@ -1334,6 +1334,7 @@ function TokenBudgetSection({ budgetConfig, budgetUsage, catalog, onRefresh }: {
 }
 
 function SecurityScansSection({ onRefresh }: { onRefresh: () => void }) {
+  const [expanded, setExpanded] = useState(false)
   const [scans, setScans] = useState<SecurityScan[]>([])
   const [labelStats, setLabelStats] = useState<LabelStats | null>(null)
   const [filter, setFilter] = useState<'all' | 'unlabeled' | 'disagreements'>('unlabeled')
@@ -1420,8 +1421,18 @@ function SecurityScansSection({ onRefresh }: { onRefresh: () => void }) {
 
   return (
     <div className="mb-6">
-      <h2 className="text-lg font-semibold mb-3">Security Scan Labeling</h2>
+      <button
+        onClick={() => { setExpanded(!expanded); if (!expanded && scans.length === 0) loadScans() }}
+        className="w-full text-left flex items-center justify-between mb-3"
+      >
+        <h2 className="text-lg font-semibold flex items-center gap-2">
+          Security Scan Labeling
+          {labelStats && <span className="text-gray-400 text-sm font-normal">({labelStats.total} scans, {labelStats.unlabeled} unlabeled)</span>}
+        </h2>
+        <span className="text-gray-400">{expanded ? '▼' : '▶'}</span>
+      </button>
 
+      {!expanded ? null : <>
       {/* Label Stats */}
       {labelStats && (
         <div className="grid grid-cols-2 md:grid-cols-6 gap-3 mb-4">
@@ -1596,6 +1607,7 @@ function SecurityScansSection({ onRefresh }: { onRefresh: () => void }) {
           </>
         )}
       </div>
+      </>}
     </div>
   )
 }
@@ -1729,14 +1741,14 @@ function App() {
         onFilterChange={(d) => { guardDisagreementsRef.current = d; refresh() }}
       />
 
+      {/* Security Scan Labeling & Training Data */}
+      <SecurityScansSection onRefresh={refresh} />
+
       {/* API Keys */}
       <ApiKeysSection keys={apiKeys} onRefresh={refresh} />
 
       {/* Token Budgets */}
       <TokenBudgetSection budgetConfig={budgetConfig} budgetUsage={budgetUsage} catalog={catalog} onRefresh={refresh} />
-
-      {/* Security Scan Labeling & Training Data */}
-      <SecurityScansSection onRefresh={refresh} />
 
       {/* Endpoints */}
       <div className="mb-6">
