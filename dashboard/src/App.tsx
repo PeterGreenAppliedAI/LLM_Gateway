@@ -144,6 +144,72 @@ interface ApiKeyInfo {
   description: string | null
 }
 
+interface BudgetTier {
+  name: string
+  cost_multiplier: number
+  daily_limit: number | null
+}
+
+interface ModelClassification {
+  model: string
+  tier: string | null
+  cost_multiplier: number
+  classified: boolean
+}
+
+interface BudgetConfig {
+  enabled: boolean
+  default_daily_limit: number
+  default_cost_multiplier: number
+  enforce_pre_request: boolean
+  tiers: BudgetTier[]
+  model_assignments: Record<string, string>
+  model_classifications: ModelClassification[]
+}
+
+interface BudgetKeyUsage {
+  key: string
+  daily_limit: number
+  tokens_used: number
+  tokens_remaining: number
+  tier_usage: Record<string, number>
+  request_count?: number
+  resets_at: string
+}
+
+interface BudgetUsage {
+  enabled: boolean
+  keys: BudgetKeyUsage[]
+}
+
+interface SecurityScan {
+  request_id: string
+  timestamp: string
+  client_id: string
+  model: string | null
+  task: string | null
+  messages: { role: string; content: string }[]
+  regex_threat_level: string
+  regex_match_count: number
+  guard_safe: boolean | null
+  guard_skipped: boolean | null
+  guard_category_code: string | null
+  is_disagreement: boolean
+  label: string | null
+  label_category: string | null
+  labeled_by: string | null
+  label_notes: string | null
+}
+
+interface LabelStats {
+  total: number
+  labeled: number
+  unlabeled: number
+  safe: number
+  unsafe: number
+  disagreements: number
+}
+
 // API base URL - gateway server
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8001'
 
@@ -211,6 +277,88 @@ async function createApiKey(body: { name: string; client_id: string; description
 async function revokeApiKey(keyId: number): Promise<void> {
   const res = await fetch(`${API_BASE}/api/keys/${keyId}`, { method: 'DELETE' })
   if (!res.ok) throw new Error(`Failed to revoke key: ${res.statusText}`)
+}
+
+async function fetchBudgetConfig(): Promise<BudgetConfig> {
+  const res = await fetch(`${API_BASE}/api/budget/config`)
+  if (!res.ok) return { enabled: false, default_daily_limit: 0, default_cost_multiplier: 1, enforce_pre_request: false, tiers: [], model_assignments: {}, model_classifications: [] }
+  return res.json()
+}
+
+async function fetchBudgetUsage(): Promise<BudgetUsage> {
+  const res = await fetch(`${API_BASE}/api/budget/usage`)
+  if (!res.ok) return { enabled: false, keys: [] }
+  return res.json()
+}
+
+async function createTier(name: string, costMultiplier: number, dailyLimit?: number): Promise<{ status: string }> {
+  const res = await fetch(`${API_BASE}/api/budget/tiers`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, cost_multiplier: costMultiplier, daily_limit: dailyLimit }),
+  })
+  return res.json()
+}
+
+async function deleteTier(name: string): Promise<{ status: string; message?: string }> {
+  const res = await fetch(`${API_BASE}/api/budget/tiers/${encodeURIComponent(name)}`, { method: 'DELETE' })
+  return res.json()
+}
+
+async function assignModelTier(model: string, tier: string): Promise<{ status: string; message?: string }> {
+  const res = await fetch(`${API_BASE}/api/budget/assignments`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model, tier }),
+  })
+  return res.json()
+}
+
+async function unassignModelTier(model: string): Promise<{ status: string }> {
+  const res = await fetch(`${API_BASE}/api/budget/assignments/${encodeURIComponent(model)}`, { method: 'DELETE' })
+  return res.json()
+}
+
+async function fetchSecurityScans(params: { limit?: number; offset?: number; unlabeled_only?: boolean; disagreements_only?: boolean; min_threat_level?: string } = {}): Promise<{ scans: SecurityScan[]; total: number }> {
+  const searchParams = new URLSearchParams()
+  if (params.limit) searchParams.set('limit', String(params.limit))
+  if (params.offset) searchParams.set('offset', String(params.offset))
+  if (params.unlabeled_only) searchParams.set('unlabeled_only', 'true')
+  if (params.disagreements_only) searchParams.set('disagreements_only', 'true')
+  if (params.min_threat_level) searchParams.set('min_threat_level', params.min_threat_level)
+  const res = await fetch(`${API_BASE}/api/security/scans?${searchParams}`)
+  if (!res.ok) return { scans: [], total: 0 }
+  return res.json()
+}
+
+async function labelScan(requestId: string, label: string, labelCategory?: string, notes?: string): Promise<{ status: string }> {
+  const res = await fetch(`${API_BASE}/api/security/scans/${encodeURIComponent(requestId)}/label`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ label, label_category: labelCategory, notes }),
+  })
+  return res.json()
+}
+
+async function bulkLabelScans(requestIds: string[], label: string, labelCategory?: string): Promise<{ status: string; labeled: number }> {
+  const res = await fetch(`${API_BASE}/api/security/scans/bulk-label`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ request_ids: requestIds, label, label_category: labelCategory }),
+  })
+  return res.json()
+}
+
+async function fetchLabelStats(): Promise<LabelStats> {
+  const res = await fetch(`${API_BASE}/api/security/scans/stats`)
+  if (!res.ok) return { total: 0, labeled: 0, unlabeled: 0, safe: 0, unsafe: 0, disagreements: 0 }
+  return res.json()
+}
+
+async function exportTrainingData(format: string = 'llama_guard'): Promise<{ count: number; examples: unknown[] }> {
+  const res = await fetch(`${API_BASE}/api/security/training-data?format=${format}`)
+  if (!res.ok) return { count: 0, examples: [] }
+  return res.json()
 }
 
 // Components
@@ -845,6 +993,613 @@ function ApiKeysSection({ keys, onRefresh }: { keys: ApiKeyInfo[]; onRefresh: ()
   )
 }
 
+function TokenBudgetSection({ budgetConfig, budgetUsage, catalog, onRefresh }: {
+  budgetConfig: BudgetConfig | null
+  budgetUsage: BudgetUsage | null
+  catalog: Catalog | null
+  onRefresh: () => void
+}) {
+  const [assignModel, setAssignModel] = useState('')
+  const [assignTier, setAssignTier] = useState('')
+  const [assigning, setAssigning] = useState(false)
+  const [showCreateTier, setShowCreateTier] = useState(false)
+  const [newTierName, setNewTierName] = useState('')
+  const [newTierMultiplier, setNewTierMultiplier] = useState('1.0')
+  const [newTierLimit, setNewTierLimit] = useState('')
+  const [creatingTier, setCreatingTier] = useState(false)
+  const [showClassifications, setShowClassifications] = useState(false)
+
+  if (!budgetConfig) return null
+
+  // Build model list from catalog (already fetched and working) merged with classification data
+  const classificationMap = new Map(budgetConfig.model_classifications.map(m => [m.model, m]))
+  const allModels: string[] = []
+  if (catalog) {
+    for (const ep of catalog.endpoints) {
+      for (const model of ep.models) {
+        if (!allModels.includes(model)) allModels.push(model)
+      }
+    }
+  }
+  // Also include any models from classifications not in catalog
+  for (const mc of budgetConfig.model_classifications) {
+    if (!allModels.includes(mc.model)) allModels.push(mc.model)
+  }
+  allModels.sort()
+
+  // Classify using the map, fallback to unclassified
+  const allClassified = allModels.map(name => {
+    const mc = classificationMap.get(name)
+    return mc || { model: name, tier: null, cost_multiplier: budgetConfig.default_cost_multiplier, classified: false }
+  })
+
+  const handleAssign = async () => {
+    if (!assignModel || !assignTier) return
+    setAssigning(true)
+    try {
+      const result = await assignModelTier(assignModel, assignTier)
+      if (result.status === 'success') {
+        setAssignModel('')
+        setAssignTier('')
+        onRefresh()
+      }
+    } catch (e) {
+      console.error('Failed to assign:', e)
+    } finally {
+      setAssigning(false)
+    }
+  }
+
+  const handleUnassign = async (model: string) => {
+    try {
+      await unassignModelTier(model)
+      onRefresh()
+    } catch (e) {
+      console.error('Failed to unassign:', e)
+    }
+  }
+
+  const unclassified = allClassified.filter(m => !m.classified)
+  const classified = allClassified.filter(m => m.classified)
+
+  return (
+    <div className="mb-6">
+      <h2 className="text-lg font-semibold mb-3 flex items-center gap-2">
+        Token Budgets
+        {budgetConfig.enabled ? (
+          <span className="bg-green-900 text-green-300 px-2 py-0.5 rounded-full text-xs">Enabled</span>
+        ) : (
+          <span className="bg-gray-700 text-gray-400 px-2 py-0.5 rounded-full text-xs">Disabled</span>
+        )}
+      </h2>
+
+      {/* Budget Config Overview */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+        <div className="bg-gray-800 rounded-lg p-3 border border-gray-700">
+          <div className="text-gray-400 text-xs">Daily Limit</div>
+          <div className="text-xl font-bold">{budgetConfig.default_daily_limit.toLocaleString()}</div>
+          <div className="text-gray-500 text-xs">tokens/key</div>
+        </div>
+        <div className="bg-gray-800 rounded-lg p-3 border border-gray-700">
+          <div className="text-gray-400 text-xs">Default Multiplier</div>
+          <div className="text-xl font-bold">{budgetConfig.default_cost_multiplier}x</div>
+          <div className="text-gray-500 text-xs">unclassified models</div>
+        </div>
+        <div className="bg-gray-800 rounded-lg p-3 border border-gray-700">
+          <div className="text-gray-400 text-xs">Tiers</div>
+          <div className="text-xl font-bold">{budgetConfig.tiers.length}</div>
+        </div>
+        <div className="bg-gray-800 rounded-lg p-3 border border-orange-800">
+          <div className="text-orange-400 text-xs">Unclassified</div>
+          <div className="text-xl font-bold text-orange-400">{unclassified.length}</div>
+          <div className="text-gray-500 text-xs">using default rate</div>
+        </div>
+      </div>
+
+      {/* Tiers */}
+      <div className="bg-gray-800 rounded-lg border border-gray-700 p-4 mb-4">
+        <div className="flex items-center justify-between mb-2">
+          <h3 className="text-sm font-semibold text-gray-300">Cost Tiers</h3>
+          <button
+            onClick={() => setShowCreateTier(!showCreateTier)}
+            className="bg-blue-600 hover:bg-blue-700 px-3 py-1 rounded text-xs"
+          >
+            {showCreateTier ? 'Cancel' : 'Add Tier'}
+          </button>
+        </div>
+        {showCreateTier && (
+          <div className="bg-gray-900 rounded p-3 mb-3 flex gap-2 items-end">
+            <div>
+              <label className="text-gray-400 text-xs block mb-1">Name</label>
+              <input type="text" value={newTierName} onChange={e => setNewTierName(e.target.value)} placeholder="e.g. standard" className="bg-gray-800 border border-gray-600 rounded px-2 py-1.5 text-sm w-32" />
+            </div>
+            <div>
+              <label className="text-gray-400 text-xs block mb-1">Multiplier</label>
+              <input type="number" value={newTierMultiplier} onChange={e => setNewTierMultiplier(e.target.value)} step="0.1" min="0" className="bg-gray-800 border border-gray-600 rounded px-2 py-1.5 text-sm w-24" />
+            </div>
+            <div>
+              <label className="text-gray-400 text-xs block mb-1">Daily Limit (optional)</label>
+              <input type="number" value={newTierLimit} onChange={e => setNewTierLimit(e.target.value)} placeholder="unlimited" min="0" className="bg-gray-800 border border-gray-600 rounded px-2 py-1.5 text-sm w-32" />
+            </div>
+            <button
+              disabled={creatingTier || !newTierName}
+              onClick={async () => {
+                setCreatingTier(true)
+                try {
+                  await createTier(newTierName, parseFloat(newTierMultiplier) || 1.0, newTierLimit ? parseInt(newTierLimit) : undefined)
+                  setNewTierName(''); setNewTierMultiplier('1.0'); setNewTierLimit(''); setShowCreateTier(false)
+                  onRefresh()
+                } catch (e) { console.error('Failed to create tier:', e) }
+                finally { setCreatingTier(false) }
+              }}
+              className="bg-green-600 hover:bg-green-700 disabled:opacity-50 px-3 py-1.5 rounded text-xs whitespace-nowrap"
+            >
+              {creatingTier ? 'Creating...' : 'Create'}
+            </button>
+          </div>
+        )}
+        {budgetConfig.tiers.length > 0 ? (
+          <div className="flex flex-wrap gap-3">
+            {budgetConfig.tiers.map(tier => (
+              <div key={tier.name} className="bg-gray-900 rounded px-3 py-2 border border-gray-700 flex items-start gap-2">
+                <div>
+                  <div className="font-semibold text-sm">{tier.name}</div>
+                  <div className="text-gray-400 text-xs">{tier.cost_multiplier}x multiplier</div>
+                  {tier.daily_limit && <div className="text-gray-500 text-xs">{tier.daily_limit.toLocaleString()} daily cap</div>}
+                </div>
+                <button
+                  onClick={async () => {
+                    const result = await deleteTier(tier.name)
+                    if (result.status === 'error') alert(result.message)
+                    else onRefresh()
+                  }}
+                  className="text-red-400 hover:text-red-300 text-xs mt-0.5"
+                  title="Delete tier"
+                >&times;</button>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div>
+            <div className="text-gray-500 text-sm mb-2">No tiers configured yet.</div>
+            <button
+              onClick={async () => {
+                const defaults = [
+                  { name: 'frontier', multiplier: 15.0 },
+                  { name: 'midrange', multiplier: 3.0 },
+                  { name: 'standard', multiplier: 1.0 },
+                  { name: 'embedding', multiplier: 0.1 },
+                ]
+                for (const d of defaults) {
+                  await createTier(d.name, d.multiplier)
+                }
+                onRefresh()
+              }}
+              className="bg-blue-600 hover:bg-blue-700 px-3 py-1.5 rounded text-xs"
+            >
+              Create Default Tiers (frontier 15x, midrange 3x, standard 1x, embedding 0.1x)
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* Assign Model to Tier */}
+      <div className="bg-gray-800 rounded-lg border border-gray-700 p-4 mb-4">
+        <h3 className="text-sm font-semibold text-gray-300 mb-2">Assign Model to Tier</h3>
+        <div className="flex gap-2 items-end">
+          <div className="flex-1">
+            <label className="text-gray-400 text-xs block mb-1">Model</label>
+            {allModels.length > 0 ? (
+              <select
+                value={assignModel}
+                onChange={e => setAssignModel(e.target.value)}
+                className="bg-gray-900 border border-gray-600 rounded px-3 py-2 w-full text-sm"
+              >
+                <option value="">Select model...</option>
+                {unclassified.length > 0 && <optgroup label="Unclassified">
+                  {unclassified.map(m => (
+                    <option key={m.model} value={m.model}>{m.model} ({m.cost_multiplier}x)</option>
+                  ))}
+                </optgroup>}
+                {classified.length > 0 && <optgroup label="Classified">
+                  {classified.map(m => (
+                    <option key={m.model} value={m.model}>{m.model} ({m.tier} - {m.cost_multiplier}x)</option>
+                  ))}
+                </optgroup>}
+              </select>
+            ) : (
+              <input
+                type="text"
+                value={assignModel}
+                onChange={e => setAssignModel(e.target.value)}
+                placeholder="e.g. llama3.2 or llama-*"
+                className="bg-gray-900 border border-gray-600 rounded px-3 py-2 w-full text-sm"
+              />
+            )}
+          </div>
+          <div className="w-48">
+            <label className="text-gray-400 text-xs block mb-1">Tier</label>
+            <select
+              value={assignTier}
+              onChange={e => setAssignTier(e.target.value)}
+              className="bg-gray-900 border border-gray-600 rounded px-3 py-2 w-full text-sm"
+            >
+              <option value="">Select tier...</option>
+              {budgetConfig.tiers.map(t => (
+                <option key={t.name} value={t.name}>{t.name} ({t.cost_multiplier}x)</option>
+              ))}
+            </select>
+          </div>
+          <button
+            onClick={handleAssign}
+            disabled={assigning || !assignModel || !assignTier}
+            className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 px-4 py-2 rounded text-sm whitespace-nowrap"
+          >
+            {assigning ? 'Assigning...' : 'Assign'}
+          </button>
+        </div>
+      </div>
+
+      {/* Model Classifications Table — Collapsible */}
+      <div className="bg-gray-800 rounded-lg border border-gray-700 overflow-hidden mb-4">
+        <button
+          onClick={() => setShowClassifications(!showClassifications)}
+          className="w-full text-left p-3 border-b border-gray-700 flex items-center justify-between hover:bg-gray-750"
+        >
+          <h3 className="text-sm font-semibold text-gray-300">
+            Model Classifications ({allClassified.length} models, {unclassified.length} unclassified)
+          </h3>
+          <span className="text-gray-400">{showClassifications ? '▼' : '▶'}</span>
+        </button>
+        {showClassifications && <table className="w-full">
+          <thead className="bg-gray-750 border-b border-gray-700">
+            <tr className="text-left text-gray-400 text-sm">
+              <th className="py-2 px-3">Model</th>
+              <th className="py-2 px-3">Tier</th>
+              <th className="py-2 px-3 text-right">Multiplier</th>
+              <th className="py-2 px-3"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {allClassified.map(m => (
+              <tr key={m.model} className={`border-b border-gray-700 ${!m.classified ? 'bg-orange-900/10' : ''}`}>
+                <td className="py-2 px-3 font-mono text-sm">{m.model}</td>
+                <td className="py-2 px-3">
+                  {m.classified ? (
+                    <span className="px-2 py-0.5 rounded text-xs bg-blue-900 text-blue-300">{m.tier}</span>
+                  ) : (
+                    <span className="px-2 py-0.5 rounded text-xs bg-orange-900 text-orange-300">unclassified</span>
+                  )}
+                </td>
+                <td className="py-2 px-3 text-right text-sm">{m.cost_multiplier}x</td>
+                <td className="py-2 px-3 text-right">
+                  {m.classified && (
+                    <button
+                      onClick={() => handleUnassign(m.model)}
+                      className="text-red-400 hover:text-red-300 text-xs"
+                    >
+                      Remove
+                    </button>
+                  )}
+                </td>
+              </tr>
+            ))}
+            {allClassified.length === 0 && (
+              <tr><td colSpan={4} className="py-8 text-center text-gray-500">No models discovered yet</td></tr>
+            )}
+          </tbody>
+        </table>}
+      </div>
+
+      {/* Per-Key Usage */}
+      {budgetUsage && budgetUsage.enabled && budgetUsage.keys.length > 0 && (
+        <div className="bg-gray-800 rounded-lg border border-gray-700 overflow-hidden">
+          <h3 className="text-sm font-semibold text-gray-300 p-3 border-b border-gray-700">Per-Key Budget Usage</h3>
+          <table className="w-full">
+            <thead className="bg-gray-750 border-b border-gray-700">
+              <tr className="text-left text-gray-400 text-sm">
+                <th className="py-2 px-3">Key</th>
+                <th className="py-2 px-3 text-right">Used</th>
+                <th className="py-2 px-3 text-right">Remaining</th>
+                <th className="py-2 px-3 text-right">Limit</th>
+                <th className="py-2 px-3">Usage</th>
+              </tr>
+            </thead>
+            <tbody>
+              {budgetUsage.keys.map(k => {
+                const pct = k.daily_limit > 0 ? (k.tokens_used / k.daily_limit) * 100 : 0
+                return (
+                  <tr key={k.key} className="border-b border-gray-700">
+                    <td className="py-2 px-3 font-mono text-sm">{k.key.slice(0, 12)}...</td>
+                    <td className="py-2 px-3 text-right text-sm">{k.tokens_used.toLocaleString()}</td>
+                    <td className="py-2 px-3 text-right text-sm">{k.tokens_remaining.toLocaleString()}</td>
+                    <td className="py-2 px-3 text-right text-sm">{k.daily_limit.toLocaleString()}</td>
+                    <td className="py-2 px-3 w-32">
+                      <div className="bg-gray-700 rounded-full h-2">
+                        <div
+                          className={`h-2 rounded-full ${pct > 90 ? 'bg-red-500' : pct > 70 ? 'bg-yellow-500' : 'bg-green-500'}`}
+                          style={{ width: `${Math.min(pct, 100)}%` }}
+                        />
+                      </div>
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function SecurityScansSection({ onRefresh }: { onRefresh: () => void }) {
+  const [scans, setScans] = useState<SecurityScan[]>([])
+  const [labelStats, setLabelStats] = useState<LabelStats | null>(null)
+  const [filter, setFilter] = useState<'all' | 'unlabeled' | 'disagreements'>('unlabeled')
+  const [selectedScans, setSelectedScans] = useState<Set<string>>(new Set())
+  const [expandedScan, setExpandedScan] = useState<string | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [exportFormat, setExportFormat] = useState<'llama_guard' | 'raw'>('llama_guard')
+  const [exportResult, setExportResult] = useState<{ count: number } | null>(null)
+
+  const loadScans = useCallback(async () => {
+    setLoading(true)
+    try {
+      const [scansData, statsData] = await Promise.all([
+        fetchSecurityScans({
+          limit: 50,
+          unlabeled_only: filter === 'unlabeled',
+          disagreements_only: filter === 'disagreements',
+        }),
+        fetchLabelStats(),
+      ])
+      setScans(scansData.scans)
+      setLabelStats(statsData)
+    } catch (e) {
+      console.error('Failed to load scans:', e)
+    } finally {
+      setLoading(false)
+    }
+  }, [filter])
+
+  useEffect(() => {
+    loadScans()
+  }, [loadScans])
+
+  const handleLabel = async (requestId: string, label: string, category?: string) => {
+    await labelScan(requestId, label, category)
+    setSelectedScans(prev => { const next = new Set(prev); next.delete(requestId); return next })
+    loadScans()
+    onRefresh()
+  }
+
+  const handleBulkLabel = async (label: string) => {
+    if (selectedScans.size === 0) return
+    await bulkLabelScans(Array.from(selectedScans), label)
+    setSelectedScans(new Set())
+    loadScans()
+    onRefresh()
+  }
+
+  const toggleSelect = (id: string) => {
+    setSelectedScans(prev => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  const toggleSelectAll = () => {
+    if (selectedScans.size === scans.length) {
+      setSelectedScans(new Set())
+    } else {
+      setSelectedScans(new Set(scans.map(s => s.request_id)))
+    }
+  }
+
+  const handleExport = async () => {
+    try {
+      const result = await exportTrainingData(exportFormat)
+      setExportResult({ count: result.count })
+      // Trigger download
+      const blob = new Blob([JSON.stringify(result.examples, null, 2)], { type: 'application/json' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `training-data-${exportFormat}-${new Date().toISOString().slice(0, 10)}.json`
+      a.click()
+      URL.revokeObjectURL(url)
+    } catch (e) {
+      console.error('Export failed:', e)
+    }
+  }
+
+  const progressPct = labelStats && labelStats.total > 0 ? (labelStats.labeled / labelStats.total) * 100 : 0
+
+  return (
+    <div className="mb-6">
+      <h2 className="text-lg font-semibold mb-3">Security Scan Labeling</h2>
+
+      {/* Label Stats */}
+      {labelStats && (
+        <div className="grid grid-cols-2 md:grid-cols-6 gap-3 mb-4">
+          <div className="bg-gray-800 rounded-lg p-3 border border-gray-700">
+            <div className="text-gray-400 text-xs">Total Scans</div>
+            <div className="text-xl font-bold">{labelStats.total}</div>
+          </div>
+          <div className="bg-gray-800 rounded-lg p-3 border border-green-800">
+            <div className="text-green-400 text-xs">Labeled</div>
+            <div className="text-xl font-bold text-green-400">{labelStats.labeled}</div>
+          </div>
+          <div className="bg-gray-800 rounded-lg p-3 border border-gray-700">
+            <div className="text-gray-400 text-xs">Unlabeled</div>
+            <div className="text-xl font-bold">{labelStats.unlabeled}</div>
+          </div>
+          <div className="bg-gray-800 rounded-lg p-3 border border-gray-700">
+            <div className="text-gray-400 text-xs">Safe</div>
+            <div className="text-xl font-bold text-green-400">{labelStats.safe}</div>
+          </div>
+          <div className="bg-gray-800 rounded-lg p-3 border border-gray-700">
+            <div className="text-gray-400 text-xs">Unsafe</div>
+            <div className="text-xl font-bold text-red-400">{labelStats.unsafe}</div>
+          </div>
+          <div className="bg-gray-800 rounded-lg p-3 border border-yellow-800">
+            <div className="text-yellow-400 text-xs">Disagreements</div>
+            <div className="text-xl font-bold text-yellow-400">{labelStats.disagreements}</div>
+          </div>
+        </div>
+      )}
+
+      {/* Progress Bar */}
+      {labelStats && labelStats.total > 0 && (
+        <div className="bg-gray-800 rounded-lg p-3 border border-gray-700 mb-4">
+          <div className="flex justify-between text-sm mb-1">
+            <span className="text-gray-400">Labeling Progress</span>
+            <span className="text-gray-300">{progressPct.toFixed(1)}% ({labelStats.labeled}/{labelStats.total})</span>
+          </div>
+          <div className="bg-gray-700 rounded-full h-3">
+            <div className="bg-green-500 h-3 rounded-full transition-all" style={{ width: `${progressPct}%` }} />
+          </div>
+        </div>
+      )}
+
+      {/* Filter + Bulk Actions + Export */}
+      <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+        <div className="flex gap-2">
+          {(['all', 'unlabeled', 'disagreements'] as const).map(f => (
+            <button
+              key={f}
+              onClick={() => setFilter(f)}
+              className={`px-3 py-1.5 rounded text-sm capitalize ${filter === f ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-400 hover:text-white'}`}
+            >
+              {f === 'all' ? 'All Scans' : f === 'unlabeled' ? 'Unlabeled' : 'Disagreements'}
+            </button>
+          ))}
+        </div>
+        <div className="flex gap-2 items-center">
+          {selectedScans.size > 0 && (
+            <>
+              <span className="text-gray-400 text-sm">{selectedScans.size} selected</span>
+              <button onClick={() => handleBulkLabel('safe')} className="bg-green-700 hover:bg-green-600 px-3 py-1.5 rounded text-xs">Mark Safe</button>
+              <button onClick={() => handleBulkLabel('unsafe')} className="bg-red-700 hover:bg-red-600 px-3 py-1.5 rounded text-xs">Mark Unsafe</button>
+            </>
+          )}
+          <div className="border-l border-gray-600 pl-2 flex gap-2 items-center">
+            <select value={exportFormat} onChange={e => setExportFormat(e.target.value as 'llama_guard' | 'raw')} className="bg-gray-800 border border-gray-600 rounded px-2 py-1.5 text-xs">
+              <option value="llama_guard">Llama Guard Format</option>
+              <option value="raw">Raw Format</option>
+            </select>
+            <button onClick={handleExport} className="bg-purple-700 hover:bg-purple-600 px-3 py-1.5 rounded text-xs">Export Training Data</button>
+            {exportResult && <span className="text-green-400 text-xs">{exportResult.count} examples exported</span>}
+          </div>
+        </div>
+      </div>
+
+      {/* Scans Table */}
+      <div className="bg-gray-800 rounded-lg border border-gray-700 overflow-hidden">
+        {loading ? (
+          <div className="p-8 text-center text-gray-500">Loading scans...</div>
+        ) : scans.length === 0 ? (
+          <div className="p-8 text-center text-gray-500">
+            {filter === 'unlabeled' ? 'No unlabeled scans' : filter === 'disagreements' ? 'No disagreements found' : 'No security scans yet'}
+          </div>
+        ) : (
+          <>
+            <table className="w-full">
+              <thead className="bg-gray-750 border-b border-gray-700">
+                <tr className="text-left text-gray-400 text-sm">
+                  <th className="py-2 px-3 w-8">
+                    <input type="checkbox" checked={selectedScans.size === scans.length && scans.length > 0} onChange={toggleSelectAll} className="rounded" />
+                  </th>
+                  <th className="py-2 px-3">Time</th>
+                  <th className="py-2 px-3">Client</th>
+                  <th className="py-2 px-3">Regex</th>
+                  <th className="py-2 px-3">Guard</th>
+                  <th className="py-2 px-3">Label</th>
+                  <th className="py-2 px-3">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {scans.map(scan => (
+                  <>
+                    <tr key={scan.request_id} className={`border-b border-gray-700 cursor-pointer hover:bg-gray-750 ${scan.is_disagreement ? 'bg-yellow-900/10' : ''}`}>
+                      <td className="py-2 px-3" onClick={e => e.stopPropagation()}>
+                        <input type="checkbox" checked={selectedScans.has(scan.request_id)} onChange={() => toggleSelect(scan.request_id)} className="rounded" />
+                      </td>
+                      <td className="py-2 px-3 text-sm text-gray-400" onClick={() => setExpandedScan(expandedScan === scan.request_id ? null : scan.request_id)}>
+                        {scan.timestamp ? formatTime(scan.timestamp) : '-'}
+                      </td>
+                      <td className="py-2 px-3 text-sm" onClick={() => setExpandedScan(expandedScan === scan.request_id ? null : scan.request_id)}>
+                        {scan.client_id}
+                      </td>
+                      <td className="py-2 px-3" onClick={() => setExpandedScan(expandedScan === scan.request_id ? null : scan.request_id)}>
+                        <span className={`px-2 py-0.5 rounded text-xs ${scan.regex_threat_level !== 'none' ? 'bg-red-900 text-red-300' : 'bg-green-900 text-green-300'}`}>
+                          {scan.regex_threat_level}
+                        </span>
+                        {scan.is_disagreement && <span className="ml-1 px-1 py-0.5 rounded text-xs bg-yellow-900 text-yellow-300">!</span>}
+                      </td>
+                      <td className="py-2 px-3" onClick={() => setExpandedScan(expandedScan === scan.request_id ? null : scan.request_id)}>
+                        {scan.guard_safe === null ? (
+                          <span className="text-gray-500 text-xs">-</span>
+                        ) : (
+                          <span className={`px-2 py-0.5 rounded text-xs ${scan.guard_safe ? 'bg-green-900 text-green-300' : 'bg-red-900 text-red-300'}`}>
+                            {scan.guard_safe ? 'safe' : 'unsafe'}
+                          </span>
+                        )}
+                      </td>
+                      <td className="py-2 px-3">
+                        {scan.label ? (
+                          <span className={`px-2 py-0.5 rounded text-xs ${scan.label === 'safe' ? 'bg-green-900 text-green-300' : 'bg-red-900 text-red-300'}`}>
+                            {scan.label}{scan.label_category ? ` (${scan.label_category})` : ''}
+                          </span>
+                        ) : (
+                          <span className="text-gray-500 text-xs">unlabeled</span>
+                        )}
+                      </td>
+                      <td className="py-2 px-3">
+                        {!scan.label && (
+                          <div className="flex gap-1">
+                            <button onClick={(e) => { e.stopPropagation(); handleLabel(scan.request_id, 'safe') }} className="bg-green-800 hover:bg-green-700 px-2 py-0.5 rounded text-xs">Safe</button>
+                            <button onClick={(e) => { e.stopPropagation(); handleLabel(scan.request_id, 'unsafe') }} className="bg-red-800 hover:bg-red-700 px-2 py-0.5 rounded text-xs">Unsafe</button>
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                    {expandedScan === scan.request_id && (
+                      <tr key={`${scan.request_id}-detail`} className="border-b border-gray-700">
+                        <td colSpan={7} className="p-3 bg-gray-900">
+                          <div className="text-xs font-mono space-y-2">
+                            <div><strong className="text-gray-400">Request ID:</strong> {scan.request_id}</div>
+                            {scan.model && <div><strong className="text-gray-400">Model:</strong> {scan.model}</div>}
+                            <div>
+                              <strong className="text-gray-400">Messages:</strong>
+                              <div className="mt-1 space-y-1">
+                                {scan.messages.map((msg, i) => (
+                                  <div key={i} className="bg-gray-800 p-2 rounded">
+                                    <span className={`font-bold ${msg.role === 'user' ? 'text-blue-400' : msg.role === 'system' ? 'text-yellow-400' : 'text-green-400'}`}>{msg.role}: </span>
+                                    <span className="text-gray-300 whitespace-pre-wrap">{msg.content}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                            {scan.label_notes && <div><strong className="text-gray-400">Notes:</strong> {scan.label_notes}</div>}
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </>
+                ))}
+              </tbody>
+            </table>
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function App() {
   const [stats, setStats] = useState<Stats | null>(null)
   const [requests, setRequests] = useState<Request[]>([])
@@ -855,6 +1610,8 @@ function App() {
   const [guardResults, setGuardResults] = useState<SecurityResult[]>([])
   const guardDisagreementsRef = useRef(false)
   const [apiKeys, setApiKeys] = useState<ApiKeyInfo[]>([])
+  const [budgetConfig, setBudgetConfig] = useState<BudgetConfig | null>(null)
+  const [budgetUsage, setBudgetUsage] = useState<BudgetUsage | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [selectedRequest, setSelectedRequest] = useState<RequestDetail | null>(null)
@@ -862,7 +1619,7 @@ function App() {
 
   const refresh = useCallback(async () => {
     try {
-      const [statsData, requestsData, catalogData, healthData, secAlertsData, secStatsData, guardData, apiKeysData] = await Promise.all([
+      const [statsData, requestsData, catalogData, healthData, secAlertsData, secStatsData, guardData, apiKeysData, budgetConfigData, budgetUsageData] = await Promise.all([
         fetchStats(),
         fetchRequests(),
         fetchCatalog(),
@@ -871,6 +1628,8 @@ function App() {
         fetchSecurityStats(),
         fetchSecurityResults(50, guardDisagreementsRef.current),
         fetchApiKeys(),
+        fetchBudgetConfig(),
+        fetchBudgetUsage(),
       ])
       setStats(statsData)
       setRequests(requestsData.requests)
@@ -880,6 +1639,8 @@ function App() {
       setSecurityStats(secStatsData)
       setGuardResults(guardData.results)
       setApiKeys(apiKeysData.keys)
+      setBudgetConfig(budgetConfigData)
+      setBudgetUsage(budgetUsageData)
       setError(null)
     } catch (e) {
       setError(`Failed to fetch data: ${e}`)
@@ -970,6 +1731,12 @@ function App() {
 
       {/* API Keys */}
       <ApiKeysSection keys={apiKeys} onRefresh={refresh} />
+
+      {/* Token Budgets */}
+      <TokenBudgetSection budgetConfig={budgetConfig} budgetUsage={budgetUsage} catalog={catalog} onRefresh={refresh} />
+
+      {/* Security Scan Labeling & Training Data */}
+      <SecurityScansSection onRefresh={refresh} />
 
       {/* Endpoints */}
       <div className="mb-6">

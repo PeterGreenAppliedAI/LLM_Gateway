@@ -408,12 +408,10 @@ async def budget_config(
     budget = config.token_budgets
     tracker = enforcer.token_budget
 
-    # Get all discovered models from catalog
-    catalog = getattr(request.app.state, "catalog", None)
-    discovered_models = []
-    if catalog:
-        for model in catalog.models:
-            discovered_models.append(model.name if hasattr(model, "name") else str(model))
+    # Get all discovered models from catalog (on registry)
+    registry = getattr(request.app.state, "registry", None)
+    catalog = registry.catalog if registry else None
+    discovered_models = catalog.get_all_models() if catalog else []
 
     # Classify each discovered model
     model_classifications = []
@@ -439,7 +437,7 @@ async def budget_config(
                 "cost_multiplier": t.cost_multiplier,
                 "daily_limit": t.daily_limit,
             }
-            for t in budget.model_tiers
+            for t in tracker.tiers.values()
         ],
         "model_assignments": tracker.model_assignments,
         "model_classifications": model_classifications,
@@ -495,6 +493,51 @@ async def budget_usage(
         "enabled": True,
         "keys": sorted(keys, key=lambda x: x["tokens_used"], reverse=True),
     }
+
+
+class TierCreateRequest(BaseModel):
+    """Request to create or update a cost tier."""
+
+    name: str = Field(description="Tier name (e.g., frontier, standard, embedding)")
+    cost_multiplier: float = Field(description="Cost multiplier (1.0 = baseline)", ge=0.0, le=1000.0)
+    daily_limit: int | None = Field(default=None, description="Optional daily token cap for this tier", ge=0)
+
+
+@router.post("/api/budget/tiers")
+async def create_tier(
+    body: TierCreateRequest,
+    _client_id: Annotated[str, Depends(authenticate)],
+    enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
+) -> dict:
+    """Create or update a cost tier at runtime (no restart needed)."""
+    tracker = enforcer.token_budget
+    is_new = tracker.add_tier(body.name, body.cost_multiplier, body.daily_limit)
+
+    return {
+        "status": "success",
+        "tier": body.name,
+        "cost_multiplier": body.cost_multiplier,
+        "daily_limit": body.daily_limit,
+        "created": is_new,
+    }
+
+
+@router.delete("/api/budget/tiers/{tier_name}")
+async def delete_tier(
+    tier_name: str,
+    _client_id: Annotated[str, Depends(authenticate)],
+    enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
+) -> dict:
+    """Remove a cost tier. Fails if models are still assigned to it."""
+    tracker = enforcer.token_budget
+    removed = tracker.remove_tier(tier_name)
+
+    if not removed:
+        if tier_name not in tracker.tiers:
+            return {"status": "error", "message": f"Tier '{tier_name}' not found"}
+        return {"status": "error", "message": f"Tier '{tier_name}' still has models assigned — unassign them first"}
+
+    return {"status": "success", "tier": tier_name}
 
 
 class ModelAssignmentRequest(BaseModel):

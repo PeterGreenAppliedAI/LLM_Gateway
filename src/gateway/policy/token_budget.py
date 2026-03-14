@@ -169,6 +169,31 @@ class TokenBudgetTracker:
         """Configured tiers."""
         return dict(self._tiers)
 
+    def add_tier(self, name: str, cost_multiplier: float, daily_limit: int | None = None) -> bool:
+        """Add or update a cost tier at runtime.
+
+        Returns True if created, False if updated.
+        """
+        is_new = name not in self._tiers
+        self._tiers[name] = ModelTierConfig(
+            name=name, cost_multiplier=cost_multiplier, daily_limit=daily_limit
+        )
+        return is_new
+
+    def remove_tier(self, name: str) -> bool:
+        """Remove a tier. Fails if models are still assigned to it.
+
+        Returns True if removed, False if not found.
+        """
+        if name not in self._tiers:
+            return False
+        # Don't remove if models reference it
+        assigned = [m for m, t in self._model_assignments.items() if t == name]
+        if assigned:
+            return False
+        del self._tiers[name]
+        return True
+
     def assign_model(self, model: str, tier_name: str) -> bool:
         """Assign a model to a tier at runtime (no restart needed).
 
