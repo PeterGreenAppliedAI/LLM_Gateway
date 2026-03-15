@@ -720,6 +720,8 @@ async def ollama_embeddings(
             endpoint=result.provider_used,
             status="success",
             latency_ms=ctx.total_latency_ms,
+            prompt_tokens=result.response.usage.prompt_tokens,
+            completion_tokens=result.response.usage.completion_tokens,
             request_body={"prompts": sanitized_prompts},
         )
 
