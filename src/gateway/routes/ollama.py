@@ -316,6 +316,13 @@ async def _stream_ollama_chat(
                     )
                     yield json.dumps(final.model_dump()) + "\n"
 
+                    final_prompt_tokens = chunk.usage.prompt_tokens if chunk.usage else 0
+                    final_completion_tokens = chunk.usage.completion_tokens if chunk.usage else 0
+                    ctx.record_complete(
+                        prompt_tokens=final_prompt_tokens,
+                        completion_tokens=final_completion_tokens,
+                    )
+
                     # Audit log
                     if audit_logger and provider_name:
                         await audit_logger.log_request(
@@ -327,6 +334,10 @@ async def _stream_ollama_chat(
                             status="success",
                             stream=True,
                             latency_ms=ctx.total_latency_ms,
+                            time_to_first_token_ms=ctx.time_to_first_token_ms,
+                            tokens_per_second=ctx.tokens_per_second,
+                            prompt_tokens=final_prompt_tokens,
+                            completion_tokens=final_completion_tokens,
                             request_body=request_body,
                         )
 

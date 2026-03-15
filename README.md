@@ -97,9 +97,20 @@ python3 -m venv venv && source venv/bin/activate
 pip install -e ".[dev]"
 
 cp config/gateway.yaml.example config/gateway.yaml
-cp .env.example .env
 # Edit gateway.yaml with your endpoint URLs
 
+# Start with the included script
+./start-gateway.sh
+```
+
+Or start manually with env vars:
+
+```bash
+GATEWAY_DB_URL="sqlite+aiosqlite:///data/gateway.db" \
+GATEWAY_DB_STORE_REQUEST_BODY=true \
+GATEWAY_DB_STORE_RESPONSE_BODY=true \
+GATEWAY_GUARD_ENABLED=true \
+GATEWAY_GUARD_BASE_URL="http://localhost:11434" \
 PYTHONPATH=src uvicorn gateway.main:app --host 0.0.0.0 --port 8001
 ```
 
