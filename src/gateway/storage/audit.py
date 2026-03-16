@@ -11,7 +11,7 @@ from sqlalchemy import Integer, and_, bindparam, case, cast, delete, func, inser
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from gateway.observability import get_logger, get_metrics
-from gateway.storage.schema import audit_log, usage_daily
+from gateway.storage.schema import audit_log, pii_events, usage_daily
 
 logger = get_logger(__name__)
 
@@ -448,3 +448,160 @@ class AuditLogger:
         except Exception as e:
             logger.error("Audit log cleanup failed", error=str(e))
             return 0
+
+    async def log_pii_events(
+        self,
+        request_id: str,
+        client_id: str,
+        task: str | None,
+        model: str | None,
+        messages: list[dict],
+        pii_results: list,
+        was_scrubbed: bool,
+    ) -> int:
+        """Log PII detection events with hashed values — never stores raw PII.
+
+        Args:
+            messages: Original messages (before scrubbing) to extract raw values for hashing
+            pii_results: List of PIIScanResult from the scrubber
+            was_scrubbed: Whether scrubbing was applied
+
+        Returns:
+            Number of PII events logged
+        """
+        import hashlib
+
+        now = datetime.now(timezone.utc)
+        rows = []
+
+        # Map pii_results back to messages — one result per message content
+        result_idx = 0
+        for msg_idx, msg in enumerate(messages):
+            content = msg.get("content", "")
+            if not isinstance(content, str) or not content:
+                continue
+            if result_idx >= len(pii_results):
+                break
+
+            scan_result = pii_results[result_idx]
+            result_idx += 1
+
+            for detection in scan_result.detections:
+                # Extract the raw value from the original text and hash it
+                raw_value = content[detection.start : detection.end]
+                value_hash = hashlib.sha256(raw_value.encode("utf-8")).hexdigest()
+
+                rows.append(
+                    {
+                        "request_id": request_id,
+                        "timestamp": now,
+                        "client_id": client_id,
+                        "model": model,
+                        "task": task,
+                        "pii_type": detection.pii_type,
+                        "message_index": msg_idx,
+                        "message_role": msg.get("role"),
+                        "position_start": detection.start,
+                        "position_end": detection.end,
+                        "value_hash": value_hash,
+                        "was_scrubbed": was_scrubbed,
+                        "scan_time_ms": scan_result.scan_time_ms,
+                    }
+                )
+
+        if not rows:
+            return 0
+
+        try:
+            async with self._engine.connect() as conn:
+                await conn.execute(insert(pii_events), rows)
+                await conn.commit()
+            logger.info(
+                "PII events logged",
+                request_id=request_id,
+                event_count=len(rows),
+                pii_types=list(set(r["pii_type"] for r in rows)),
+                scrubbed=was_scrubbed,
+            )
+        except Exception as e:
+            logger.error("Failed to log PII events", error=str(e), request_id=request_id)
+
+        return len(rows)
+
+    async def get_pii_stats(self, hours: int = 24) -> dict:
+        """Get PII detection statistics."""
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+
+        async with self._engine.connect() as conn:
+            base = pii_events.c.timestamp >= cutoff
+
+            # Total events
+            total = (
+                await conn.execute(select(func.count()).select_from(pii_events).where(base))
+            ).scalar() or 0
+
+            # By type
+            type_stmt = (
+                select(pii_events.c.pii_type, func.count())
+                .where(base)
+                .group_by(pii_events.c.pii_type)
+            )
+            by_type = {row[0]: row[1] for row in (await conn.execute(type_stmt)).fetchall()}
+
+            # Scrubbed vs flagged-only
+            scrubbed = (
+                await conn.execute(
+                    select(func.count())
+                    .select_from(pii_events)
+                    .where(and_(base, pii_events.c.was_scrubbed == True))  # noqa: E712
+                )
+            ).scalar() or 0
+
+            # Unique requests with PII
+            unique_requests = (
+                await conn.execute(
+                    select(func.count(func.distinct(pii_events.c.request_id)))
+                    .select_from(pii_events)
+                    .where(base)
+                )
+            ).scalar() or 0
+
+            # Unique value hashes (distinct PII values seen)
+            unique_values = (
+                await conn.execute(
+                    select(func.count(func.distinct(pii_events.c.value_hash)))
+                    .select_from(pii_events)
+                    .where(base)
+                )
+            ).scalar() or 0
+
+            return {
+                "period_hours": hours,
+                "total_detections": total,
+                "by_type": by_type,
+                "scrubbed_count": scrubbed,
+                "flagged_only_count": total - scrubbed,
+                "unique_requests": unique_requests,
+                "unique_values": unique_values,
+            }
+
+    async def get_pii_events(
+        self,
+        limit: int = 50,
+        pii_type: str | None = None,
+        client_id: str | None = None,
+    ) -> list[dict]:
+        """Get recent PII events (no raw PII — only hashes and metadata)."""
+        stmt = select(pii_events).order_by(pii_events.c.timestamp.desc()).limit(limit)
+
+        conditions = []
+        if pii_type:
+            conditions.append(pii_events.c.pii_type == pii_type)
+        if client_id:
+            conditions.append(pii_events.c.client_id == client_id)
+        if conditions:
+            stmt = stmt.where(and_(*conditions))
+
+        async with self._engine.connect() as conn:
+            result = await conn.execute(stmt)
+            return [dict(row._mapping) for row in result.fetchall()]

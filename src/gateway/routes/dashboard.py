@@ -595,3 +595,42 @@ async def unassign_model_tier(
         "model": model_name,
         "now_using": "default_cost_multiplier",
     }
+
+
+# =============================================================================
+# PII Detection Audit
+# =============================================================================
+
+
+@router.get("/api/pii/stats")
+async def pii_stats(
+    audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
+    hours: int = 24,
+) -> dict:
+    """Get PII detection statistics — no raw PII exposed."""
+    if not audit_logger:
+        return {"enabled": False}
+
+    stats = await audit_logger.get_pii_stats(hours=hours)
+    return {"enabled": True, **stats}
+
+
+@router.get("/api/pii/events")
+async def pii_events(
+    audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
+    limit: int = 50,
+    pii_type: str | None = None,
+    client_id: str | None = None,
+) -> dict:
+    """Get recent PII detection events — hashed values only, never raw PII."""
+    if not audit_logger:
+        return {"events": []}
+
+    events = await audit_logger.get_pii_events(limit=limit, pii_type=pii_type, client_id=client_id)
+
+    # Serialize datetimes
+    for e in events:
+        if e.get("timestamp"):
+            e["timestamp"] = e["timestamp"].isoformat()
+
+    return {"events": events, "total": len(events)}

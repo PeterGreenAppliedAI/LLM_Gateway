@@ -11,9 +11,9 @@ export GATEWAY_GUARD_ENABLED=true
 export GATEWAY_GUARD_BASE_URL="http://10.0.0.15:11434"
 export GATEWAY_GUARD_MODEL_NAME="ibm/granite3.2-guardian:5b"
 
-# PII detection (uncomment to enable)
-# export GATEWAY_PII_ENABLED=true
-# export GATEWAY_PII_SCRUB_ENABLED=true
+# PII detection
+export GATEWAY_PII_ENABLED=true
+export GATEWAY_PII_SCRUB_ENABLED=true
 
 export PYTHONPATH=src
 

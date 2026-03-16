@@ -223,3 +223,36 @@ security_scans = Table(
     Index("ix_security_scans_client_id", "client_id"),
     Index("ix_security_scans_regex_threat", "regex_threat_level"),
 )
+
+
+# =============================================================================
+# PII Events Table (detection audit trail — never stores raw PII)
+# =============================================================================
+
+pii_events = Table(
+    "pii_events",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("request_id", String(64), nullable=False),
+    Column("timestamp", DateTime, default=lambda: datetime.now(timezone.utc), nullable=False),
+    # Context
+    Column("client_id", String(128), nullable=False),
+    Column("model", String(128), nullable=True),
+    Column("task", String(32), nullable=True),
+    # Detection details (no raw PII stored)
+    Column("pii_type", String(32), nullable=False),  # EMAIL, PHONE, SSN, CREDIT_CARD, IP_ADDRESS
+    Column("message_index", Integer, nullable=True),  # Which message in the conversation
+    Column("message_role", String(16), nullable=True),  # user, system, assistant
+    Column("position_start", Integer, nullable=True),
+    Column("position_end", Integer, nullable=True),
+    Column("value_hash", String(64), nullable=False),  # SHA-256 of the raw PII value
+    # What happened
+    Column("was_scrubbed", Boolean, default=False),
+    Column("scan_time_ms", Float, nullable=True),
+    # Indexes
+    Index("ix_pii_events_timestamp", "timestamp"),
+    Index("ix_pii_events_request_id", "request_id"),
+    Index("ix_pii_events_client_id", "client_id"),
+    Index("ix_pii_events_pii_type", "pii_type"),
+    Index("ix_pii_events_value_hash", "value_hash"),
+)
