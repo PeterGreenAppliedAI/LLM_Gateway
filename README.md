@@ -199,6 +199,13 @@ The gateway exposes two API formats. Your apps pick whichever they already use.
 | `GET /api/security/scans/stats` | Labeling progress |
 | `GET /api/security/training-data` | Export labeled data for guard model finetuning |
 
+### PII Audit
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /api/pii/stats` | Detection counts by type, scrub vs flag-only, unique values |
+| `GET /api/pii/events` | Recent detections — SHA-256 hashes only, raw PII never exposed |
+
 ### Token Budgets
 
 | Endpoint | Description |
@@ -224,7 +231,7 @@ The gateway exposes two API formats. Your apps pick whichever they already use.
 |-------|--------|-------------|
 | **Unicode Sanitization** | Sync, ~0ms | Strips invisible characters, homoglyphs, zero-width joiners |
 | **Pattern Detection** | Sync, ~1ms | Regex injection scanning — role overrides, delimiter attacks, encoding tricks, 25+ patterns |
-| **PII Detection** | Sync, ~1ms | Detects emails, phones, SSNs, credit cards, IPs. Per-route scrubbing configurable |
+| **PII Detection** | Sync, ~1ms | Detects emails, phones, SSNs, credit cards, IPs. Scrubs per-route. Logs SHA-256 hashes only — raw PII never stored |
 | **Guard Model** | Async, background | Llama Guard 3 or Granite Guardian — shadow analysis, never blocks requests |
 | **IP Allowlist** | Sync, ~0ms | Trusted internal services skip scanning |
 
@@ -257,6 +264,25 @@ curl -s "http://localhost:8001/api/security/scans?disagreements_only=true"
 
 # Export training data
 curl -s "http://localhost:8001/api/security/training-data?format=llama_guard"
+```
+
+### PII Detection Audit Trail
+
+When PII detection is enabled, every detection is persisted to the `pii_events` table — but **raw PII values are never stored**. Instead, each detected value is SHA-256 hashed before logging. The audit trail records:
+
+- Detection type (EMAIL, PHONE, SSN, CREDIT_CARD, IP_ADDRESS)
+- Position in the message, message role, timestamp
+- SHA-256 hash of the original value (for deduplication and audit proof)
+- Whether the value was scrubbed or flagged only
+
+This solves the catch-22 of PII protection systems: you need evidence that the control fired, but storing the matched value means your logs become another place where PII lives. Hashing proves the system caught something and handled it correctly without creating a second risk surface.
+
+```bash
+# View PII detection stats
+curl -s http://localhost:8001/api/pii/stats
+
+# View recent detections (hashes only)
+curl -s http://localhost:8001/api/pii/events
 ```
 
 ## Policy Enforcement
@@ -335,8 +361,8 @@ Database-managed API keys support additional controls: model allowlists (glob pa
 | `GATEWAY_GUARD_ENABLED` | `false` | Enable guard model shadow analysis |
 | `GATEWAY_GUARD_MODEL_NAME` | `ibm/granite3.2-guardian:5b` | Guard model name |
 | `GATEWAY_GUARD_BASE_URL` | `http://localhost:11434` | Ollama server hosting guard model |
-| `GATEWAY_PII_ENABLED` | `false` | Enable PII detection (always flags) |
-| `GATEWAY_PII_SCRUB_ENABLED` | `false` | Replace PII with placeholders |
+| `GATEWAY_PII_ENABLED` | `false` | Enable PII detection (always flags, never stores raw PII) |
+| `GATEWAY_PII_SCRUB_ENABLED` | `false` | Replace PII with placeholders before reaching models |
 | `GATEWAY_PII_SCRUB_ROUTES` | `[]` | Routes where scrubbing is active (empty = all) |
 | `GATEWAY_ADMIN_API_KEY` | | Admin key for key management endpoints |
 | `GATEWAY_LOG_LEVEL` | `INFO` | Logging level |
@@ -376,7 +402,7 @@ The gateway polls all configured endpoints every 60 seconds to discover availabl
 React + TypeScript monitoring UI:
 
 - **Stats**: Request volume, success rates, latency, token usage, cost
-- **Security**: Alerts, guard scan results, regex vs guard comparison, labeling workflow
+- **Security**: Alerts, guard scan results, regex vs guard comparison, labeling workflow, PII detection audit
 - **Audit Log**: Recent requests with model, endpoint, latency, tokens
 - **Model Catalog**: All discovered models across endpoints with sizes
 - **API Keys**: Create/revoke database-managed keys with policies
@@ -421,7 +447,7 @@ DevMesh Gateway is actively developed and running in production. It currently su
 - Per-key policy enforcement (rate limits, model allowlists, endpoint restrictions)
 - Daily token budgets with cost-tier multipliers and runtime model assignment
 - Background guard-model analysis (Llama Guard 3, Granite Guardian)
-- PII detection and per-route scrubbing
+- PII detection and per-route scrubbing with cryptographic audit trail (SHA-256 hashes, never raw PII)
 - Security scan persistence with labeling workflow for guard model finetuning
 - React monitoring dashboard
 - Prometheus metrics and Grafana dashboards

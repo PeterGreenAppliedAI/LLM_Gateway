@@ -119,6 +119,8 @@ async def ollama_chat(
     # PII detection (always flags) + optional scrubbing (per-route)
     if pii_scrubber:
         scrub = should_scrub_pii(request)
+        # Keep pre-scrub messages for hashing raw PII values
+        pre_scrub_messages = [dict(m) for m in sanitized_messages]
         sanitized_messages, pii_results = pii_scrubber.scan_messages(
             sanitized_messages, scrub=scrub
         )
@@ -130,6 +132,17 @@ async def ollama_chat(
                 pii_count=pii_found,
                 scrubbed=scrub,
             )
+            # Log PII events with hashed values (never raw PII)
+            if audit_logger:
+                await audit_logger.log_pii_events(
+                    request_id=ctx.request_id,
+                    client_id=client_id,
+                    task="chat",
+                    model=body.model,
+                    messages=pre_scrub_messages,
+                    pii_results=pii_results,
+                    was_scrubbed=scrub,
+                )
 
     # Queue for async security analysis
     if security_analyzer:
@@ -393,6 +406,7 @@ async def ollama_generate(
 
     if pii_scrubber:
         scrub = should_scrub_pii(request)
+        pre_scrub_messages = [dict(m) for m in analysis_messages]
         analysis_messages, pii_results = pii_scrubber.scan_messages(analysis_messages, scrub=scrub)
         pii_found = sum(r.detection_count for r in pii_results)
         if pii_found:
@@ -402,6 +416,16 @@ async def ollama_generate(
                 pii_count=pii_found,
                 scrubbed=scrub,
             )
+            if audit_logger:
+                await audit_logger.log_pii_events(
+                    request_id=ctx.request_id,
+                    client_id=client_id,
+                    task="generate",
+                    model=body.model,
+                    messages=pre_scrub_messages,
+                    pii_results=pii_results,
+                    was_scrubbed=scrub,
+                )
         # Update sanitized values from scrubbed messages
         if scrub:
             sanitized_prompt = analysis_messages[-1]["content"]
@@ -646,6 +670,7 @@ async def ollama_embeddings(
     if pii_scrubber:
         scrub = should_scrub_pii(request)
         embed_messages = [{"role": "user", "content": p} for p in sanitized_prompts]
+        pre_scrub_messages = [dict(m) for m in embed_messages]
         embed_messages, pii_results = pii_scrubber.scan_messages(embed_messages, scrub=scrub)
         pii_found = sum(r.detection_count for r in pii_results)
         if pii_found:
@@ -655,6 +680,16 @@ async def ollama_embeddings(
                 pii_count=pii_found,
                 scrubbed=scrub,
             )
+            if audit_logger:
+                await audit_logger.log_pii_events(
+                    request_id=ctx.request_id,
+                    client_id=client_id,
+                    task="embeddings",
+                    model=body.model,
+                    messages=pre_scrub_messages,
+                    pii_results=pii_results,
+                    was_scrubbed=scrub,
+                )
         if scrub:
             sanitized_prompts = [m["content"] for m in embed_messages]
 
