@@ -1525,7 +1525,7 @@ function SecurityScansSection({ onRefresh }: { onRefresh: () => void }) {
                     <input type="checkbox" checked={selectedScans.size === scans.length && scans.length > 0} onChange={toggleSelectAll} className="rounded" />
                   </th>
                   <th className="py-2 px-3">Time</th>
-                  <th className="py-2 px-3">Client</th>
+                  <th className="py-2 px-3 max-w-md">Message</th>
                   <th className="py-2 px-3">Regex</th>
                   <th className="py-2 px-3">Guard</th>
                   <th className="py-2 px-3">Label</th>
@@ -1542,8 +1542,14 @@ function SecurityScansSection({ onRefresh }: { onRefresh: () => void }) {
                       <td className="py-2 px-3 text-sm text-gray-400" onClick={() => setExpandedScan(expandedScan === scan.request_id ? null : scan.request_id)}>
                         {scan.timestamp ? formatTime(scan.timestamp) : '-'}
                       </td>
-                      <td className="py-2 px-3 text-sm" onClick={() => setExpandedScan(expandedScan === scan.request_id ? null : scan.request_id)}>
-                        {scan.client_id}
+                      <td className="py-2 px-3 text-sm max-w-md" onClick={() => setExpandedScan(expandedScan === scan.request_id ? null : scan.request_id)}>
+                        <div className="truncate text-gray-300" title={scan.messages.filter(m => m.role === 'user').map(m => m.content).join(' | ') || scan.messages.map(m => m.content).join(' | ')}>
+                          {(() => {
+                            const userMsgs = scan.messages.filter(m => m.role === 'user');
+                            const preview = userMsgs.length > 0 ? userMsgs.map(m => m.content).join(' | ') : scan.messages.map(m => `[${m.role}] ${m.content}`).join(' | ');
+                            return preview || <span className="text-gray-500 italic">no content</span>;
+                          })()}
+                        </div>
                       </td>
                       <td className="py-2 px-3" onClick={() => setExpandedScan(expandedScan === scan.request_id ? null : scan.request_id)}>
                         <span className={`px-2 py-0.5 rounded text-xs ${scan.regex_threat_level !== 'none' ? 'bg-red-900 text-red-300' : 'bg-green-900 text-green-300'}`}>
