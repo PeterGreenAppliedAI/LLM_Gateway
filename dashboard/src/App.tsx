@@ -1798,6 +1798,7 @@ function App() {
   const [error, setError] = useState<string | null>(null)
   const [selectedRequest, setSelectedRequest] = useState<RequestDetail | null>(null)
   const [loadingDetail, setLoadingDetail] = useState(false)
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'security' | 'keys' | 'requests'>('dashboard')
 
   const refresh = useCallback(async () => {
     try {
@@ -1893,119 +1894,150 @@ function App() {
         </div>
       )}
 
-      {/* Stats Grid */}
-      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4 mb-6">
-        <StatCard label="Total Requests" value={stats?.total_requests || 0} subtext="Last 24h" />
-        <StatCard label="Success Rate" value={`${(stats?.success_rate || 0).toFixed(1)}%`} />
-        <StatCard label="Avg Latency" value={`${(stats?.avg_latency_ms || 0).toFixed(0)}ms`} />
-        <StatCard label="Total Tokens" value={(stats?.total_tokens || 0).toLocaleString()} />
-        <StatCard label="Models" value={catalog?.total_models || 0} />
-        <StatCard label="Endpoints" value={catalog?.total_endpoints || 0} />
+      {/* Tab Navigation */}
+      <div className="flex gap-1 mb-6 border-b border-gray-700">
+        {([
+          ['dashboard', 'Dashboard'],
+          ['security', 'Security'],
+          ['keys', 'Keys & Budgets'],
+          ['requests', 'Requests'],
+        ] as const).map(([tab, label]) => (
+          <button
+            key={tab}
+            onClick={() => setActiveTab(tab)}
+            className={`px-4 py-2 text-sm font-medium rounded-t transition-colors ${
+              activeTab === tab
+                ? 'bg-gray-800 text-white border border-gray-700 border-b-transparent -mb-px'
+                : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/50'
+            }`}
+          >
+            {label}
+          </button>
+        ))}
       </div>
 
-      {/* Security Monitor */}
-      <SecuritySection
-        alerts={securityAlerts}
-        stats={securityStats}
-        guardResults={guardResults}
-        onFilterChange={(d) => { guardDisagreementsRef.current = d; refresh() }}
-      />
+      {/* === Dashboard Tab === */}
+      {activeTab === 'dashboard' && (
+        <>
+          {/* Stats Grid */}
+          <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4 mb-6">
+            <StatCard label="Total Requests" value={stats?.total_requests || 0} subtext="Last 24h" />
+            <StatCard label="Success Rate" value={`${(stats?.success_rate || 0).toFixed(1)}%`} />
+            <StatCard label="Avg Latency" value={`${(stats?.avg_latency_ms || 0).toFixed(0)}ms`} />
+            <StatCard label="Total Tokens" value={(stats?.total_tokens || 0).toLocaleString()} />
+            <StatCard label="Models" value={catalog?.total_models || 0} />
+            <StatCard label="Endpoints" value={catalog?.total_endpoints || 0} />
+          </div>
 
-      {/* PII Detection Audit */}
-      <PIISection />
-
-      {/* Security Scan Labeling & Training Data */}
-      <SecurityScansSection onRefresh={refresh} />
-
-      {/* API Keys */}
-      <ApiKeysSection keys={apiKeys} onRefresh={refresh} />
-
-      {/* Token Budgets */}
-      <TokenBudgetSection budgetConfig={budgetConfig} budgetUsage={budgetUsage} catalog={catalog} onRefresh={refresh} />
-
-      {/* Endpoints */}
-      <div className="mb-6">
-        <h2 className="text-lg font-semibold mb-3">Endpoints</h2>
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {catalog?.endpoints.map(endpoint => (
-            <EndpointCard key={endpoint.name} endpoint={endpoint} />
-          ))}
-        </div>
-      </div>
-
-      {/* Usage by Endpoint */}
-      {stats?.requests_by_endpoint && Object.keys(stats.requests_by_endpoint).length > 0 && (
-        <div className="mb-6">
-          <h2 className="text-lg font-semibold mb-3">Requests by Endpoint</h2>
-          <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
-            <div className="space-y-2">
-              {Object.entries(stats.requests_by_endpoint).map(([endpoint, count]) => {
-                const pct = (count / stats.total_requests) * 100
-                return (
-                  <div key={endpoint} className="flex items-center gap-3">
-                    <div className="w-32 text-sm">{endpoint}</div>
-                    <div className="flex-1 bg-gray-700 rounded-full h-4">
-                      <div
-                        className="bg-blue-600 h-4 rounded-full"
-                        style={{ width: `${pct}%` }}
-                      />
-                    </div>
-                    <div className="w-16 text-right text-sm text-gray-400">{count}</div>
-                  </div>
-                )
-              })}
+          {/* Endpoints */}
+          <div className="mb-6">
+            <h2 className="text-lg font-semibold mb-3">Endpoints</h2>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              {catalog?.endpoints.map(endpoint => (
+                <EndpointCard key={endpoint.name} endpoint={endpoint} />
+              ))}
             </div>
           </div>
-        </div>
-      )}
 
-      {/* Top Models */}
-      {stats?.top_models && Object.keys(stats.top_models).length > 0 && (
-        <div className="mb-6">
-          <h2 className="text-lg font-semibold mb-3">Top Models</h2>
-          <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
-            <div className="flex flex-wrap gap-2">
-              {Object.entries(stats.top_models).map(([model, count]) => (
-                <div key={model} className="bg-gray-700 px-3 py-1 rounded-full text-sm">
-                  {model} <span className="text-gray-400">({count})</span>
+          {/* Usage by Endpoint */}
+          {stats?.requests_by_endpoint && Object.keys(stats.requests_by_endpoint).length > 0 && (
+            <div className="mb-6">
+              <h2 className="text-lg font-semibold mb-3">Requests by Endpoint</h2>
+              <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
+                <div className="space-y-2">
+                  {Object.entries(stats.requests_by_endpoint).map(([endpoint, count]) => {
+                    const pct = (count / stats.total_requests) * 100
+                    return (
+                      <div key={endpoint} className="flex items-center gap-3">
+                        <div className="w-32 text-sm">{endpoint}</div>
+                        <div className="flex-1 bg-gray-700 rounded-full h-4">
+                          <div
+                            className="bg-blue-600 h-4 rounded-full"
+                            style={{ width: `${pct}%` }}
+                          />
+                        </div>
+                        <div className="w-16 text-right text-sm text-gray-400">{count}</div>
+                      </div>
+                    )
+                  })}
                 </div>
-              ))}
+              </div>
             </div>
+          )}
+
+          {/* Top Models */}
+          {stats?.top_models && Object.keys(stats.top_models).length > 0 && (
+            <div className="mb-6">
+              <h2 className="text-lg font-semibold mb-3">Top Models</h2>
+              <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
+                <div className="flex flex-wrap gap-2">
+                  {Object.entries(stats.top_models).map(([model, count]) => (
+                    <div key={model} className="bg-gray-700 px-3 py-1 rounded-full text-sm">
+                      {model} <span className="text-gray-400">({count})</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+        </>
+      )}
+
+      {/* === Security Tab === */}
+      {activeTab === 'security' && (
+        <>
+          <SecuritySection
+            alerts={securityAlerts}
+            stats={securityStats}
+            guardResults={guardResults}
+            onFilterChange={(d) => { guardDisagreementsRef.current = d; refresh() }}
+          />
+          <PIISection />
+          <SecurityScansSection onRefresh={refresh} />
+        </>
+      )}
+
+      {/* === Keys & Budgets Tab === */}
+      {activeTab === 'keys' && (
+        <>
+          <ApiKeysSection keys={apiKeys} onRefresh={refresh} />
+          <TokenBudgetSection budgetConfig={budgetConfig} budgetUsage={budgetUsage} catalog={catalog} onRefresh={refresh} />
+        </>
+      )}
+
+      {/* === Requests Tab === */}
+      {activeTab === 'requests' && (
+        <div>
+          <h2 className="text-lg font-semibold mb-3">Recent Requests</h2>
+          <p className="text-gray-400 text-sm mb-2">Click a row to see details</p>
+          <div className="bg-gray-800 rounded-lg border border-gray-700 overflow-hidden">
+            <table className="w-full">
+              <thead className="bg-gray-750 border-b border-gray-700">
+                <tr className="text-left text-gray-400 text-sm">
+                  <th className="py-2 px-3">Time</th>
+                  <th className="py-2 px-3">Status</th>
+                  <th className="py-2 px-3">Model</th>
+                  <th className="py-2 px-3">Endpoint</th>
+                  <th className="py-2 px-3 text-right">Latency</th>
+                  <th className="py-2 px-3 text-right">Tokens</th>
+                </tr>
+              </thead>
+              <tbody>
+                {requests.map(req => (
+                  <RequestRow key={req.id} request={req} onClick={() => handleRequestClick(req)} />
+                ))}
+                {requests.length === 0 && (
+                  <tr>
+                    <td colSpan={6} className="py-8 text-center text-gray-500">
+                      No requests yet
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
           </div>
         </div>
       )}
-
-      {/* Recent Requests */}
-      <div>
-        <h2 className="text-lg font-semibold mb-3">Recent Requests</h2>
-        <p className="text-gray-400 text-sm mb-2">Click a row to see details</p>
-        <div className="bg-gray-800 rounded-lg border border-gray-700 overflow-hidden">
-          <table className="w-full">
-            <thead className="bg-gray-750 border-b border-gray-700">
-              <tr className="text-left text-gray-400 text-sm">
-                <th className="py-2 px-3">Time</th>
-                <th className="py-2 px-3">Status</th>
-                <th className="py-2 px-3">Model</th>
-                <th className="py-2 px-3">Endpoint</th>
-                <th className="py-2 px-3 text-right">Latency</th>
-                <th className="py-2 px-3 text-right">Tokens</th>
-              </tr>
-            </thead>
-            <tbody>
-              {requests.map(req => (
-                <RequestRow key={req.id} request={req} onClick={() => handleRequestClick(req)} />
-              ))}
-              {requests.length === 0 && (
-                <tr>
-                  <td colSpan={6} className="py-8 text-center text-gray-500">
-                    No requests yet
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
     </div>
   )
 }
