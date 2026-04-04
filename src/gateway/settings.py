@@ -165,10 +165,7 @@ class Settings(BaseSettings):
 
     # CORS
     cors_origins: list[str] = Field(
-        default_factory=lambda: [
-            "http://localhost:5174",
-            "http://localhost:5173",
-        ],
+        default_factory=lambda: ["*"],
         description="Allowed CORS origins (dashboard URLs)",
     )
 
