@@ -13,7 +13,7 @@ export GATEWAY_GUARD_MODEL_NAME="ibm/granite3.2-guardian:5b"
 
 # PII detection
 export GATEWAY_PII_ENABLED=true
-export GATEWAY_PII_SCRUB_ENABLED=true
+export GATEWAY_PII_SCRUB_ENABLED=false
 
 export PYTHONPATH=src
 
