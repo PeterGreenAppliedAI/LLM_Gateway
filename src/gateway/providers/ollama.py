@@ -465,6 +465,18 @@ class OllamaAdapter(ProviderAdapter):
         """Parse Ollama /api/chat response."""
         message = data.get("message", {})
         content = message.get("content", "")
+        thinking = message.get("thinking", "")
+
+        # Thinking-model fallback: some models (qwen3 thinking variants) burn the
+        # token budget reasoning and return empty content with output trapped in
+        # `thinking`. Surface it as content so callers aren't handed an empty string.
+        if not content and thinking:
+            logger.warning(
+                "Empty content with thinking populated; surfacing thinking as content",
+                model=data.get("model"),
+                thinking_len=len(thinking),
+            )
+            content = thinking
 
         # Parse tool calls from response
         tool_calls = None
