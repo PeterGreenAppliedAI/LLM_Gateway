@@ -128,6 +128,7 @@ def get_enforcer(request: Request) -> PolicyEnforcer:
                 rate_limit=PolicyRateLimitConfig(
                     requests_per_minute=config.rate_limits.requests_per_minute_per_user,
                     requests_per_hour=config.rate_limits.requests_per_minute_global * 60,
+                    burst_limit=config.rate_limits.burst_limit,
                 ),
                 token_limit=TokenLimitConfig(
                     max_tokens_per_request=config.rate_limits.max_tokens_per_request,
