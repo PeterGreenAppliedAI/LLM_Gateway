@@ -73,15 +73,14 @@ async def list_models(
 
         try:
             provider_models = await adapter.list_models()
-            capabilities = adapter.get_capabilities()
 
-            for model_name in provider_models:
+            for model in provider_models:
                 models.append(
                     ModelInfo(
-                        id=f"{provider_name}/{model_name}",
+                        id=f"{provider_name}/{model.name}",
                         owned_by=provider_name,
                         provider=provider_name,
-                        capabilities=capabilities,
+                        capabilities=[c.value for c in model.capabilities],
                     )
                 )
         except Exception as e:
@@ -204,10 +203,15 @@ async def list_providers(
 
         if adapter:
             try:
-                models = await adapter.list_models()
-                capabilities = adapter.get_capabilities()
-            except Exception:
-                pass
+                provider_models = await adapter.list_models()
+                models = [m.name for m in provider_models]
+                # Aggregate distinct capabilities across all of the provider's models
+                cap_set: set[str] = set()
+                for m in provider_models:
+                    cap_set.update(c.value for c in m.capabilities)
+                capabilities = sorted(cap_set)
+            except Exception as e:
+                logger.warning(f"Failed to list models from provider {provider_config.name}: {e}")
 
         providers.append(
             ProviderStatus(
