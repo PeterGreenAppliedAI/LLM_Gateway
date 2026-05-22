@@ -9,7 +9,15 @@ from fastapi.testclient import TestClient
 from gateway.config import ApiKeyConfig, AuthConfig, GatewayConfig, ProviderConfig
 from gateway.dispatch import ProviderRegistry
 from gateway.exception_handlers import register_exception_handlers
-from gateway.models.common import FinishReason, HealthStatus, ProviderType, TaskType, UsageStats
+from gateway.models.common import (
+    FinishReason,
+    HealthStatus,
+    ModelCapability,
+    ModelInfo,
+    ProviderType,
+    TaskType,
+    UsageStats,
+)
 from gateway.models.internal import InternalResponse
 from gateway.routes import devmesh_router, openai_router
 
@@ -187,8 +195,20 @@ class TestModelsList:
         """List models returns models from providers."""
         # Create mock registry and adapter
         mock_adapter = MagicMock()
-        mock_adapter.list_models = AsyncMock(return_value=["llama3.2", "codellama"])
-        mock_adapter.get_capabilities = MagicMock(return_value=["chat", "completion"])
+        mock_adapter.list_models = AsyncMock(
+            return_value=[
+                ModelInfo(
+                    name="llama3.2",
+                    provider="ollama",
+                    capabilities=[ModelCapability.CHAT, ModelCapability.COMPLETION],
+                ),
+                ModelInfo(
+                    name="codellama",
+                    provider="ollama",
+                    capabilities=[ModelCapability.CHAT, ModelCapability.COMPLETION],
+                ),
+            ]
+        )
 
         mock_registry = MagicMock(spec=ProviderRegistry)
         mock_registry.list_providers.return_value = ["ollama"]
@@ -204,6 +224,7 @@ class TestModelsList:
         assert len(data["data"]) == 2
         assert data["data"][0]["id"] == "ollama/llama3.2"
         assert data["data"][0]["provider"] == "ollama"
+        assert data["data"][0]["capabilities"] == ["chat", "completion"]
 
 
 # =============================================================================
@@ -522,8 +543,15 @@ class TestProviderManagement:
     def test_list_providers(self, app: FastAPI, client: TestClient):
         """List providers returns provider details."""
         mock_adapter = MagicMock()
-        mock_adapter.list_models = AsyncMock(return_value=["llama3.2"])
-        mock_adapter.get_capabilities = MagicMock(return_value=["chat"])
+        mock_adapter.list_models = AsyncMock(
+            return_value=[
+                ModelInfo(
+                    name="llama3.2",
+                    provider="ollama",
+                    capabilities=[ModelCapability.CHAT],
+                ),
+            ]
+        )
 
         mock_registry = MagicMock(spec=ProviderRegistry)
         mock_health = MagicMock()
@@ -539,6 +567,8 @@ class TestProviderManagement:
         assert len(data["providers"]) == 1
         assert data["providers"][0]["name"] == "ollama"
         assert data["providers"][0]["healthy"] is True
+        assert data["providers"][0]["models"] == ["llama3.2"]
+        assert data["providers"][0]["capabilities"] == ["chat"]
 
     def test_check_provider_health(self, app: FastAPI, client: TestClient):
         """Force provider health check."""
