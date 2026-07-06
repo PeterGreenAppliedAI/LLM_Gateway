@@ -78,6 +78,9 @@ class ProviderConfig(BaseModel):
     base_url: ProviderUrl
     enabled: bool = True
     timeout: float = Field(default=30.0, gt=0, le=300.0)  # Max 5 minutes
+    # Separate connect timeout so a dead upstream fails in seconds instead
+    # of holding the connection for the full read timeout
+    connect_timeout: float = Field(default=3.0, gt=0, le=30.0)
     max_retries: int = Field(
         default=3, ge=0, le=10
     )  # TODO: Not yet used in dispatcher - reserved for retry+backoff implementation
@@ -109,6 +112,7 @@ class EndpointConfig(BaseModel):
     url: ProviderUrl  # e.g., http://localhost:11434
     enabled: bool = True
     timeout: float = Field(default=30.0, gt=0, le=300.0)
+    connect_timeout: float = Field(default=3.0, gt=0, le=30.0)
     max_retries: int = Field(default=3, ge=0, le=10)
     labels: dict[str, str] = Field(default_factory=dict)  # cold_flexible, prod_eligible, etc.
     api_key_env: str | None = None  # Environment variable name for API key
@@ -173,6 +177,9 @@ class RateLimitConfig(BaseModel):
 
     requests_per_minute_global: int = Field(default=1000, gt=0)
     requests_per_minute_per_user: int = Field(default=100, gt=0)
+    requests_per_hour_per_user: int = Field(
+        default=2000, gt=0, description="Max requests per user in a sliding 1-hour window"
+    )
     max_tokens_per_request: int = Field(default=32768, gt=0)
     burst_limit: int = Field(default=60, gt=0, description="Max requests in 10-second burst window")
 
@@ -259,6 +266,7 @@ class GatewayConfig(BaseModel):
                     base_url=ep.url,
                     enabled=ep.enabled,
                     timeout=ep.timeout,
+                    connect_timeout=ep.connect_timeout,
                     max_retries=ep.max_retries,
                 )
                 for ep in self.endpoints
@@ -274,6 +282,7 @@ class GatewayConfig(BaseModel):
                     url=p.base_url,
                     enabled=p.enabled,
                     timeout=p.timeout,
+                    connect_timeout=p.connect_timeout,
                     max_retries=p.max_retries,
                 )
                 for p in self.providers
@@ -408,6 +417,36 @@ class ConfigLoader:
             return [ConfigLoader._resolve_env_vars(item) for item in data]
         return data
 
+    @staticmethod
+    def _drop_unresolvable_api_keys(data: dict[str, Any]) -> dict[str, Any]:
+        """Drop api_keys entries whose env var is unset — before strict resolution.
+
+        A missing key env var must not take the whole gateway down: that
+        client loses auth (visibly, with a warning naming the variable),
+        everyone else keeps working. Never fall back to a literal default.
+        """
+        api_keys = data.get("auth", {}).get("api_keys")
+        if not api_keys:
+            return data
+
+        import logging
+
+        kept = []
+        for entry in api_keys:
+            try:
+                ConfigLoader._resolve_env_vars(entry.get("key"))
+            except ValueError as e:
+                logging.getLogger(__name__).warning(
+                    "API key for client '%s' disabled: %s. "
+                    "Set the variable (see .env.example) and restart to enable it.",
+                    entry.get("client_id", "<unknown>"),
+                    e,
+                )
+                continue
+            kept.append(entry)
+        data["auth"]["api_keys"] = kept
+        return data
+
     def _load_yaml(self, path: Path) -> dict[str, Any]:
         """Load a YAML file and resolve environment variable references."""
         if not path.exists():
@@ -419,6 +458,7 @@ class ConfigLoader:
         if data is None:
             return {}
 
+        data = self._drop_unresolvable_api_keys(data)
         return self._resolve_env_vars(data)
 
     def load(self) -> GatewayConfig:

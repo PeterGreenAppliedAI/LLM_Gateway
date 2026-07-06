@@ -17,10 +17,10 @@ from pydantic import BaseModel, Field
 
 from gateway.policy import PolicyEnforcer
 from gateway.routes.dependencies import (
-    authenticate,
     get_audit_logger,
     get_config,
     get_enforcer,
+    require_api_key,
 )
 from gateway.storage import AuditLogger
 
@@ -54,6 +54,7 @@ class StatsResponse(BaseModel):
 @router.get("/api/stats", response_model=StatsResponse)
 async def get_stats(
     request: Request,
+    _client_id: Annotated[str, Depends(require_api_key)],
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
     hours: int = 24,
     filter_client: str | None = None,
@@ -112,6 +113,7 @@ class RequestsListResponse(BaseModel):
 @router.get("/api/requests", response_model=RequestsListResponse)
 async def list_requests(
     request: Request,
+    _client_id: Annotated[str, Depends(require_api_key)],
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
     limit: int = 50,
     offset: int = 0,
@@ -198,6 +200,7 @@ class RequestDetailResponse(BaseModel):
 async def get_request_detail(
     request: Request,
     request_id: str,
+    _client_id: Annotated[str, Depends(require_api_key)],
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
 ) -> RequestDetailResponse:
     """Get detailed information about a specific request."""
@@ -274,7 +277,7 @@ class ModelsUsageResponse(BaseModel):
 @router.get("/api/models/usage", response_model=ModelsUsageResponse)
 async def get_models_usage(
     request: Request,
-    client_id: Annotated[str, Depends(authenticate)],
+    client_id: Annotated[str, Depends(require_api_key)],
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
     hours: int = 24,
 ) -> ModelsUsageResponse:
@@ -311,7 +314,7 @@ class EndpointsUsageResponse(BaseModel):
 @router.get("/api/endpoints/usage", response_model=EndpointsUsageResponse)
 async def get_endpoints_usage(
     request: Request,
-    client_id: Annotated[str, Depends(authenticate)],
+    client_id: Annotated[str, Depends(require_api_key)],
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
     hours: int = 24,
 ) -> EndpointsUsageResponse:
@@ -347,7 +350,7 @@ class DailyUsageResponse(BaseModel):
 @router.get("/api/usage/daily", response_model=DailyUsageResponse)
 async def get_daily_usage(
     request: Request,
-    client_id: Annotated[str, Depends(authenticate)],
+    client_id: Annotated[str, Depends(require_api_key)],
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
     days: int = 30,
     filter_client: str | None = None,
@@ -367,7 +370,7 @@ async def get_daily_usage(
 @router.post("/api/usage/aggregate")
 async def trigger_aggregation(
     request: Request,
-    client_id: Annotated[str, Depends(authenticate)],
+    client_id: Annotated[str, Depends(require_api_key)],
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
     date: str | None = None,
 ) -> dict[str, Any]:
@@ -400,7 +403,7 @@ async def trigger_aggregation(
 @router.get("/api/budget/config")
 async def budget_config(
     request: Request,
-    _client_id: Annotated[str, Depends(authenticate)],
+    _client_id: Annotated[str, Depends(require_api_key)],
     enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
 ) -> dict:
     """Get token budget configuration, including tier assignments and unclassified models."""
@@ -447,7 +450,7 @@ async def budget_config(
 @router.get("/api/budget/usage")
 async def budget_usage(
     request: Request,
-    _client_id: Annotated[str, Depends(authenticate)],
+    _client_id: Annotated[str, Depends(require_api_key)],
     enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
     key: str | None = None,
 ) -> dict:
@@ -510,7 +513,7 @@ class TierCreateRequest(BaseModel):
 @router.post("/api/budget/tiers")
 async def create_tier(
     body: TierCreateRequest,
-    _client_id: Annotated[str, Depends(authenticate)],
+    _client_id: Annotated[str, Depends(require_api_key)],
     enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
 ) -> dict:
     """Create or update a cost tier at runtime (no restart needed)."""
@@ -529,7 +532,7 @@ async def create_tier(
 @router.delete("/api/budget/tiers/{tier_name}")
 async def delete_tier(
     tier_name: str,
-    _client_id: Annotated[str, Depends(authenticate)],
+    _client_id: Annotated[str, Depends(require_api_key)],
     enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
 ) -> dict:
     """Remove a cost tier. Fails if models are still assigned to it."""
@@ -558,7 +561,7 @@ class ModelAssignmentRequest(BaseModel):
 async def assign_model_tier(
     request: Request,
     body: ModelAssignmentRequest,
-    _client_id: Annotated[str, Depends(authenticate)],
+    _client_id: Annotated[str, Depends(require_api_key)],
     enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
 ) -> dict:
     """Assign a model to a cost tier at runtime (no restart needed)."""
@@ -583,7 +586,7 @@ async def assign_model_tier(
 @router.delete("/api/budget/assignments/{model_name:path}")
 async def unassign_model_tier(
     model_name: str,
-    _client_id: Annotated[str, Depends(authenticate)],
+    _client_id: Annotated[str, Depends(require_api_key)],
     enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
 ) -> dict:
     """Remove a model's tier assignment (reverts to default cost multiplier)."""
@@ -604,6 +607,7 @@ async def unassign_model_tier(
 
 @router.get("/api/pii/stats")
 async def pii_stats(
+    _client_id: Annotated[str, Depends(require_api_key)],
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
     hours: int = 24,
 ) -> dict:
@@ -617,6 +621,7 @@ async def pii_stats(
 
 @router.get("/api/pii/events")
 async def pii_events(
+    _auth_client_id: Annotated[str, Depends(require_api_key)],
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
     limit: int = 50,
     pii_type: str | None = None,

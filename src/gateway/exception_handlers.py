@@ -9,7 +9,7 @@ This module provides FastAPI exception handlers that translate
 domain errors (GatewayError subclasses) to HTTP responses.
 """
 
-from fastapi import Request, status
+from fastapi import Request, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError as PydanticValidationError
 
@@ -172,6 +172,16 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
     )
 
 
+async def client_disconnected_handler(request: Request, exc: Exception) -> Response:
+    """Handle a client that went away mid-request.
+
+    The response can't be delivered, so the body doesn't matter — 499
+    (nginx's "client closed request") keeps the audit/access logs honest.
+    """
+    clear_request_context()
+    return Response(status_code=499)
+
+
 # =============================================================================
 # Registration Helper
 # =============================================================================
@@ -185,11 +195,16 @@ def register_exception_handlers(app) -> None:
     Args:
         app: FastAPI application instance
     """
+    from gateway.routes.dependencies import ClientDisconnected
+
     # Register domain error handler for base class (catches all subclasses)
     app.add_exception_handler(GatewayError, gateway_error_handler)
 
     # Register Pydantic validation error handler
     app.add_exception_handler(PydanticValidationError, pydantic_validation_error_handler)
+
+    # Client went away mid-request (upstream work already cancelled)
+    app.add_exception_handler(ClientDisconnected, client_disconnected_handler)
 
     # Register fallback handler for unhandled exceptions
     app.add_exception_handler(Exception, unhandled_exception_handler)

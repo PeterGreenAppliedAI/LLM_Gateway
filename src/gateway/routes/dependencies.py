@@ -12,9 +12,12 @@ Per Endpoints/Environments Architecture:
 - Environment resolution from API key or header
 """
 
+import asyncio
+import contextlib
 import re
 import secrets
-from typing import Annotated
+from collections.abc import Awaitable
+from typing import Annotated, TypeVar
 from uuid import uuid4
 
 from fastapi import Depends, Header, Request
@@ -40,6 +43,52 @@ logger = get_logger(__name__)
 
 # Shared sanitizer instance (thread-safe, stateless)
 _sanitizer = Sanitizer()
+
+T = TypeVar("T")
+
+
+class ClientDisconnected(Exception):
+    """The client went away while the upstream request was in flight."""
+
+
+async def run_unless_disconnected(request: Request, work: Awaitable[T]) -> T:
+    """Run upstream work, cancelling it if the client disconnects.
+
+    Without this, an abandoned request keeps consuming an upstream
+    inference slot for its full duration. Cancelling the task cancels the
+    underlying httpx call, which closes the upstream connection.
+
+    Raises:
+        ClientDisconnected: If the client disconnected first. The response
+            can't be delivered, so callers should abort (no body needed).
+    """
+    work_task = asyncio.ensure_future(work)
+
+    async def _wait_for_disconnect() -> None:
+        # The route handler has already consumed the body, so the next
+        # message on the receive channel is http.disconnect.
+        while True:
+            message = await request.receive()
+            if message["type"] == "http.disconnect":
+                return
+
+    disconnect_task = asyncio.ensure_future(_wait_for_disconnect())
+    try:
+        done, _ = await asyncio.wait(
+            {work_task, disconnect_task}, return_when=asyncio.FIRST_COMPLETED
+        )
+        if work_task in done:
+            return work_task.result()
+
+        work_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await work_task
+        logger.info("Client disconnected; upstream request cancelled")
+        raise ClientDisconnected()
+    finally:
+        disconnect_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await disconnect_task
 
 
 # Security: Pattern for valid API keys (prevents injection)
@@ -127,7 +176,7 @@ def get_enforcer(request: Request) -> PolicyEnforcer:
             policy_config = PolicyConfig(
                 rate_limit=PolicyRateLimitConfig(
                     requests_per_minute=config.rate_limits.requests_per_minute_per_user,
-                    requests_per_hour=config.rate_limits.requests_per_minute_global * 60,
+                    requests_per_hour=config.rate_limits.requests_per_hour_per_user,
                     burst_limit=config.rate_limits.burst_limit,
                 ),
                 token_limit=TokenLimitConfig(
@@ -258,6 +307,48 @@ async def authenticate(
     return result.client_id
 
 
+async def require_api_key(
+    request: Request,
+    authorization: Annotated[str | None, Header()] = None,
+    x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
+) -> str:
+    """Authenticate and REQUIRE a valid API key — no anonymous fallback.
+
+    The standard `authenticate` dependency allows keyless requests as
+    client "default" (inference routes rely on this for stock-Ollama
+    clients). Control-plane endpoints that expose stored traffic, PII
+    events, or key/budget management must not: use this dependency there.
+
+    When auth is disabled entirely (auth.enabled: false), anonymous access
+    is allowed — there are no keys to present in that deployment mode.
+
+    Returns:
+        client_id for the authenticated client
+
+    Raises:
+        AuthenticationError: If no key is provided or the key is invalid
+    """
+    config = get_config(request)
+    if not config.auth.enabled:
+        return "default"
+
+    api_key = None
+    if authorization:
+        if authorization.lower().startswith("bearer "):
+            api_key = authorization[7:].strip()
+        else:
+            raise AuthenticationError(message="Invalid authorization header format")
+    elif x_api_key:
+        api_key = x_api_key
+
+    if not api_key:
+        raise AuthenticationError(message="API key required")
+
+    db_engine = getattr(request.app.state, "db_engine", None)
+    key_info = await validate_api_key(api_key, config, db_engine)
+    return key_info["client_id"]
+
+
 async def require_admin(
     request: Request,
     authorization: Annotated[str | None, Header()] = None,
@@ -277,9 +368,10 @@ async def require_admin(
 
     settings = get_settings()
 
-    # If no admin key configured, fall back to standard auth
+    # If no admin key configured, fall back to standard auth — but still
+    # require a real key (no anonymous admin)
     if not settings.admin_api_key:
-        return await authenticate(request, authorization, x_api_key)
+        return await require_api_key(request, authorization, x_api_key)
 
     # Extract API key from headers
     api_key = None

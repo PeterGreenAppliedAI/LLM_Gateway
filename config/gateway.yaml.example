@@ -7,7 +7,9 @@
 rate_limits:
   requests_per_minute_global: 1000
   requests_per_minute_per_user: 100
+  requests_per_hour_per_user: 2000
   max_tokens_per_request: 32768
+  burst_limit: 60
 
 # =============================================================================
 # Token Budgets (optional)

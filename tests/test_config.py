@@ -327,6 +327,51 @@ class TestConfigLoader:
         with pytest.raises(FileNotFoundError, match="Configuration file not found"):
             load_config(tmp_path / "nonexistent.yaml")
 
+    def test_api_key_with_unset_env_var_is_disabled_not_fatal(
+        self, tmp_path: Path, minimal_gateway_config_data: dict[str, Any], monkeypatch
+    ) -> None:
+        """A key referencing an unset env var is dropped; the gateway still boots.
+
+        Availability over completeness: one client losing auth (with a
+        warning) beats the whole gateway refusing to start.
+        """
+        monkeypatch.delenv("GATEWAY_TEST_UNSET_KEY", raising=False)
+        monkeypatch.setenv("GATEWAY_TEST_SET_KEY", "resolved-key-12345678")
+        data = dict(minimal_gateway_config_data)
+        data["auth"] = {
+            "enabled": True,
+            "api_keys": [
+                {"key": "${GATEWAY_TEST_UNSET_KEY}", "client_id": "missing-client"},
+                {"key": "${GATEWAY_TEST_SET_KEY}", "client_id": "working-client"},
+                {"key": "literal-key-12345678", "client_id": "literal-client"},
+            ],
+        }
+        config_file = write_yaml_config(tmp_path / "gateway.yaml", data)
+
+        config = load_config(config_file)
+
+        client_ids = [k.client_id for k in config.auth.api_keys]
+        assert client_ids == ["working-client", "literal-client"]
+        assert config.auth.api_keys[0].key == "resolved-key-12345678"
+
+    def test_env_var_without_default_still_strict_outside_api_keys(
+        self, tmp_path: Path, minimal_gateway_config_data: dict[str, Any], monkeypatch
+    ) -> None:
+        """Unset env vars elsewhere in config remain a hard error."""
+        monkeypatch.delenv("GATEWAY_TEST_UNSET_URL", raising=False)
+        data = dict(minimal_gateway_config_data)
+        data["providers"] = [
+            {
+                "name": "p1",
+                "type": "ollama",
+                "base_url": "${GATEWAY_TEST_UNSET_URL}",
+            }
+        ]
+        config_file = write_yaml_config(tmp_path / "gateway.yaml", data)
+
+        with pytest.raises(ValueError, match="GATEWAY_TEST_UNSET_URL"):
+            load_config(config_file)
+
     def test_load_config_empty_file(self, tmp_path: Path) -> None:
         """Test handling of empty config file returns default config."""
         config_file = tmp_path / "empty.yaml"
