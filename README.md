@@ -39,6 +39,11 @@ pip install -e ".[dev]"
 cp config/gateway.yaml.example config/gateway.yaml
 # Edit gateway.yaml with your endpoint URLs
 
+# Optional: API keys live in a gitignored .env (sourced by the start script).
+# Keys referencing unset env vars are disabled with a warning — the gateway
+# always boots. Skip this entirely for a local, keyless evaluation.
+cp .env.example .env
+
 ./start-gateway.sh
 ```
 
@@ -82,7 +87,7 @@ LiteLLM is a good proxy for routing requests to different LLM providers. DevMesh
 | **Token budgets** | Cost-tier weighted daily quotas per API key | Spend limits per key |
 | **Self-hosted only** | Yes — runs inside your infrastructure | Cloud + self-hosted options |
 | **Dashboard** | Included React UI with security, PII, budgets, requests | Separate UI project |
-| **Test coverage** | 514 tests across Python 3.10/3.11/3.12 | Varies |
+| **Test coverage** | 538 tests across Python 3.10/3.11/3.12 | Varies |
 
 If you just need to route requests to different providers, LiteLLM works. If you need to know what's going through your models, stop PII from leaking, build your own guard model, and prove it all to an auditor — that's what this is for.
 
@@ -104,6 +109,8 @@ React + TypeScript monitoring UI with four tabs:
 ```bash
 cd dashboard && npm install && npx vite --host 0.0.0.0 --port 5174
 ```
+
+On first load, enter a gateway API key in the header field (top right) — the dashboard endpoints require one. The key is stored in the browser's localStorage and sent as `X-API-Key` on every request.
 
 ## Security Architecture
 
@@ -138,9 +145,13 @@ Request → Auth → Sanitize → PII Scan → Policy Check → Route → Respon
 
 Both OpenAI and Ollama formats — your apps don't need to change.
 
+**Auth model:** inference endpoints work without an API key (stock Ollama/OpenAI clients just work; keys opt you into per-client routing, allowlists, and budgets). Management, dashboard, and security endpoints **require** a valid key when `auth.enabled: true` — they expose stored traffic and audit data.
+
 **OpenAI:** `POST /v1/chat/completions`, `POST /v1/completions`, `POST /v1/embeddings`, `GET /v1/models`
 
-**Ollama:** `POST /api/chat`, `POST /api/generate`, `POST /api/embeddings`, `GET /api/tags`
+**Ollama:** `POST /api/chat`, `POST /api/generate`, `POST /api/embed`, `POST /api/embeddings` (legacy), `GET /api/tags`
+
+Full Ollama passthrough: `format` (JSON mode and schema-constrained decoding), `options` (`num_ctx`, `top_k`, `stop`, ...), `keep_alive`, `tools` (object arguments, streaming included), and vision `images` all reach the engine untouched. The gateway never invents defaults — unset parameters use the engine's own defaults, and policy caps reject loudly (4xx) instead of silently clamping.
 
 **Management:** `/health`, `/metrics`, `/api/stats`, `/api/requests`, `/api/models/usage`, `/api/endpoints/usage`
 
@@ -233,7 +244,7 @@ For evaluation, `./start-gateway.sh` is all you need. For production:
 ## Testing
 
 ```bash
-pytest tests/ -v              # 514 tests
+pytest tests/ -v              # 538 tests
 pytest tests/ --cov=gateway   # With coverage
 ```
 
