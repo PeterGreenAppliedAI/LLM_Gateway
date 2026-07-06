@@ -204,12 +204,12 @@ class TestTokenLimiter:
         result = limiter.validate_max_tokens(999999)
         assert result == 999999
 
-    def test_default_max_tokens_applied(self, token_limit_config):
-        """Default max_tokens is used when not specified."""
+    def test_unspecified_max_tokens_passes_through_as_none(self, token_limit_config):
+        """None (client didn't specify) passes through — no invented default."""
         limiter = TokenLimiter(token_limit_config)
 
         result = limiter.validate_max_tokens(None)
-        assert result == token_limit_config.default_max_tokens
+        assert result is None
 
     def test_valid_max_tokens_passed_through(self, token_limit_config):
         """Valid max_tokens values pass through unchanged."""
@@ -253,15 +253,12 @@ class TestTokenLimiter:
         result = limiter.check(requested_max_tokens=token_limit_config.max_tokens_per_request + 100)
         assert result.adjusted_max_tokens == token_limit_config.max_tokens_per_request
 
-    def test_negative_max_tokens_uses_default(self, token_limit_config):
-        """Negative or zero max_tokens uses default."""
+    def test_zero_max_tokens_passes_through(self, token_limit_config):
+        """Zero passes through unchanged (valid for embeddings)."""
         limiter = TokenLimiter(token_limit_config)
 
         result = limiter.validate_max_tokens(0)
-        assert result == token_limit_config.default_max_tokens
-
-        result = limiter.validate_max_tokens(-10)
-        assert result == token_limit_config.default_max_tokens
+        assert result == 0
 
 
 # =============================================================================

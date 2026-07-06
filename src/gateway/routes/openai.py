@@ -50,6 +50,7 @@ from gateway.routes.dependencies import (
     get_pii_scrubber,
     get_sanitizer,
     get_security_analyzer,
+    run_unless_disconnected,
     setup_request_context,
     should_scrub_pii,
     translate_policy_violation,
@@ -184,7 +185,7 @@ async def chat_completions(
     # Non-streaming: dispatch and wait
     # DispatchError propagates to exception handler
     with metrics.track_request("dispatch"):
-        result = await dispatcher.dispatch(internal_request)
+        result = await run_unless_disconnected(request, dispatcher.dispatch(internal_request))
 
     # Record metrics
     ctx.record_complete(
@@ -507,7 +508,7 @@ async def completions(
 
     # Dispatch request - DispatchError propagates to exception handler
     with metrics.track_request("dispatch"):
-        result = await dispatcher.dispatch(internal_request)
+        result = await run_unless_disconnected(request, dispatcher.dispatch(internal_request))
 
     # Record metrics
     ctx.record_complete(
@@ -696,7 +697,7 @@ async def embeddings(
 
     # Dispatch request - DispatchError propagates to exception handler
     with metrics.track_request("dispatch"):
-        result = await dispatcher.dispatch(internal_request)
+        result = await run_unless_disconnected(request, dispatcher.dispatch(internal_request))
 
     # Record metrics
     ctx.record_complete(

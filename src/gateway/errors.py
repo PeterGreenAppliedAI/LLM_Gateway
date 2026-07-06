@@ -258,6 +258,7 @@ class DispatchError(GatewayError):
         code: ErrorCode = ErrorCode.DISPATCH_ERROR,
         provider: str | None = None,
         details: dict | None = None,
+        retry_after: float | None = None,
     ):
         details = details or {}
         if provider:
@@ -267,6 +268,7 @@ class DispatchError(GatewayError):
             code=code,
             category=ErrorCategory.DISPATCH,
             details=details,
+            retry_after=retry_after,
         )
 
 
@@ -309,11 +311,12 @@ class ProviderUnavailableError(DispatchError):
 class AllProvidersUnavailableError(DispatchError):
     """All providers unavailable."""
 
-    def __init__(self, attempted: list[str]):
+    def __init__(self, attempted: list[str], retry_after: float = 10.0):
         super().__init__(
             message=f"All providers unavailable. Tried: {', '.join(attempted)}",
             code=ErrorCode.ALL_PROVIDERS_UNAVAILABLE,
             details={"attempted_providers": attempted},
+            retry_after=retry_after,
         )
 
 

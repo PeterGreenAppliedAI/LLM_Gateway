@@ -27,6 +27,8 @@ from gateway.models.ollama import (
     OllamaChatStreamChunk,
     OllamaEmbeddingsRequest,
     OllamaEmbeddingsResponse,
+    OllamaEmbedRequest,
+    OllamaEmbedResponse,
     OllamaGenerateRequest,
     OllamaGenerateResponse,
     OllamaMessage,
@@ -46,6 +48,7 @@ from gateway.routes.dependencies import (
     get_pii_scrubber,
     get_sanitizer,
     get_security_analyzer,
+    run_unless_disconnected,
     setup_request_context,
     should_scrub_pii,
     translate_policy_violation,
@@ -62,6 +65,21 @@ router = APIRouter(prefix="/api", tags=["ollama"])
 def _now_iso() -> str:
     """Get current time in ISO format."""
     return datetime.now(timezone.utc).isoformat()
+
+
+def _normalize_ollama_format(fmt: str | dict) -> dict:
+    """Normalize Ollama's `format` into the internal response_format shape.
+
+    "json" -> {"type": "json_object"}; a JSON-schema dict -> {"type":
+    "json_schema", ...}. Adapters translate back to their engine's native
+    mechanism, so schema-constrained decoding survives cross-protocol dispatch.
+    """
+    if isinstance(fmt, dict):
+        return {
+            "type": "json_schema",
+            "json_schema": {"name": "response", "schema": fmt, "strict": True},
+        }
+    return {"type": "json_object"}
 
 
 # =============================================================================
@@ -168,7 +186,9 @@ async def ollama_chat(
             ]
         messages.append(Message(**msg_kwargs))
 
-    # Extract options - only include if actually set
+    # Client options pass through verbatim (num_ctx, top_k, repeat_penalty,
+    # ...). The fields the gateway polices are mirrored into normalized
+    # fields; everything else must reach the engine untouched.
     options = body.options or {}
 
     request_kwargs = {
@@ -177,11 +197,20 @@ async def ollama_chat(
         "messages": messages,
         "client_id": client_id,
         "stream": body.stream,
+        "options": options,
     }
 
     # Pass through tool definitions
     if body.tools:
         request_kwargs["tools"] = body.tools
+
+    # Structured outputs: "json" or a JSON-schema dict (normalized to the
+    # OpenAI response_format shape; adapters translate back)
+    if body.format is not None:
+        request_kwargs["response_format"] = _normalize_ollama_format(body.format)
+
+    if body.keep_alive is not None:
+        request_kwargs["extensions"] = {"keep_alive": body.keep_alive}
 
     # Apply per-client target endpoint if configured
     if auth.target_endpoint:
@@ -219,7 +248,7 @@ async def ollama_chat(
         )
 
     # Non-streaming
-    result = await dispatcher.dispatch(internal_request)
+    result = await run_unless_disconnected(request, dispatcher.dispatch(internal_request))
 
     ctx.record_complete(
         prompt_tokens=result.response.usage.prompt_tokens,
@@ -305,6 +334,20 @@ async def _stream_ollama_chat(
             async for chunk in stream:
                 full_content += chunk.delta or ""
 
+                # Tool calls stream through untouched (Ollama shape:
+                # function.arguments stays an object, never stringified)
+                chunk_tool_calls = None
+                if chunk.tool_calls:
+                    chunk_tool_calls = [
+                        OllamaToolCall(
+                            function=OllamaToolCallFunction(
+                                name=tc.function.get("name", ""),
+                                arguments=tc.function.get("arguments") or {},
+                            )
+                        )
+                        for tc in chunk.tool_calls
+                    ]
+
                 response = OllamaChatStreamChunk(
                     model=model,
                     created_at=_now_iso(),
@@ -312,6 +355,7 @@ async def _stream_ollama_chat(
                         role="assistant",
                         content=chunk.delta or "",
                         thinking=chunk.thinking,
+                        tool_calls=chunk_tool_calls,
                     ),
                     done=chunk.finish_reason is not None,
                 )
@@ -447,16 +491,34 @@ async def ollama_generate(
         messages.append(Message(role="system", content=sanitized_system))
     messages.append(Message(role="user", content=sanitized_prompt))
 
+    # Client options pass through verbatim; see ollama_chat for rationale
     options = body.options or {}
+
+    # Engine-native top-level generate fields, forwarded untouched
+    extensions = {
+        key: value
+        for key, value in (
+            ("system", sanitized_system),
+            ("template", body.template),
+            ("context", body.context),
+            ("keep_alive", body.keep_alive),
+        )
+        if value is not None
+    }
 
     request_kwargs = {
         "task": TaskType.GENERATE,
         "model": body.model,
         "messages": messages,
-        "prompt": body.prompt,
+        "prompt": sanitized_prompt,
         "client_id": client_id,
         "stream": body.stream,
+        "options": options,
+        "extensions": extensions,
     }
+
+    if body.format is not None:
+        request_kwargs["response_format"] = _normalize_ollama_format(body.format)
 
     # Apply per-client target endpoint if configured
     if auth.target_endpoint:
@@ -494,7 +556,7 @@ async def ollama_generate(
         )
 
     # Non-streaming
-    result = await dispatcher.dispatch(internal_request)
+    result = await run_unless_disconnected(request, dispatcher.dispatch(internal_request))
 
     ctx.record_complete(
         prompt_tokens=result.response.usage.prompt_tokens,
@@ -639,29 +701,29 @@ async def ollama_tags(request: Request):
 # =============================================================================
 
 
-@router.post("/embeddings")
-async def ollama_embeddings(
+async def _run_embeddings(
     request: Request,
-    body: OllamaEmbeddingsRequest,
-    auth: Annotated[AuthResult, Depends(get_auth)],
-    dispatcher: Annotated[Dispatcher, Depends(get_dispatcher)],
-    enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
-    pii_scrubber: Annotated[PIIScrubber | None, Depends(get_pii_scrubber)],
-    audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
-    sanitizer: Annotated[Sanitizer, Depends(get_sanitizer)],
-    security_analyzer: Annotated[AsyncSecurityAnalyzer | None, Depends(get_security_analyzer)],
-):
-    """Ollama-compatible embeddings endpoint."""
+    *,
+    model: str,
+    inputs: list[str],
+    auth: AuthResult,
+    dispatcher: Dispatcher,
+    enforcer: PolicyEnforcer,
+    pii_scrubber: PIIScrubber | None,
+    audit_logger: AuditLogger | None,
+    sanitizer: Sanitizer,
+    security_analyzer: AsyncSecurityAnalyzer | None,
+) -> list[list[float]]:
+    """Shared embeddings pipeline for /api/embeddings (legacy) and /api/embed."""
     client_id = auth.client_id
 
     ctx = setup_request_context(
         client_id=client_id,
-        model=body.model,
+        model=model,
         task="embeddings",
     )
 
-    # Handle both single string and list of strings
-    prompts = body.prompt if isinstance(body.prompt, list) else [body.prompt]
+    prompts = inputs
 
     # Security: Sanitize prompts
     sanitized_prompts = [sanitizer.sanitize(p).sanitized for p in prompts]
@@ -685,7 +747,7 @@ async def ollama_embeddings(
                     request_id=ctx.request_id,
                     client_id=client_id,
                     task="embeddings",
-                    model=body.model,
+                    model=model,
                     messages=pre_scrub_messages,
                     pii_results=pii_results,
                     was_scrubbed=scrub,
@@ -698,7 +760,7 @@ async def ollama_embeddings(
         security_analyzer.queue_request(
             request_id=ctx.request_id,
             client_id=client_id,
-            model=body.model,
+            model=model,
             messages=[{"role": "user", "content": "\n".join(sanitized_prompts)}],
             task="embeddings",
             source_ip=request.client.host if request.client else None,
@@ -706,8 +768,8 @@ async def ollama_embeddings(
 
     request_kwargs = {
         "task": TaskType.EMBEDDINGS,
-        "model": body.model,
-        "prompt": sanitized_prompts[0] if len(sanitized_prompts) == 1 else None,
+        "model": model,
+        "input_data": sanitized_prompts,
         "client_id": client_id,
     }
 
@@ -729,7 +791,7 @@ async def ollama_embeddings(
     except PolicyViolation as e:
         translate_policy_violation(e)
 
-    result = await dispatcher.dispatch(internal_request)
+    result = await run_unless_disconnected(request, dispatcher.dispatch(internal_request))
 
     metrics.record_request(
         provider=result.provider_used,
@@ -760,8 +822,64 @@ async def ollama_embeddings(
             request_body={"prompts": sanitized_prompts},
         )
 
-    # Return embeddings in Ollama format
-    embeddings = result.response.embeddings
+    return result.response.embeddings or []
+
+
+@router.post("/embeddings")
+async def ollama_embeddings(
+    request: Request,
+    body: OllamaEmbeddingsRequest,
+    auth: Annotated[AuthResult, Depends(get_auth)],
+    dispatcher: Annotated[Dispatcher, Depends(get_dispatcher)],
+    enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
+    pii_scrubber: Annotated[PIIScrubber | None, Depends(get_pii_scrubber)],
+    audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
+    sanitizer: Annotated[Sanitizer, Depends(get_sanitizer)],
+    security_analyzer: Annotated[AsyncSecurityAnalyzer | None, Depends(get_security_analyzer)],
+):
+    """Ollama-compatible embeddings endpoint (legacy shape)."""
+    inputs = body.prompt if isinstance(body.prompt, list) else [body.prompt]
+    embeddings = await _run_embeddings(
+        request,
+        model=body.model,
+        inputs=inputs,
+        auth=auth,
+        dispatcher=dispatcher,
+        enforcer=enforcer,
+        pii_scrubber=pii_scrubber,
+        audit_logger=audit_logger,
+        sanitizer=sanitizer,
+        security_analyzer=security_analyzer,
+    )
     if embeddings and len(embeddings) == 1:
         return OllamaEmbeddingsResponse(embedding=embeddings[0])
-    return OllamaEmbeddingsResponse(embedding=embeddings or [])
+    return OllamaEmbeddingsResponse(embedding=embeddings)
+
+
+@router.post("/embed")
+async def ollama_embed(
+    request: Request,
+    body: OllamaEmbedRequest,
+    auth: Annotated[AuthResult, Depends(get_auth)],
+    dispatcher: Annotated[Dispatcher, Depends(get_dispatcher)],
+    enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
+    pii_scrubber: Annotated[PIIScrubber | None, Depends(get_pii_scrubber)],
+    audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
+    sanitizer: Annotated[Sanitizer, Depends(get_sanitizer)],
+    security_analyzer: Annotated[AsyncSecurityAnalyzer | None, Depends(get_security_analyzer)],
+):
+    """Ollama-compatible embed endpoint (modern shape, Ollama >= 0.2.6)."""
+    inputs = body.input if isinstance(body.input, list) else [body.input]
+    embeddings = await _run_embeddings(
+        request,
+        model=body.model,
+        inputs=inputs,
+        auth=auth,
+        dispatcher=dispatcher,
+        enforcer=enforcer,
+        pii_scrubber=pii_scrubber,
+        audit_logger=audit_logger,
+        sanitizer=sanitizer,
+        security_analyzer=security_analyzer,
+    )
+    return OllamaEmbedResponse(model=body.model, embeddings=embeddings)

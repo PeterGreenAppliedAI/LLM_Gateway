@@ -6,6 +6,7 @@ Per PRD Section 6: vLLM is a required runtime with full support.
 vLLM exposes an OpenAI-compatible API, so we use those endpoints.
 """
 
+import asyncio
 import time
 from collections.abc import AsyncIterator
 from typing import Any
@@ -47,15 +48,17 @@ class VLLMAdapter(ProviderAdapter):
         """
         super().__init__(config=config, provider_type=ProviderType.VLLM)
         self._client: httpx.AsyncClient | None = None
+        self._client_lock = asyncio.Lock()
 
     async def _get_client(self) -> httpx.AsyncClient:
-        """Get or create HTTP client."""
-        if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(
-                base_url=self.base_url,
-                timeout=httpx.Timeout(self.timeout),
-            )
-        return self._client
+        """Get or create HTTP client (thread-safe)."""
+        async with self._client_lock:
+            if self._client is None or self._client.is_closed:
+                self._client = httpx.AsyncClient(
+                    base_url=self.base_url,
+                    timeout=httpx.Timeout(self.timeout, connect=self.connect_timeout),
+                )
+            return self._client
 
     async def close(self) -> None:
         """Close the HTTP client."""
@@ -137,8 +140,12 @@ class VLLMAdapter(ProviderAdapter):
             return self._error_response(request, f"Timeout: {e}", "timeout")
         except httpx.HTTPStatusError as e:
             return self._error_response(
-                request, f"HTTP {e.response.status_code}: {e.response.text}", "http_error"
+                request,
+                f"HTTP {e.response.status_code}: {e.response.text}",
+                f"http_{e.response.status_code}",
             )
+        except httpx.ConnectError as e:
+            return self._error_response(request, f"Connection failed: {e}", "connection_error")
         except Exception as e:
             return self._error_response(request, str(e), "unknown_error")
 
@@ -154,14 +161,18 @@ class VLLMAdapter(ProviderAdapter):
             client = await self._get_client()
 
             # Build OpenAI-compatible completion request
-            vllm_request = {
-                "model": request.model or "default",
+            vllm_request: dict[str, Any] = {
+                "model": request.model,
                 "prompt": request.prompt or request.get_input_text(),
-                "max_tokens": request.max_tokens,
-                "temperature": request.temperature,
-                "top_p": request.top_p,
                 "stream": False,
             }
+            for key, value in (
+                ("max_tokens", request.max_tokens),
+                ("temperature", request.temperature),
+                ("top_p", request.top_p),
+            ):
+                if value is not None:
+                    vllm_request[key] = value
 
             response = await client.post("/v1/completions", json=vllm_request)
             response.raise_for_status()
@@ -175,14 +186,34 @@ class VLLMAdapter(ProviderAdapter):
             return self._error_response(request, f"Timeout: {e}", "timeout")
         except httpx.HTTPStatusError as e:
             return self._error_response(
-                request, f"HTTP {e.response.status_code}: {e.response.text}", "http_error"
+                request,
+                f"HTTP {e.response.status_code}: {e.response.text}",
+                f"http_{e.response.status_code}",
             )
+        except httpx.ConnectError as e:
+            return self._error_response(request, f"Connection failed: {e}", "connection_error")
         except Exception as e:
             return self._error_response(request, str(e), "unknown_error")
 
     # =========================================================================
     # Streaming
     # =========================================================================
+
+    # Per-chunk timeout: if no chunk arrives within this window, the stream is dead
+    STREAM_CHUNK_TIMEOUT = 120.0  # seconds between chunks
+
+    async def _iter_lines_with_timeout(self, response: httpx.Response) -> AsyncIterator[str]:
+        """Iterate response lines with a per-chunk timeout."""
+        aiter = response.aiter_lines().__aiter__()
+        while True:
+            try:
+                line = await asyncio.wait_for(
+                    aiter.__anext__(),
+                    timeout=self.STREAM_CHUNK_TIMEOUT,
+                )
+                yield line
+            except StopAsyncIteration:
+                break
 
     async def chat_stream(self, request: InternalRequest) -> AsyncIterator[StreamChunk]:
         """Stream chat completion via vLLM /v1/chat/completions with stream=true."""
@@ -194,7 +225,7 @@ class VLLMAdapter(ProviderAdapter):
             async with client.stream("POST", "/v1/chat/completions", json=vllm_request) as response:
                 response.raise_for_status()
                 index = 0
-                async for line in response.aiter_lines():
+                async for line in self._iter_lines_with_timeout(response):
                     if not line or line.startswith(":"):
                         continue
                     if line.startswith("data: "):
@@ -295,18 +326,26 @@ class VLLMAdapter(ProviderAdapter):
                 messages.append(m)
 
         req: dict[str, Any] = {
-            "model": request.model or "default",
+            "model": request.model,
             "messages": messages,
-            "max_tokens": request.max_tokens,
-            "temperature": request.temperature,
-            "top_p": request.top_p,
             "stream": False,
         }
+
+        # Only send sampling params the client set — None means "engine default"
+        for key, value in (
+            ("max_tokens", request.max_tokens),
+            ("temperature", request.temperature),
+            ("top_p", request.top_p),
+        ):
+            if value is not None:
+                req[key] = value
 
         if request.tools:
             req["tools"] = request.tools
         if request.tool_choice is not None:
             req["tool_choice"] = request.tool_choice
+        if request.response_format:
+            req["response_format"] = request.response_format
 
         return req
 

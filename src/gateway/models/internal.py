@@ -129,10 +129,13 @@ class InternalRequest(BaseModel):
     input_text: BoundedContent | None = None  # For summarize/extract/classify tasks
     input_data: list[str] | None = Field(default=None, max_length=1000)  # For embeddings
 
-    # Generation parameters (max_tokens=0 valid for embeddings)
-    max_tokens: int = Field(default=1024, ge=0, le=32768)
-    temperature: float = Field(default=0.7, ge=0.0, le=2.0)
-    top_p: float = Field(default=1.0, ge=0.0, le=1.0)
+    # Generation parameters. None means "client didn't specify" — adapters
+    # must omit the parameter so the engine's own default applies, never
+    # invent one (silent degradation). Upper bounds are enforced loudly by
+    # the policy layer (TokenLimitExceeded -> 4xx), not clamped here.
+    max_tokens: int | None = Field(default=None, ge=0)
+    temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+    top_p: float | None = Field(default=None, ge=0.0, le=1.0)
     stop: list[str] | None = Field(default=None, max_length=10)  # Max 10 stop sequences
     stream: bool = False
 
@@ -146,7 +149,18 @@ class InternalRequest(BaseModel):
     tool_choice: str | dict[str, Any] | None = None  # "auto", "none", "required", or specific tool
 
     # Advanced options
-    response_format: dict[str, Any] | None = None  # JSON schema for structured output
+    # Normalized structured-output request (OpenAI response_format shape):
+    # {"type": "json_object"} or {"type": "json_schema", "json_schema": {...}}.
+    # Adapters translate to their engine's native mechanism (Ollama `format`).
+    response_format: dict[str, Any] | None = None
+    # Engine-native generation options, forwarded verbatim by same-protocol
+    # adapters (e.g. Ollama `options`: num_ctx, top_k, repeat_penalty, ...).
+    # Normalized fields above win only for policy; the client's values here
+    # take precedence in the upstream payload.
+    options: dict[str, Any] = Field(default_factory=dict)
+    # Engine-native top-level fields outside generation options
+    # (e.g. Ollama `keep_alive`). Unknown keys are forwarded, not dropped.
+    extensions: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)  # Pass-through metadata
 
     def get_input_text(self) -> str:
@@ -230,5 +244,6 @@ class StreamChunk(BaseModel):
     index: int = 0
     delta: str  # Incremental content
     thinking: str | None = None  # Reasoning model thinking tokens
+    tool_calls: list[ToolCall] | None = None  # Tool calls arriving mid-stream
     finish_reason: FinishReason | None = None
     usage: UsageStats | None = None  # Only in final chunk

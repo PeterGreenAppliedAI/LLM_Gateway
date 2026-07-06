@@ -63,6 +63,7 @@ class OpenAIAdapter(ProviderAdapter):
         """
         super().__init__(config=config, provider_type=ProviderType.OPENAI)
         self._client: httpx.AsyncClient | None = None
+        self._client_lock = asyncio.Lock()
 
         # Resolve API key from config or environment
         self._api_key = self._resolve_api_key(config)
@@ -103,12 +104,8 @@ class OpenAIAdapter(ProviderAdapter):
 
         return None
 
-    _client_lock: asyncio.Lock | None = None
-
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create HTTP client with authentication headers (thread-safe)."""
-        if self._client_lock is None:
-            self._client_lock = asyncio.Lock()
         async with self._client_lock:
             if self._client is None or self._client.is_closed:
                 headers = {"Content-Type": "application/json"}
@@ -121,7 +118,7 @@ class OpenAIAdapter(ProviderAdapter):
 
                 self._client = httpx.AsyncClient(
                     base_url=self.base_url,
-                    timeout=httpx.Timeout(self.timeout),
+                    timeout=httpx.Timeout(self.timeout, connect=self.connect_timeout),
                     headers=headers,
                 )
             return self._client
@@ -201,8 +198,12 @@ class OpenAIAdapter(ProviderAdapter):
         except httpx.HTTPStatusError as e:
             error_detail = self._parse_error_response(e.response)
             return self._error_response(
-                request, f"HTTP {e.response.status_code}: {error_detail}", "http_error"
+                request,
+                f"HTTP {e.response.status_code}: {error_detail}",
+                f"http_{e.response.status_code}",
             )
+        except httpx.ConnectError as e:
+            return self._error_response(request, f"Connection failed: {e}", "connection_error")
         except Exception as e:
             return self._error_response(request, str(e), "unknown_error")
 
@@ -236,8 +237,12 @@ class OpenAIAdapter(ProviderAdapter):
                 return await super().generate(request)
             error_detail = self._parse_error_response(e.response)
             return self._error_response(
-                request, f"HTTP {e.response.status_code}: {error_detail}", "http_error"
+                request,
+                f"HTTP {e.response.status_code}: {error_detail}",
+                f"http_{e.response.status_code}",
             )
+        except httpx.ConnectError as e:
+            return self._error_response(request, f"Connection failed: {e}", "connection_error")
         except Exception as e:
             return self._error_response(request, str(e), "unknown_error")
 
@@ -286,8 +291,12 @@ class OpenAIAdapter(ProviderAdapter):
         except httpx.HTTPStatusError as e:
             error_detail = self._parse_error_response(e.response)
             return self._error_response(
-                request, f"HTTP {e.response.status_code}: {error_detail}", "http_error"
+                request,
+                f"HTTP {e.response.status_code}: {error_detail}",
+                f"http_{e.response.status_code}",
             )
+        except httpx.ConnectError as e:
+            return self._error_response(request, f"Connection failed: {e}", "connection_error")
         except Exception as e:
             return self._error_response(request, str(e), "unknown_error")
 
@@ -431,13 +440,19 @@ class OpenAIAdapter(ProviderAdapter):
                 messages.append(m)
 
         req: dict[str, Any] = {
-            "model": request.model or "gpt-3.5-turbo",
+            "model": request.model,
             "messages": messages,
-            "max_tokens": request.max_tokens,
-            "temperature": request.temperature,
-            "top_p": request.top_p,
             "stream": False,
         }
+
+        # Only send sampling params the client set — None means "engine default"
+        for key, value in (
+            ("max_tokens", request.max_tokens),
+            ("temperature", request.temperature),
+            ("top_p", request.top_p),
+        ):
+            if value is not None:
+                req[key] = value
 
         # Add tool definitions if provided
         if request.tools:
@@ -457,15 +472,20 @@ class OpenAIAdapter(ProviderAdapter):
 
     def _build_completion_request(self, request: InternalRequest) -> dict[str, Any]:
         """Build OpenAI /v1/completions request body."""
-        return {
-            "model": request.model or "gpt-3.5-turbo-instruct",
+        req: dict[str, Any] = {
+            "model": request.model,
             "prompt": request.prompt or request.get_input_text(),
-            "max_tokens": request.max_tokens,
-            "temperature": request.temperature,
-            "top_p": request.top_p,
             "stream": False,
-            "stop": request.stop,
         }
+        for key, value in (
+            ("max_tokens", request.max_tokens),
+            ("temperature", request.temperature),
+            ("top_p", request.top_p),
+            ("stop", request.stop),
+        ):
+            if value is not None:
+                req[key] = value
+        return req
 
     def _parse_chat_response(
         self, request: InternalRequest, data: dict[str, Any], latency_ms: float

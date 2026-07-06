@@ -42,9 +42,11 @@ class OllamaChatRequest(BaseModel):
     model: str
     messages: list[OllamaMessage]
     stream: bool = True
-    format: str | None = None
+    # "json" for JSON mode, or a JSON-schema dict for grammar-constrained
+    # decoding (Ollama >= 0.5) — both forwarded upstream
+    format: str | dict[str, Any] | None = None
     options: dict[str, Any] | None = None
-    keep_alive: str | None = None
+    keep_alive: str | float | None = None
     tools: list[dict[str, Any]] | None = None
 
 
@@ -54,21 +56,31 @@ class OllamaGenerateRequest(BaseModel):
     model: str
     prompt: str
     stream: bool = True
-    format: str | None = None
+    format: str | dict[str, Any] | None = None
     options: dict[str, Any] | None = None
     system: str | None = None
     template: str | None = None
     context: list[int] | None = None
-    keep_alive: str | None = None
+    keep_alive: str | float | None = None
 
 
 class OllamaEmbeddingsRequest(BaseModel):
-    """Ollama /api/embeddings request format."""
+    """Ollama /api/embeddings request format (legacy)."""
 
     model: str
     prompt: str | list[str]
     options: dict[str, Any] | None = None
-    keep_alive: str | None = None
+    keep_alive: str | float | None = None
+
+
+class OllamaEmbedRequest(BaseModel):
+    """Ollama /api/embed request format (modern, Ollama >= 0.2.6)."""
+
+    model: str
+    input: str | list[str]
+    truncate: bool | None = None
+    options: dict[str, Any] | None = None
+    keep_alive: str | float | None = None
 
 
 # =============================================================================
@@ -117,9 +129,16 @@ class OllamaGenerateResponse(BaseModel):
 
 
 class OllamaEmbeddingsResponse(BaseModel):
-    """Ollama /api/embeddings response format."""
+    """Ollama /api/embeddings response format (legacy)."""
 
     embedding: list[float] | list[list[float]]
+
+
+class OllamaEmbedResponse(BaseModel):
+    """Ollama /api/embed response format (modern)."""
+
+    model: str
+    embeddings: list[list[float]]
 
 
 class OllamaModelInfo(BaseModel):

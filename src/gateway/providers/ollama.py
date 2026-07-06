@@ -51,18 +51,15 @@ class OllamaAdapter(ProviderAdapter):
         """
         super().__init__(config=config, provider_type=ProviderType.OLLAMA)
         self._client: httpx.AsyncClient | None = None
-
-    _client_lock: asyncio.Lock | None = None
+        self._client_lock = asyncio.Lock()
 
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create HTTP client (thread-safe)."""
-        if self._client_lock is None:
-            self._client_lock = asyncio.Lock()
         async with self._client_lock:
             if self._client is None or self._client.is_closed:
                 self._client = httpx.AsyncClient(
                     base_url=self.base_url,
-                    timeout=httpx.Timeout(self.timeout),
+                    timeout=httpx.Timeout(self.timeout, connect=self.connect_timeout),
                 )
             return self._client
 
@@ -181,8 +178,12 @@ class OllamaAdapter(ProviderAdapter):
                 endpoint=self.base_url,
             )
             return self._error_response(
-                request, f"HTTP {e.response.status_code}: {error_body}", "http_error"
+                request,
+                f"HTTP {e.response.status_code}: {error_body}",
+                f"http_{e.response.status_code}",
             )
+        except httpx.ConnectError as e:
+            return self._error_response(request, f"Connection failed: {e}", "connection_error")
         except Exception as e:
             return self._error_response(request, str(e), "unknown_error")
 
@@ -212,8 +213,12 @@ class OllamaAdapter(ProviderAdapter):
             return self._error_response(request, f"Timeout: {e}", "timeout")
         except httpx.HTTPStatusError as e:
             return self._error_response(
-                request, f"HTTP {e.response.status_code}: {e.response.text[:200]}", "http_error"
+                request,
+                f"HTTP {e.response.status_code}: {e.response.text[:200]}",
+                f"http_{e.response.status_code}",
             )
+        except httpx.ConnectError as e:
+            return self._error_response(request, f"Connection failed: {e}", "connection_error")
         except Exception as e:
             return self._error_response(request, str(e), "unknown_error")
 
@@ -228,7 +233,7 @@ class OllamaAdapter(ProviderAdapter):
             input_texts = request.input_data or [request.get_input_text()]
 
             ollama_request = {
-                "model": request.model or "nomic-embed-text",
+                "model": request.model,
                 "input": input_texts,
             }
 
@@ -242,7 +247,7 @@ class OllamaAdapter(ProviderAdapter):
                 request_id=request.request_id,
                 task=TaskType.EMBEDDINGS,
                 provider=self.name,
-                model=request.model or "nomic-embed-text",
+                model=request.model or "unknown",
                 embeddings=data.get("embeddings", []),
                 finish_reason=FinishReason.STOP,
                 usage=UsageStats(
@@ -255,8 +260,12 @@ class OllamaAdapter(ProviderAdapter):
             return self._error_response(request, f"Timeout: {e}", "timeout")
         except httpx.HTTPStatusError as e:
             return self._error_response(
-                request, f"HTTP {e.response.status_code}: {e.response.text[:200]}", "http_error"
+                request,
+                f"HTTP {e.response.status_code}: {e.response.text[:200]}",
+                f"http_{e.response.status_code}",
             )
+        except httpx.ConnectError as e:
+            return self._error_response(request, f"Connection failed: {e}", "connection_error")
         except Exception as e:
             return self._error_response(request, str(e), "unknown_error")
 
@@ -318,6 +327,13 @@ class OllamaAdapter(ProviderAdapter):
                     # Reasoning models (e.g., Nemotron) stream thinking tokens
                     # in a separate field before the content phase
                     thinking = message.get("thinking", "")
+                    # Ollama streams tool calls as complete objects in chunks
+                    tool_calls = None
+                    if message.get("tool_calls"):
+                        tool_calls = [
+                            ToolCall(type="function", function=tc.get("function", {}))
+                            for tc in message["tool_calls"]
+                        ]
                     done = chunk_data.get("done", False)
 
                     finish_reason = None
@@ -338,6 +354,7 @@ class OllamaAdapter(ProviderAdapter):
                         index=index,
                         delta=content,
                         thinking=thinking or None,
+                        tool_calls=tool_calls,
                         finish_reason=finish_reason,
                         usage=usage,
                     )
@@ -429,16 +446,21 @@ class OllamaAdapter(ProviderAdapter):
                 messages.append(m)
 
         result: dict[str, Any] = {
-            "model": request.model or "llama3.2",
+            "model": request.model,
             "messages": messages,
             "stream": False,
-            "options": {
-                "num_predict": request.max_tokens,
-                "num_ctx": 32768,
-                "temperature": request.temperature,
-                "top_p": request.top_p,
-            },
         }
+
+        options = self._build_options(request)
+        if options:
+            result["options"] = options
+
+        fmt = self._format_from_response_format(request.response_format)
+        if fmt is not None:
+            result["format"] = fmt
+
+        if "keep_alive" in request.extensions:
+            result["keep_alive"] = request.extensions["keep_alive"]
 
         if request.tools:
             result["tools"] = request.tools
@@ -447,17 +469,65 @@ class OllamaAdapter(ProviderAdapter):
 
     def _build_generate_request(self, request: InternalRequest) -> dict[str, Any]:
         """Build Ollama /api/generate request body."""
-        return {
-            "model": request.model or "llama3.2",
+        result: dict[str, Any] = {
+            "model": request.model,
             "prompt": request.prompt or request.get_input_text(),
             "stream": False,
-            "options": {
-                "num_predict": request.max_tokens,
-                "num_ctx": 32768,
-                "temperature": request.temperature,
-                "top_p": request.top_p,
-            },
         }
+
+        options = self._build_options(request)
+        if options:
+            result["options"] = options
+
+        fmt = self._format_from_response_format(request.response_format)
+        if fmt is not None:
+            result["format"] = fmt
+
+        # Engine-native generate fields (system, template, context, keep_alive)
+        for key in ("system", "template", "context", "keep_alive"):
+            if key in request.extensions:
+                result[key] = request.extensions[key]
+
+        return result
+
+    @staticmethod
+    def _build_options(request: InternalRequest) -> dict[str, Any]:
+        """Build the Ollama options dict.
+
+        The client's own options pass through verbatim and always win.
+        Normalized fields fill in only when the client didn't send the
+        native key (cross-protocol requests). Nothing is invented: absent
+        means the engine's default applies (no hardcoded num_ctx, no
+        default num_predict).
+        """
+        options: dict[str, Any] = dict(request.options)
+
+        normalized = {
+            "num_predict": request.max_tokens,
+            "temperature": request.temperature,
+            "top_p": request.top_p,
+        }
+        for key, value in normalized.items():
+            if value is not None and key not in options:
+                options[key] = value
+
+        if request.stop and "stop" not in options:
+            options["stop"] = request.stop
+
+        return options
+
+    @staticmethod
+    def _format_from_response_format(response_format: dict[str, Any] | None) -> str | dict | None:
+        """Translate normalized response_format to Ollama's `format` param."""
+        if not response_format:
+            return None
+        format_type = response_format.get("type")
+        if format_type == "json_object":
+            return "json"
+        if format_type == "json_schema":
+            schema = response_format.get("json_schema", {}).get("schema")
+            return schema or "json"
+        return None
 
     def _parse_chat_response(
         self, request: InternalRequest, data: dict[str, Any], latency_ms: float

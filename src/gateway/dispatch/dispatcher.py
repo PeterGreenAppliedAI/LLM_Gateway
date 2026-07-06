@@ -32,7 +32,9 @@ from gateway.errors import (
     AllProvidersUnavailableError,
     AmbiguousModelError,
     EndpointNotFoundError,
+    GatewayError,
     NoProviderError,
+    ProviderError,
     ProviderUnavailableError,
 )
 from gateway.models.common import HealthStatus
@@ -396,13 +398,8 @@ class Dispatcher:
         # Dispatch based on task type
         try:
             response = await self._execute_request(adapter, request)
-
-            # Check if response is an error
-            if response.is_error:
-                return None
-
-            return response
-
+        except GatewayError:
+            raise
         except Exception as e:
             logger.warning(
                 "Provider dispatch failed",
@@ -412,6 +409,39 @@ class Dispatcher:
                 error_type=type(e).__name__,
             )
             return None
+
+        if response.is_error:
+            # Retryable failures (timeouts, connection errors, upstream 5xx)
+            # fall through to the next provider. Upstream 4xx means the
+            # request itself is wrong (bad model, invalid params) — retrying
+            # elsewhere just masks the real error, so propagate it.
+            if self._is_retryable_error(response.error_code):
+                logger.warning(
+                    "Provider returned retryable error",
+                    provider=provider_name,
+                    model=request.model,
+                    error=response.error,
+                    error_code=response.error_code,
+                )
+                return None
+            raise ProviderError(
+                message=response.error or "Provider error",
+                provider=provider_name,
+                details={"error_code": response.error_code, "model": request.model},
+            )
+
+        return response
+
+    @staticmethod
+    def _is_retryable_error(error_code: str | None) -> bool:
+        """Whether an adapter error response justifies trying another provider."""
+        if error_code is None:
+            return True
+        if error_code.startswith("http_"):
+            # http_<status>: only server-side errors are retryable
+            status = error_code.removeprefix("http_")
+            return status.startswith("5")
+        return error_code in {"timeout", "connection_error", "unknown_error", "empty_response"}
 
     async def _execute_request(
         self, adapter: ProviderAdapter, request: InternalRequest
@@ -536,11 +566,12 @@ class Dispatcher:
                 continue
 
             # If first chunk is an error, try next provider
-            # (thinking-only chunks are valid for reasoning models)
+            # (thinking-only and tool-call chunks are valid content)
             if (
                 first_chunk.finish_reason == FinishReason.ERROR
                 and not first_chunk.delta
                 and not first_chunk.thinking
+                and not first_chunk.tool_calls
             ):
                 continue
 

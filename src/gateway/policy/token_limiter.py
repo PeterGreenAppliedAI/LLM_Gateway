@@ -95,26 +95,25 @@ class TokenLimiter:
         """Get maximum allowed tokens per request."""
         return self._config.max_tokens_per_request
 
-    def validate_max_tokens(self, requested_max_tokens: int | None) -> int:
-        """Validate and return max_tokens for a request.
+    def validate_max_tokens(self, requested_max_tokens: int | None) -> int | None:
+        """Validate max_tokens for a request.
+
+        None (client didn't specify) passes through as None — the gateway
+        never invents a limit; the engine's own default applies.
 
         Args:
             requested_max_tokens: max_tokens from request, or None
 
         Returns:
-            Validated max_tokens value (possibly capped or defaulted)
+            The requested value, or None if not specified
 
         Raises:
-            TokenLimitExceeded: If requested tokens exceed limit and limiting is strict
+            TokenLimitExceeded: If requested tokens exceed the configured limit
         """
-        if not self._config.enabled:
-            return requested_max_tokens or self._config.default_max_tokens
+        if not self._config.enabled or requested_max_tokens is None:
+            return requested_max_tokens
 
-        # Use default if not specified
-        if requested_max_tokens is None:
-            return self._config.default_max_tokens
-
-        # Cap at maximum allowed
+        # Reject anything over the maximum — loudly, never a silent clamp
         if requested_max_tokens > self._config.max_tokens_per_request:
             raise TokenLimitExceeded(
                 f"Requested max_tokens ({requested_max_tokens}) exceeds limit ({self._config.max_tokens_per_request})",
@@ -122,10 +121,6 @@ class TokenLimiter:
                 limit=self._config.max_tokens_per_request,
                 limit_type="max_tokens_per_request",
             )
-
-        # Ensure positive
-        if requested_max_tokens < 1:
-            return self._config.default_max_tokens
 
         return requested_max_tokens
 

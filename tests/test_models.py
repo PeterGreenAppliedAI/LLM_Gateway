@@ -309,8 +309,11 @@ class TestInternalRequest:
         req = InternalRequest(task=TaskType.CHAT)
         assert req.client_id == "default"
         assert req.user_id == "anonymous"
-        assert req.max_tokens == 1024
-        assert req.temperature == 0.7
+        # Unset generation params stay None — the gateway never invents
+        # defaults; the engine's own defaults apply
+        assert req.max_tokens is None
+        assert req.temperature is None
+        assert req.top_p is None
         assert req.fallback_allowed is True
         assert req.stream is False
 
@@ -356,9 +359,10 @@ class TestInternalRequest:
         # Negative is invalid
         with pytest.raises(ValueError):
             InternalRequest(task=TaskType.CHAT, max_tokens=-1)
-        # Too large is invalid
-        with pytest.raises(ValueError):
-            InternalRequest(task=TaskType.CHAT, max_tokens=50000)
+        # Large values pass schema validation — the policy layer enforces
+        # the configurable cap loudly (TokenLimitExceeded -> 4xx)
+        req = InternalRequest(task=TaskType.CHAT, max_tokens=50000)
+        assert req.max_tokens == 50000
 
     def test_temperature_validation(self) -> None:
         """temperature must be between 0 and 2."""
@@ -470,8 +474,9 @@ class TestOpenAIChatRequest:
         )
         internal = req.to_internal()
 
-        assert internal.max_tokens == 1024  # default
-        assert internal.temperature == 0.7  # default
+        # Client didn't set them: pass through as None, never invented
+        assert internal.max_tokens is None
+        assert internal.temperature is None
         assert internal.user_id == "anonymous"
 
     def test_to_internal_with_stop_string(self) -> None:

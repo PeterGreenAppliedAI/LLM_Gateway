@@ -54,6 +54,7 @@ class ProviderAdapter(ABC):
         self.provider_type = provider_type
         self.base_url = config.base_url  # Already validated by ProviderConfig
         self.timeout = config.timeout
+        self.connect_timeout = config.connect_timeout
         self.max_retries = config.max_retries
 
     # =========================================================================

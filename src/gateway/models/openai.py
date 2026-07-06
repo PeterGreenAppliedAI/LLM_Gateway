@@ -141,9 +141,9 @@ class OpenAIChatRequest(BaseModel):
             task=task,
             model=self.model,
             messages=messages,
-            max_tokens=self.max_tokens or 1024,
-            temperature=self.temperature if self.temperature is not None else 0.7,
-            top_p=self.top_p if self.top_p is not None else 1.0,
+            max_tokens=self.max_tokens,
+            temperature=self.temperature,
+            top_p=self.top_p,
             stop=stop_sequences,
             stream=self.stream,
             tools=self.tools,
@@ -278,7 +278,8 @@ class OpenAICompletionRequest(BaseModel):
 
     model: str
     prompt: str | list[str]
-    max_tokens: int | None = Field(default=None, le=32768)
+    # Upper bound enforced by the policy layer (configurable), not the schema
+    max_tokens: int | None = Field(default=None, ge=0)
     temperature: float | None = Field(default=None, ge=0.0, le=2.0)
     top_p: float | None = Field(default=None, ge=0.0, le=1.0)
     stop: str | list[str] | None = None
@@ -306,9 +307,9 @@ class OpenAICompletionRequest(BaseModel):
             task=task,
             model=self.model,
             prompt=prompt_text,
-            max_tokens=self.max_tokens or 1024,
-            temperature=self.temperature if self.temperature is not None else 0.7,
-            top_p=self.top_p if self.top_p is not None else 1.0,
+            max_tokens=self.max_tokens,
+            temperature=self.temperature,
+            top_p=self.top_p,
             stop=stop_sequences,
             stream=self.stream,
         )
