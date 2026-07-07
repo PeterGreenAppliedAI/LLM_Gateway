@@ -64,6 +64,15 @@ metrics = get_metrics()
 router = APIRouter(prefix="/v1", tags=["openai"])
 
 
+def _audit_response_body(response) -> dict:
+    """Model output for the audit log (stored only when the operator
+    enables response-body storage; embeddings are never included)."""
+    body: dict = {"content": response.content or ""}
+    if response.tool_calls:
+        body["tool_calls"] = [{"function": tc.function} for tc in response.tool_calls]
+    return body
+
+
 # =============================================================================
 # Chat Completions
 # =============================================================================
@@ -227,6 +236,12 @@ async def chat_completions(
             tokens_per_second=ctx.tokens_per_second,
             prompt_tokens=result.response.usage.prompt_tokens,
             completion_tokens=result.response.usage.completion_tokens,
+            request_body={
+                "messages": [
+                    m.model_dump(exclude_none=True) for m in internal_request.messages or []
+                ]
+            },
+            response_body=_audit_response_body(result.response),
         )
 
     # Convert to OpenAI format
@@ -273,6 +288,7 @@ async def _stream_chat_response(
         provider_name = None
         final_prompt_tokens = 0
         final_completion_tokens = 0
+        full_content = ""
 
         try:
             provider_name, stream = await dispatcher.dispatch_stream(internal_request)
@@ -282,6 +298,7 @@ async def _stream_chat_response(
                 if first_chunk:
                     ctx.record_first_token()
                     first_chunk = False
+                full_content += chunk.delta or ""
 
                 # Convert to OpenAI streaming format
                 response = OpenAIChatStreamResponse.from_chunk(chunk, model)
@@ -323,6 +340,7 @@ async def _stream_chat_response(
                             tokens_per_second=ctx.tokens_per_second,
                             prompt_tokens=final_prompt_tokens,
                             completion_tokens=final_completion_tokens,
+                            response_body={"content": full_content},
                         )
 
             # Send [DONE] marker
@@ -550,6 +568,8 @@ async def completions(
             tokens_per_second=ctx.tokens_per_second,
             prompt_tokens=result.response.usage.prompt_tokens,
             completion_tokens=result.response.usage.completion_tokens,
+            request_body={"prompt": internal_request.prompt},
+            response_body=_audit_response_body(result.response),
         )
 
     return OpenAICompletionResponse.from_internal(result.response)

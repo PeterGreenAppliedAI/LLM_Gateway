@@ -82,6 +82,15 @@ def _normalize_ollama_format(fmt: str | dict) -> dict:
     return {"type": "json_object"}
 
 
+def _audit_response_body(response) -> dict:
+    """Model output for the audit log (stored only when the operator
+    enables response-body storage; embeddings are never included)."""
+    body: dict = {"content": response.content or ""}
+    if response.tool_calls:
+        body["tool_calls"] = [{"function": tc.function} for tc in response.tool_calls]
+    return body
+
+
 # =============================================================================
 # Chat Endpoint
 # =============================================================================
@@ -285,6 +294,7 @@ async def ollama_chat(
             prompt_tokens=result.response.usage.prompt_tokens,
             completion_tokens=result.response.usage.completion_tokens,
             request_body={"messages": sanitized_messages},
+            response_body=_audit_response_body(result.response),
         )
 
     # Convert to Ollama format - include tool_calls if present
@@ -396,6 +406,7 @@ async def _stream_ollama_chat(
                             prompt_tokens=final_prompt_tokens,
                             completion_tokens=final_completion_tokens,
                             request_body=request_body,
+                            response_body={"content": full_content},
                         )
 
         except Exception:
@@ -592,6 +603,7 @@ async def ollama_generate(
             prompt_tokens=result.response.usage.prompt_tokens,
             completion_tokens=result.response.usage.completion_tokens,
             request_body={"messages": [m for m in analysis_messages]},
+            response_body=_audit_response_body(result.response),
         )
 
     return OllamaGenerateResponse(
@@ -620,7 +632,9 @@ async def _stream_ollama_generate(
         try:
             provider_name, stream = await dispatcher.dispatch_stream(internal_request)
 
+            full_content = ""
             async for chunk in stream:
+                full_content += chunk.delta or ""
                 response = {
                     "model": model,
                     "created_at": _now_iso(),
@@ -642,7 +656,10 @@ async def _stream_ollama_generate(
                             status="success",
                             stream=True,
                             latency_ms=ctx.total_latency_ms,
+                            prompt_tokens=chunk.usage.prompt_tokens if chunk.usage else 0,
+                            completion_tokens=chunk.usage.completion_tokens if chunk.usage else 0,
                             request_body=request_body,
+                            response_body={"content": full_content},
                         )
 
                 yield json.dumps(response) + "\n"

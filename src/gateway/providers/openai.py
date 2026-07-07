@@ -326,12 +326,18 @@ class OpenAIAdapter(ProviderAdapter):
             client = await self._get_client()
             openai_request = self._build_chat_request(request)
             openai_request["stream"] = True
+            # Without this, OpenAI-compatible servers never send token usage
+            # in the stream and every streamed request audits as 0 tokens
+            openai_request["stream_options"] = {"include_usage": True}
 
             async with client.stream(
                 "POST", "/v1/chat/completions", json=openai_request
             ) as response:
                 response.raise_for_status()
                 index = 0
+                # The finish chunk is held back: usage arrives AFTER it, in a
+                # frame with empty choices. Attach usage, then emit as final.
+                pending_final: StreamChunk | None = None
 
                 async for line in self._iter_lines_with_timeout(response):
                     if not line or not line.startswith("data: "):
@@ -346,8 +352,20 @@ class OpenAIAdapter(ProviderAdapter):
                     except json.JSONDecodeError:
                         continue
 
+                    usage = None
+                    usage_data = chunk_data.get("usage")
+                    if usage_data:
+                        usage = UsageStats(
+                            prompt_tokens=usage_data.get("prompt_tokens", 0),
+                            completion_tokens=usage_data.get("completion_tokens", 0),
+                            total_tokens=usage_data.get("total_tokens", 0),
+                        )
+
                     choices = chunk_data.get("choices", [])
                     if not choices:
+                        # Usage-only frame (stream_options.include_usage)
+                        if usage and pending_final:
+                            pending_final = pending_final.model_copy(update={"usage": usage})
                         continue
 
                     choice = choices[0]
@@ -356,20 +374,10 @@ class OpenAIAdapter(ProviderAdapter):
                     finish_reason_str = choice.get("finish_reason")
 
                     finish_reason = None
-                    usage = None
-
                     if finish_reason_str:
                         finish_reason = self._map_finish_reason(finish_reason_str)
-                        # Usage might be in the final chunk
-                        usage_data = chunk_data.get("usage")
-                        if usage_data:
-                            usage = UsageStats(
-                                prompt_tokens=usage_data.get("prompt_tokens", 0),
-                                completion_tokens=usage_data.get("completion_tokens", 0),
-                                total_tokens=usage_data.get("total_tokens", 0),
-                            )
 
-                    yield StreamChunk(
+                    chunk = StreamChunk(
                         request_id=request.request_id,
                         index=index,
                         delta=content,
@@ -377,6 +385,14 @@ class OpenAIAdapter(ProviderAdapter):
                         usage=usage,
                     )
                     index += 1
+
+                    if finish_reason is not None:
+                        pending_final = chunk
+                        continue
+                    yield chunk
+
+                if pending_final is not None:
+                    yield pending_final
 
         except Exception:
             yield StreamChunk(

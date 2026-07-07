@@ -221,10 +221,17 @@ class VLLMAdapter(ProviderAdapter):
             client = await self._get_client()
             vllm_request = self._build_chat_request(request)
             vllm_request["stream"] = True
+            # Without this, OpenAI-compatible servers never send token usage
+            # in the stream and every streamed request audits as 0 tokens
+            vllm_request["stream_options"] = {"include_usage": True}
 
             async with client.stream("POST", "/v1/chat/completions", json=vllm_request) as response:
                 response.raise_for_status()
                 index = 0
+                # The finish chunk is held back: usage arrives AFTER it, in a
+                # frame with empty choices. Attach usage, then emit as final.
+                pending_final: StreamChunk | None = None
+
                 async for line in self._iter_lines_with_timeout(response):
                     if not line or line.startswith(":"):
                         continue
@@ -236,8 +243,21 @@ class VLLMAdapter(ProviderAdapter):
                     import json
 
                     chunk_data = json.loads(line)
+
+                    usage = None
+                    if chunk_data.get("usage"):
+                        usage_data = chunk_data["usage"]
+                        usage = UsageStats(
+                            prompt_tokens=usage_data.get("prompt_tokens", 0),
+                            completion_tokens=usage_data.get("completion_tokens", 0),
+                            total_tokens=usage_data.get("total_tokens", 0),
+                        )
+
                     choices = chunk_data.get("choices", [])
                     if not choices:
+                        # Usage-only frame (stream_options.include_usage)
+                        if usage and pending_final:
+                            pending_final = pending_final.model_copy(update={"usage": usage})
                         continue
 
                     choice = choices[0]
@@ -251,16 +271,7 @@ class VLLMAdapter(ProviderAdapter):
                     elif finish == "length":
                         finish_reason = FinishReason.LENGTH
 
-                    usage = None
-                    if "usage" in chunk_data:
-                        usage_data = chunk_data["usage"]
-                        usage = UsageStats(
-                            prompt_tokens=usage_data.get("prompt_tokens", 0),
-                            completion_tokens=usage_data.get("completion_tokens", 0),
-                            total_tokens=usage_data.get("total_tokens", 0),
-                        )
-
-                    yield StreamChunk(
+                    chunk = StreamChunk(
                         request_id=request.request_id,
                         index=index,
                         delta=content,
@@ -268,6 +279,14 @@ class VLLMAdapter(ProviderAdapter):
                         usage=usage,
                     )
                     index += 1
+
+                    if finish_reason is not None:
+                        pending_final = chunk
+                        continue
+                    yield chunk
+
+                if pending_final is not None:
+                    yield pending_final
 
         except Exception:
             yield StreamChunk(
