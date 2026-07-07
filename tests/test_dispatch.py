@@ -335,7 +335,7 @@ class TestDispatcher:
 
     @pytest.mark.asyncio
     async def test_resolve_provider_uses_default(self, multi_provider_config, sample_request):
-        """Resolve falls back to default when no hints."""
+        """Resolve falls back to default when no hints and empty catalog."""
         registry = ProviderRegistry(multi_provider_config)
         await registry.initialize()
         dispatcher = Dispatcher(registry)
@@ -343,6 +343,53 @@ class TestDispatcher:
         provider, model = dispatcher.resolve_provider(sample_request)
 
         assert provider == "primary"
+
+        await registry.close()
+
+    @pytest.mark.asyncio
+    async def test_resolve_provider_uses_catalog(self, multi_provider_config, sample_request):
+        """Resolve routes to the endpoint that actually has the model.
+
+        Without catalog-aware resolution every request lands on the
+        default endpoint and 404s for models that only exist elsewhere.
+        """
+        registry = ProviderRegistry(multi_provider_config)
+        await registry.initialize()
+        dispatcher = Dispatcher(registry)
+
+        # Catalog knows the model only lives on fallback2
+        registry.get_endpoints_with_model = MagicMock(return_value=["fallback2"])
+
+        request = sample_request.model_copy(update={"model": "exotic-model:70b"})
+        provider, model = dispatcher.resolve_provider(request)
+
+        assert provider == "fallback2"
+        assert model == "exotic-model:70b"
+
+        await registry.close()
+
+    @pytest.mark.asyncio
+    async def test_resolve_provider_catalog_respects_priority(
+        self, multi_provider_config, sample_request
+    ):
+        """When several endpoints have the model, endpoint_priority wins."""
+        from gateway.config import ResolutionConfig
+
+        registry = ProviderRegistry(multi_provider_config)
+        await registry.initialize()
+        dispatcher = Dispatcher(
+            registry,
+            resolution_config=ResolutionConfig(endpoint_priority=["fallback1", "primary"]),
+        )
+
+        registry.get_endpoints_with_model = MagicMock(
+            return_value=["primary", "fallback1", "fallback2"]
+        )
+
+        request = sample_request.model_copy(update={"model": "shared-model:8b"})
+        provider, _ = dispatcher.resolve_provider(request)
+
+        assert provider == "fallback1"
 
         await registry.close()
 

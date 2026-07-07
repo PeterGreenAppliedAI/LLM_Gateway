@@ -60,6 +60,13 @@ endpoints:
       tier: primary
       location: local
 
+  # Example: vLLM endpoint (OpenAI-compatible serving)
+  # - name: vllm-node
+  #   type: vllm
+  #   url: http://192.168.1.100:8000
+  #   enabled: true
+  #   timeout: 300.0
+
   # Example: Second GPU node
   # - name: gpu-node-2
   #   type: ollama

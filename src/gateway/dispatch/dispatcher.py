@@ -163,7 +163,16 @@ class Dispatcher:
         if request.preferred_provider:
             return request.preferred_provider, request.model
 
-        # Fall back to default
+        # Catalog-aware: route to an endpoint that actually has the model,
+        # honoring endpoint_priority when several do. Without this, every
+        # request lands on the default endpoint and 404s for models that
+        # only exist elsewhere.
+        if request.model:
+            candidates = self._registry.get_endpoints_with_model(request.model)
+            if candidates:
+                return self.resolve_endpoint(request, available_endpoints=candidates)
+
+        # Fall back to default (catalog empty or model not yet discovered)
         default = self._registry.get_default_provider()
         if default:
             return default, request.model
