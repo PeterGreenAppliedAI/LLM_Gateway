@@ -605,3 +605,28 @@ class TestOpenAIEmbeddingResponse:
         assert len(openai_resp.data) == 2
         assert openai_resp.data[0].embedding == [0.1, 0.2, 0.3]
         assert openai_resp.data[1].index == 1
+
+
+class TestCatalogModelNameNormalization:
+    """Bare model names match :latest entries (Ollama convention)."""
+
+    def _catalog(self):
+        from gateway.catalog.models import DiscoveredModel, ModelCatalog
+
+        catalog = ModelCatalog()
+        catalog.add_model(DiscoveredModel(name="phi4-mini:latest", endpoint="gpu-node"))
+        catalog.add_model(DiscoveredModel(name="phi4:14b", endpoint="gpu-node"))
+        return catalog
+
+    def test_bare_name_matches_latest(self):
+        catalog = self._catalog()
+        assert catalog.get_endpoints_for_model("phi4-mini") == ["gpu-node"]
+        assert catalog.get_endpoints_for_model("phi4-mini:latest") == ["gpu-node"]
+        assert catalog.has_model("phi4-mini")
+
+    def test_bare_name_does_not_match_other_tags(self):
+        catalog = self._catalog()
+        # phi4 (bare) means phi4:latest, which is NOT phi4:14b
+        assert catalog.get_endpoints_for_model("phi4") == []
+        assert not catalog.has_model("phi4")
+        assert catalog.get_endpoints_for_model("phi4:14b") == ["gpu-node"]

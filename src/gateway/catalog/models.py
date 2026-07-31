@@ -70,16 +70,31 @@ class ModelCatalog(BaseModel):
         """Remove all models from a specific endpoint."""
         self.discovered = [m for m in self.discovered if m.endpoint != endpoint]
 
+    @staticmethod
+    def _same_model(a: str, b: str) -> bool:
+        """Whether two model names refer to the same model.
+
+        Ollama treats a bare name as the :latest tag ("phi4-mini" ==
+        "phi4-mini:latest", but != "phi4-mini:3.8b"). Without this,
+        catalog lookups for untagged names miss, and fallback/routing
+        decisions run unfiltered.
+        """
+
+        def norm(name: str) -> str:
+            return name if ":" in name else f"{name}:latest"
+
+        return norm(a) == norm(b)
+
     def get_endpoints_for_model(self, model: str) -> list[str]:
         """Get all endpoints that have a specific model.
 
         Args:
-            model: Model name to search for
+            model: Model name to search for (bare name matches :latest)
 
         Returns:
             List of endpoint names that have this model
         """
-        return list({m.endpoint for m in self.discovered if m.name == model})
+        return list({m.endpoint for m in self.discovered if self._same_model(m.name, model)})
 
     def get_models_for_endpoint(self, endpoint: str) -> list[str]:
         """Get all models available on a specific endpoint.
@@ -103,7 +118,7 @@ class ModelCatalog(BaseModel):
     def has_model(self, model: str, endpoint: str | None = None) -> bool:
         """Check if a model exists, optionally on a specific endpoint."""
         for m in self.discovered:
-            if m.name == model:
+            if self._same_model(m.name, model):
                 if endpoint is None or m.endpoint == endpoint:
                     return True
         return False
