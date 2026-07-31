@@ -103,6 +103,7 @@ class GatewayError(Exception):
         category: ErrorCategory,
         details: dict | None = None,
         retry_after: float | None = None,
+        http_status: int | None = None,
     ):
         super().__init__(message)
         self.message = message
@@ -110,6 +111,10 @@ class GatewayError(Exception):
         self.category = category
         self.details = details or {}
         self.retry_after = retry_after
+        # Explicit HTTP status override — used to pass upstream 4xx-class
+        # errors through with their real status instead of the category
+        # default (502 would tell retrying clients "transient, retry me")
+        self.http_status = http_status
 
     def to_dict(self) -> dict:
         """Convert error to dictionary for JSON response."""
@@ -392,6 +397,7 @@ class ProviderError(GatewayError):
         provider: str,
         code: ErrorCode = ErrorCode.PROVIDER_ERROR,
         details: dict | None = None,
+        http_status: int | None = None,
     ):
         details = details or {}
         details["provider"] = provider
@@ -400,6 +406,7 @@ class ProviderError(GatewayError):
             code=code,
             category=ErrorCategory.PROVIDER,
             details=details,
+            http_status=http_status,
         )
 
 

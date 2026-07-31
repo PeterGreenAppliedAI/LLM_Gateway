@@ -55,9 +55,10 @@ class ModelCapability(str, Enum):
     COMPLETION = "completion"
     EMBEDDINGS = "embeddings"
     STREAMING = "streaming"
-    FUNCTION_CALLING = "function_calling"
+    FUNCTION_CALLING = "function_calling"  # aka "tools"
     VISION = "vision"
     JSON_MODE = "json_mode"
+    THINKING = "thinking"  # reasoning models (separate thinking phase)
 
 
 class ProviderType(str, Enum):

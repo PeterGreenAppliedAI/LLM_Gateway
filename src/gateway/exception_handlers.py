@@ -51,9 +51,14 @@ CODE_STATUS_OVERRIDES: dict[ErrorCode, int] = {
 def get_status_code(error: GatewayError) -> int:
     """Get HTTP status code for a domain error.
 
+    An explicit per-error http_status (upstream 4xx passthrough) wins over
+    the code/category defaults.
+
     Uses error code override if available, otherwise falls back
     to category-based mapping.
     """
+    if error.http_status is not None:
+        return error.http_status
     if error.code in CODE_STATUS_OVERRIDES:
         return CODE_STATUS_OVERRIDES[error.code]
     return CATEGORY_STATUS_MAP.get(error.category, status.HTTP_500_INTERNAL_SERVER_ERROR)

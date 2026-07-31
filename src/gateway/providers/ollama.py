@@ -89,18 +89,40 @@ class OllamaAdapter(ProviderAdapter):
             return HealthStatus.UNKNOWN
 
     async def list_models(self) -> list[ModelInfo]:
-        """List models available in Ollama via /api/tags."""
+        """List models available in Ollama via /api/tags.
+
+        Capabilities come from /api/show per model (metadata only, no model
+        load) — Ollama knows per-model whether tools/vision/thinking are
+        supported. Falls back to name-based inference if /api/show fails.
+        """
         try:
             client = await self._get_client()
             response = await client.get("/api/tags")
             response.raise_for_status()
             data = response.json()
+            model_entries = data.get("models", [])
+
+            # Probe real capabilities concurrently (bounded)
+            semaphore = asyncio.Semaphore(8)
+
+            async def probe(name: str) -> list[str] | None:
+                async with semaphore:
+                    try:
+                        show = await client.post("/api/show", json={"model": name})
+                        show.raise_for_status()
+                        return show.json().get("capabilities")
+                    except Exception:
+                        return None
+
+            probed = await asyncio.gather(*(probe(m.get("name", "")) for m in model_entries))
 
             models = []
-            for model_data in data.get("models", []):
+            for model_data, shown_caps in zip(model_entries, probed):
                 model_name = model_data.get("name", "")
-                # Determine capabilities based on model name/type
-                capabilities = self._infer_capabilities(model_name, model_data)
+                if shown_caps:
+                    capabilities = self._map_shown_capabilities(shown_caps)
+                else:
+                    capabilities = self._infer_capabilities(model_name, model_data)
 
                 models.append(
                     ModelInfo(
@@ -116,6 +138,25 @@ class OllamaAdapter(ProviderAdapter):
             return models
         except Exception:
             return []
+
+    @staticmethod
+    def _map_shown_capabilities(shown: list[str]) -> list[ModelCapability]:
+        """Map Ollama /api/show capability strings to ModelCapability."""
+        mapping = {
+            "completion": [ModelCapability.CHAT, ModelCapability.COMPLETION],
+            "tools": [ModelCapability.FUNCTION_CALLING],
+            "vision": [ModelCapability.VISION],
+            "thinking": [ModelCapability.THINKING],
+            "embedding": [ModelCapability.EMBEDDINGS],
+        }
+        capabilities: list[ModelCapability] = []
+        for cap in shown:
+            for mapped in mapping.get(cap, []):
+                if mapped not in capabilities:
+                    capabilities.append(mapped)
+        if ModelCapability.CHAT in capabilities:
+            capabilities.append(ModelCapability.STREAMING)
+        return capabilities
 
     async def chat(self, request: InternalRequest) -> InternalResponse:
         """Execute chat completion via Ollama /api/chat endpoint."""

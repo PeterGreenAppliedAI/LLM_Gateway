@@ -338,6 +338,12 @@ class Dispatcher:
         Raises:
             DispatchError: If dispatch fails and no fallback available
         """
+        # An explicit endpoint/model prefix is a pin: the request must go
+        # there and ONLY there. Falling back elsewhere violates the pin and
+        # masks the pinned endpoint's real error behind an unrelated one
+        # (e.g. a 500 "model failed to load" hidden by a fallback's 404).
+        pinned = self.parse_provider_from_model(request.model)[0] is not None
+
         provider_name, model_name = self.resolve_provider(request)
         attempted: list[str] = []
 
@@ -345,8 +351,9 @@ class Dispatcher:
         if model_name and model_name != request.model:
             request = request.model_copy(update={"model": model_name})
 
-        # Try primary provider
-        result = await self._try_provider(provider_name, request)
+        # Try primary provider. When pinned, error responses raise with the
+        # provider's actual error instead of silently returning None.
+        result = await self._try_provider(provider_name, request, raise_on_error=pinned)
         attempted.append(provider_name)
 
         if result is not None:
@@ -358,12 +365,18 @@ class Dispatcher:
             )
 
         # Primary failed - try fallbacks if allowed
-        if not request.fallback_allowed:
+        if pinned or not request.fallback_allowed:
             raise ProviderUnavailableError(provider=provider_name, fallback_disabled=True)
 
         # Get fallback chain - limited to prevent unbounded attempts
         fallback_chain = self._registry.get_fallback_chain(exclude=provider_name)
-        # Security: Cap fallback attempts to prevent resource exhaustion
+        # Only fall back to endpoints that actually have the model —
+        # anything else converts the real failure into a confusing 404
+        if request.model:
+            with_model = set(self._registry.get_endpoints_with_model(request.model))
+            if with_model:
+                fallback_chain = [name for name in fallback_chain if name in with_model]
+        # Security: Cap fallback attempts to prevent unbounded attempts
         max_fallbacks = MAX_FALLBACK_ATTEMPTS - 1  # -1 for primary already tried
 
         for fallback_name in fallback_chain[:max_fallbacks]:
@@ -382,13 +395,20 @@ class Dispatcher:
         raise AllProvidersUnavailableError(attempted=attempted)
 
     async def _try_provider(
-        self, provider_name: str, request: InternalRequest
+        self,
+        provider_name: str,
+        request: InternalRequest,
+        raise_on_error: bool = False,
     ) -> InternalResponse | None:
         """Attempt to dispatch request to a specific provider.
 
         Args:
             provider_name: Name of provider to try
             request: The request to dispatch
+            raise_on_error: Raise the provider's actual error for ANY error
+                response instead of returning None on retryable ones. Used
+                for pinned requests, where fallback is not an option and
+                the caller must see the real failure.
 
         Returns:
             InternalResponse if successful, None if provider unavailable/unhealthy
@@ -424,7 +444,7 @@ class Dispatcher:
             # fall through to the next provider. Upstream 4xx means the
             # request itself is wrong (bad model, invalid params) — retrying
             # elsewhere just masks the real error, so propagate it.
-            if self._is_retryable_error(response.error_code):
+            if self._is_retryable_error(response.error_code) and not raise_on_error:
                 logger.warning(
                     "Provider returned retryable error",
                     provider=provider_name,
@@ -437,9 +457,26 @@ class Dispatcher:
                 message=response.error or "Provider error",
                 provider=provider_name,
                 details={"error_code": response.error_code, "model": request.model},
+                http_status=self._upstream_client_status(response.error_code),
             )
 
         return response
+
+    @staticmethod
+    def _upstream_client_status(error_code: str | None) -> int | None:
+        """Upstream 4xx status to pass through to the client.
+
+        A permanent client-class error (bad model, unsupported tools)
+        must not surface as 502 — that reads as "transient, retry me"
+        and sends retrying clients hammering a request that can never
+        succeed. Server-class errors stay 502.
+        """
+        if error_code and error_code.startswith("http_4"):
+            try:
+                return int(error_code.removeprefix("http_"))
+            except ValueError:
+                return None
+        return None
 
     @staticmethod
     def _is_retryable_error(error_code: str | None) -> bool:
@@ -483,12 +520,18 @@ class Dispatcher:
         primary: str,
         model_name: str | None,
         request: InternalRequest,
+        pinned: bool = False,
     ) -> list[str]:
         """Build ordered list of providers to try for streaming.
 
         Uses the model catalog to prefer providers that have the model,
-        then falls back to health-based ordering.
+        then falls back to health-based ordering. A pinned request
+        (explicit endpoint/model prefix) tries its endpoint and nothing
+        else — never another endpoint the user didn't ask for.
         """
+        if pinned:
+            return [primary]
+
         providers: list[str] = []
         seen: set[str] = set()
 
@@ -539,6 +582,8 @@ class Dispatcher:
         """
         from gateway.models.common import FinishReason
 
+        pinned = self.parse_provider_from_model(request.model)[0] is not None
+
         provider_name, model_name = self.resolve_provider(request)
 
         # Update request with resolved model
@@ -549,6 +594,7 @@ class Dispatcher:
             provider_name,
             model_name,
             request,
+            pinned=pinned,
         )
 
         if not providers_to_try:

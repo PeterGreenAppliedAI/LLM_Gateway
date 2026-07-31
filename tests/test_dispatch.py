@@ -421,11 +421,11 @@ class TestDispatcher:
     async def test_dispatch_fallback_on_unhealthy(
         self, multi_provider_config, sample_request, sample_response
     ):
-        """Dispatch falls back when primary is unhealthy."""
+        """Unpinned dispatch falls back when the default provider is unhealthy."""
         registry = ProviderRegistry(multi_provider_config)
         await registry.initialize()
 
-        # Primary unhealthy, fallback1 healthy
+        # Primary (default) unhealthy, fallback1 healthy
         registry._health["primary"].record_unhealthy(HealthStatus.UNHEALTHY)
         registry._health["fallback1"].record_healthy()
 
@@ -435,14 +435,40 @@ class TestDispatcher:
         registry._adapters["fallback1"] = mock_adapter
 
         dispatcher = Dispatcher(registry)
-        result = await dispatcher.dispatch(
-            sample_request.model_copy(update={"model": "primary/llama3.2"})
-        )
+        result = await dispatcher.dispatch(sample_request)
 
         assert result.provider_used == "fallback1"
         assert result.was_fallback is True
         assert "primary" in result.attempted_providers
         assert "fallback1" in result.attempted_providers
+
+        await registry.close()
+
+    @pytest.mark.asyncio
+    async def test_pinned_dispatch_does_not_fall_back_when_unhealthy(
+        self, multi_provider_config, sample_request, sample_response
+    ):
+        """A pinned (endpoint/model) request fails loudly instead of
+        silently going to an endpoint the client didn't ask for."""
+        from gateway.errors import ProviderUnavailableError
+
+        registry = ProviderRegistry(multi_provider_config)
+        await registry.initialize()
+
+        registry._health["primary"].record_unhealthy(HealthStatus.UNHEALTHY)
+        registry._health["fallback1"].record_healthy()
+
+        mock_adapter = AsyncMock()
+        mock_adapter.chat = AsyncMock(return_value=sample_response)
+        registry._adapters["fallback1"] = mock_adapter
+
+        dispatcher = Dispatcher(registry)
+
+        with pytest.raises(ProviderUnavailableError):
+            await dispatcher.dispatch(
+                sample_request.model_copy(update={"model": "primary/llama3.2"})
+            )
+        mock_adapter.chat.assert_not_called()
 
         await registry.close()
 
@@ -544,3 +570,155 @@ class TestDispatchIntegration:
         assert result.provider_used == "primary"
 
         await registry.close()
+
+
+# =============================================================================
+# Pinned requests and error passthrough (LocalClaw benchmark findings)
+# =============================================================================
+
+
+def make_error_response(error_code: str, message: str) -> InternalResponse:
+    return InternalResponse(
+        request_id="test-err",
+        task=TaskType.CHAT,
+        provider="test",
+        model="llama3.2",
+        error=message,
+        error_code=error_code,
+        finish_reason=FinishReason.ERROR,
+    )
+
+
+class TestPinnedDispatch:
+    """An explicit endpoint/model prefix pins the request to that endpoint."""
+
+    @pytest.mark.asyncio
+    async def test_pinned_request_never_falls_back(
+        self, multi_provider_config, sample_request, sample_response
+    ):
+        """Pinned endpoint fails retryably -> surface ITS error, no fallback.
+
+        Regression: gpu-node/gpt-oss:20b hit a 500 on gpu-node, fell back to
+        an endpoint without the model, and surfaced a misleading 404.
+        """
+        from gateway.errors import ProviderError
+
+        registry = ProviderRegistry(multi_provider_config)
+        await registry.initialize()
+
+        registry._health["primary"].record_healthy()
+        registry._health["fallback1"].record_healthy()
+
+        failing = AsyncMock()
+        failing.chat = AsyncMock(
+            return_value=make_error_response("http_500", "HTTP 500: model failed to load")
+        )
+        registry._adapters["primary"] = failing
+
+        working = AsyncMock()
+        working.chat = AsyncMock(return_value=sample_response)
+        registry._adapters["fallback1"] = working
+
+        dispatcher = Dispatcher(registry)
+        request = sample_request.model_copy(update={"model": "primary/llama3.2"})
+
+        with pytest.raises(ProviderError) as exc_info:
+            await dispatcher.dispatch(request)
+
+        # The pinned endpoint's REAL error, not a fallback's 404
+        assert "model failed to load" in str(exc_info.value)
+        assert exc_info.value.details["provider"] == "primary"
+        working.chat.assert_not_called()
+
+        await registry.close()
+
+    @pytest.mark.asyncio
+    async def test_unpinned_fallback_filtered_by_catalog(
+        self, multi_provider_config, sample_request, sample_response
+    ):
+        """Fallback only tries endpoints that actually have the model."""
+        registry = ProviderRegistry(multi_provider_config)
+        await registry.initialize()
+
+        for name in ("primary", "fallback1", "fallback2"):
+            registry._health[name].record_healthy()
+
+        failing = AsyncMock()
+        failing.chat = AsyncMock(return_value=make_error_response("http_500", "HTTP 500: boom"))
+        registry._adapters["primary"] = failing
+
+        no_model = AsyncMock()
+        no_model.chat = AsyncMock(return_value=make_error_response("http_404", "model not found"))
+        registry._adapters["fallback1"] = no_model
+
+        has_model = AsyncMock()
+        has_model.chat = AsyncMock(return_value=sample_response)
+        registry._adapters["fallback2"] = has_model
+
+        # Catalog: model lives on primary and fallback2, NOT fallback1
+        registry.get_endpoints_with_model = MagicMock(return_value=["primary", "fallback2"])
+
+        from gateway.config import ResolutionConfig
+
+        dispatcher = Dispatcher(
+            registry,
+            resolution_config=ResolutionConfig(
+                endpoint_priority=["primary", "fallback1", "fallback2"]
+            ),
+        )
+        result = await dispatcher.dispatch(sample_request)
+
+        assert result.provider_used == "fallback2"
+        no_model.chat.assert_not_called()
+
+        await registry.close()
+
+    def test_stream_order_pinned_is_only_primary(self, multi_provider_config, sample_request):
+        """Pinned streaming requests try their endpoint and nothing else."""
+        registry = MagicMock()
+        dispatcher = Dispatcher(registry)
+
+        order = dispatcher._get_stream_provider_order(
+            "primary", "llama3.2", sample_request, pinned=True
+        )
+        assert order == ["primary"]
+
+
+class TestUpstream4xxPassthrough:
+    """Upstream client errors keep their status instead of becoming 502."""
+
+    @pytest.mark.asyncio
+    async def test_upstream_400_surfaces_as_400(self, multi_provider_config, sample_request):
+        """'model does not support tools' (400) must not become 502."""
+        from gateway.errors import ProviderError
+
+        registry = ProviderRegistry(multi_provider_config)
+        await registry.initialize()
+        registry._health["primary"].record_healthy()
+
+        adapter = AsyncMock()
+        adapter.chat = AsyncMock(
+            return_value=make_error_response(
+                "http_400", 'HTTP 400: {"error":"model does not support tools"}'
+            )
+        )
+        registry._adapters["primary"] = adapter
+
+        dispatcher = Dispatcher(registry)
+        request = sample_request.model_copy(update={"model": "primary/llama3.2"})
+
+        with pytest.raises(ProviderError) as exc_info:
+            await dispatcher.dispatch(request)
+
+        assert exc_info.value.http_status == 400
+
+        await registry.close()
+
+    def test_upstream_status_classification(self):
+        assert Dispatcher._upstream_client_status("http_400") == 400
+        assert Dispatcher._upstream_client_status("http_404") == 404
+        assert Dispatcher._upstream_client_status("http_422") == 422
+        # Server-class and non-http errors keep the 502 default
+        assert Dispatcher._upstream_client_status("http_500") is None
+        assert Dispatcher._upstream_client_status("timeout") is None
+        assert Dispatcher._upstream_client_status(None) is None
