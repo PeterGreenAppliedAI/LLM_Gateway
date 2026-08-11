@@ -239,7 +239,9 @@ async def chat_completions(
             request_body={
                 "messages": [
                     m.model_dump(exclude_none=True) for m in internal_request.messages or []
-                ]
+                ],
+                "response_format": body.response_format,
+                "tool_names": [t.get("function", {}).get("name") for t in (body.tools or [])],
             },
             response_body=_audit_response_body(result.response),
         )

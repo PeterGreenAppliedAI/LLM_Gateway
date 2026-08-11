@@ -246,6 +246,17 @@ async def ollama_chat(
     except PolicyViolation as e:
         translate_policy_violation(e)
 
+    # Full request shape for the audit log: without format/options/tools
+    # here, "did the client actually send format?" is unanswerable when a
+    # structured-output pipeline misbehaves.
+    audit_request_body = {
+        "messages": sanitized_messages,
+        "format": body.format,
+        "options": body.options,
+        "keep_alive": body.keep_alive,
+        "tool_names": [t.get("function", {}).get("name") for t in (body.tools or [])],
+    }
+
     if body.stream:
         return await _stream_ollama_chat(
             dispatcher,
@@ -253,7 +264,7 @@ async def ollama_chat(
             body.model,
             ctx,
             audit_logger,
-            request_body={"messages": sanitized_messages},
+            request_body=audit_request_body,
         )
 
     # Non-streaming
@@ -293,7 +304,7 @@ async def ollama_chat(
             latency_ms=ctx.total_latency_ms,
             prompt_tokens=result.response.usage.prompt_tokens,
             completion_tokens=result.response.usage.completion_tokens,
-            request_body={"messages": sanitized_messages},
+            request_body=audit_request_body,
             response_body=_audit_response_body(result.response),
         )
 
@@ -556,6 +567,13 @@ async def ollama_generate(
     except PolicyViolation as e:
         translate_policy_violation(e)
 
+    audit_request_body = {
+        "messages": [m for m in analysis_messages],
+        "format": body.format,
+        "options": body.options,
+        "keep_alive": body.keep_alive,
+    }
+
     if body.stream:
         return await _stream_ollama_generate(
             dispatcher,
@@ -563,7 +581,7 @@ async def ollama_generate(
             body.model,
             ctx,
             audit_logger,
-            request_body={"messages": [m for m in analysis_messages]},
+            request_body=audit_request_body,
         )
 
     # Non-streaming
@@ -602,7 +620,7 @@ async def ollama_generate(
             latency_ms=ctx.total_latency_ms,
             prompt_tokens=result.response.usage.prompt_tokens,
             completion_tokens=result.response.usage.completion_tokens,
-            request_body={"messages": [m for m in analysis_messages]},
+            request_body=audit_request_body,
             response_body=_audit_response_body(result.response),
         )
 
