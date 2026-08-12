@@ -48,6 +48,9 @@ class OllamaChatRequest(BaseModel):
     options: dict[str, Any] | None = None
     keep_alive: str | float | None = None
     tools: list[dict[str, Any]] | None = None
+    # Thinking control for reasoning models: bool, or effort level string
+    # ("low"/"medium"/"high" for models that support it)
+    think: bool | str | None = None
 
 
 class OllamaGenerateRequest(BaseModel):
@@ -62,6 +65,7 @@ class OllamaGenerateRequest(BaseModel):
     template: str | None = None
     context: list[int] | None = None
     keep_alive: str | float | None = None
+    think: bool | str | None = None
 
 
 class OllamaEmbeddingsRequest(BaseModel):

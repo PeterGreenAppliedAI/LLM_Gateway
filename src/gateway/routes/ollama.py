@@ -86,6 +86,8 @@ def _audit_response_body(response) -> dict:
     """Model output for the audit log (stored only when the operator
     enables response-body storage; embeddings are never included)."""
     body: dict = {"content": response.content or ""}
+    if getattr(response, "thinking", None):
+        body["thinking"] = response.thinking
     if response.tool_calls:
         body["tool_calls"] = [{"function": tc.function} for tc in response.tool_calls]
     return body
@@ -218,8 +220,13 @@ async def ollama_chat(
     if body.format is not None:
         request_kwargs["response_format"] = _normalize_ollama_format(body.format)
 
-    if body.keep_alive is not None:
-        request_kwargs["extensions"] = {"keep_alive": body.keep_alive}
+    extensions = {
+        key: value
+        for key, value in (("keep_alive", body.keep_alive), ("think", body.think))
+        if value is not None
+    }
+    if extensions:
+        request_kwargs["extensions"] = extensions
 
     # Apply per-client target endpoint if configured
     if auth.target_endpoint:
@@ -254,6 +261,7 @@ async def ollama_chat(
         "format": body.format,
         "options": body.options,
         "keep_alive": body.keep_alive,
+        "think": body.think,
         "tool_names": [t.get("function", {}).get("name") for t in (body.tools or [])],
     }
 
@@ -327,6 +335,7 @@ async def ollama_chat(
         message=OllamaMessage(
             role="assistant",
             content=result.response.content or "",
+            thinking=result.response.thinking,
             tool_calls=ollama_tool_calls,
         ),
         done=True,
@@ -524,6 +533,7 @@ async def ollama_generate(
             ("template", body.template),
             ("context", body.context),
             ("keep_alive", body.keep_alive),
+            ("think", body.think),
         )
         if value is not None
     }
@@ -572,6 +582,7 @@ async def ollama_generate(
         "format": body.format,
         "options": body.options,
         "keep_alive": body.keep_alive,
+        "think": body.think,
     }
 
     if body.stream:

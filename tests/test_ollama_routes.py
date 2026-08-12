@@ -552,3 +552,89 @@ class TestAuthSplit:
         finally:
             auth_app.dependency_overrides.pop(get_dispatcher, None)
         assert resp.status_code == 200
+
+
+class TestThinkPassthrough:
+    """The `think` parameter reaches the engine; `thinking` comes back.
+
+    Regression: think was silently dropped (not declared on the request
+    model), so clients could neither disable rumination nor toggle
+    thinking-separation — and the non-streaming response dropped the
+    separated `thinking` field entirely.
+    """
+
+    def test_think_forwarded_to_internal(self, client, mock_dispatcher):
+        client.post(
+            "/api/chat",
+            json={
+                "model": "qwen3.6:27b",
+                "messages": [{"role": "user", "content": "hi"}],
+                "think": False,
+                "stream": False,
+            },
+        )
+        internal = dispatched_request(mock_dispatcher)
+        assert internal.extensions["think"] is False
+
+    def test_think_in_adapter_payload(self):
+        from gateway.config import ProviderConfig
+        from gateway.models.internal import InternalRequest, Message
+
+        adapter = OllamaAdapter(
+            ProviderConfig(
+                name="ollama", type=ProviderType.OLLAMA, base_url="http://localhost:11434"
+            )
+        )
+        req = InternalRequest(
+            task=TaskType.CHAT,
+            model="qwen3.6:27b",
+            messages=[Message(role="user", content="hi")],
+            extensions={"think": "high"},
+        )
+        payload = adapter._build_chat_request(req)
+        assert payload["think"] == "high"
+
+        gen_req = InternalRequest(
+            task=TaskType.GENERATE,
+            model="qwen3.6:27b",
+            prompt="hi",
+            extensions={"think": False},
+        )
+        gen_payload = adapter._build_generate_request(gen_req)
+        assert gen_payload["think"] is False
+
+    def test_thinking_returned_non_streaming(self, app, client):
+        response = InternalResponse(
+            request_id="req-1",
+            task=TaskType.CHAT,
+            provider="ollama",
+            model="qwen3.6:27b",
+            content="4",
+            thinking="The user asks 2+2. That is 4.",
+            finish_reason=FinishReason.STOP,
+            usage=UsageStats.from_counts(prompt=5, completion=3),
+        )
+        dispatcher = AsyncMock(spec=Dispatcher)
+        dispatcher.dispatch = AsyncMock(
+            return_value=DispatchResult(
+                response=response,
+                provider_used="ollama",
+                was_fallback=False,
+                attempted_providers=["ollama"],
+            )
+        )
+        app.dependency_overrides[get_dispatcher] = lambda: dispatcher
+        try:
+            resp = client.post(
+                "/api/chat",
+                json={
+                    "model": "qwen3.6:27b",
+                    "messages": [{"role": "user", "content": "2+2?"}],
+                    "stream": False,
+                },
+            )
+        finally:
+            app.dependency_overrides.pop(get_dispatcher, None)
+        msg = resp.json()["message"]
+        assert msg["content"] == "4"
+        assert msg["thinking"] == "The user asks 2+2. That is 4."

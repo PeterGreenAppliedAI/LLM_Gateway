@@ -500,8 +500,9 @@ class OllamaAdapter(ProviderAdapter):
         if fmt is not None:
             result["format"] = fmt
 
-        if "keep_alive" in request.extensions:
-            result["keep_alive"] = request.extensions["keep_alive"]
+        for key in ("keep_alive", "think"):
+            if key in request.extensions:
+                result[key] = request.extensions[key]
 
         if request.tools:
             result["tools"] = request.tools
@@ -525,7 +526,7 @@ class OllamaAdapter(ProviderAdapter):
             result["format"] = fmt
 
         # Engine-native generate fields (system, template, context, keep_alive)
-        for key in ("system", "template", "context", "keep_alive"):
+        for key in ("system", "template", "context", "keep_alive", "think"):
             if key in request.extensions:
                 result[key] = request.extensions[key]
 
@@ -588,6 +589,7 @@ class OllamaAdapter(ProviderAdapter):
                 thinking_len=len(thinking),
             )
             content = thinking
+            thinking = ""
 
         # Parse tool calls from response
         tool_calls = None
@@ -618,6 +620,7 @@ class OllamaAdapter(ProviderAdapter):
             provider=self.name,
             model=data.get("model", request.model or "unknown"),
             content=content,
+            thinking=thinking or None,
             messages=[assistant_msg],
             tool_calls=tool_calls,
             finish_reason=finish_reason,

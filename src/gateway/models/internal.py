@@ -204,6 +204,7 @@ class InternalResponse(BaseModel):
 
     # Output - flexible to support different task types
     content: str | None = None  # Primary text output
+    thinking: str | None = None  # Reasoning model thinking tokens (separated)
     messages: list[Message] | None = None  # For chat responses
     embeddings: list[list[float]] | None = None  # For embedding responses
     data: dict[str, Any] | None = None  # For structured outputs (extract, classify)
