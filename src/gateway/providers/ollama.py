@@ -591,19 +591,6 @@ class OllamaAdapter(ProviderAdapter):
             content = thinking
             thinking = ""
 
-        # Silent-discard detection: the model generated tokens but the
-        # runtime returned neither content nor thinking (seen with
-        # gpt-oss:120b + format schema + think:false — harmony-channel
-        # output colliding with grammar constraints). An empty completion
-        # parses as a model failure downstream; make it loud here.
-        if not content and not thinking and data.get("eval_count", 0) > 0:
-            logger.warning(
-                "Model generated tokens but runtime returned empty output",
-                model=data.get("model"),
-                eval_count=data.get("eval_count"),
-                endpoint=self.base_url,
-            )
-
         # Parse tool calls from response
         tool_calls = None
         raw_tool_calls = message.get("tool_calls")
@@ -615,6 +602,20 @@ class OllamaAdapter(ProviderAdapter):
                 )
                 for tc in raw_tool_calls
             ]
+
+        # Silent-discard detection: the model generated tokens but the
+        # runtime returned neither content, thinking, nor tool calls
+        # (seen with gpt-oss:120b + format schema + think:false —
+        # harmony-channel output colliding with grammar constraints).
+        # An empty completion parses as a model failure downstream; make
+        # it loud here. Tool-call turns legitimately have empty content.
+        if not content and not thinking and not tool_calls and data.get("eval_count", 0) > 0:
+            logger.warning(
+                "Model generated tokens but runtime returned empty output",
+                model=data.get("model"),
+                eval_count=data.get("eval_count"),
+                endpoint=self.base_url,
+            )
 
         # Determine finish reason
         finish_reason = FinishReason.STOP if data.get("done") else FinishReason.LENGTH
