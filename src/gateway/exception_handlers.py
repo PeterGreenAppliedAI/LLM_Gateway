@@ -96,6 +96,26 @@ async def gateway_error_handler(request: Request, exc: GatewayError) -> JSONResp
     else:
         logger.info(f"{exc.category.value} error: {exc.message}")
 
+    # Audit dispatch/provider failures — without this, 503s and upstream
+    # errors never appear in the audit log at all, so failed requests are
+    # invisible to the dashboard and post-hoc forensics.
+    if exc.category in (ErrorCategory.DISPATCH, ErrorCategory.PROVIDER):
+        audit_logger = getattr(request.app.state, "audit_logger", None)
+        if audit_logger and ctx:
+            try:
+                await audit_logger.log_request(
+                    request_id=ctx.request_id,
+                    client_id=ctx.client_id or "unknown",
+                    task=ctx.task or "unknown",
+                    model=ctx.model or "unknown",
+                    endpoint=exc.details.get("provider", "unknown"),
+                    status="error",
+                    error_code=exc.code.value,
+                    error_message=exc.message[:500],
+                )
+            except Exception:
+                logger.exception("Failed to audit-log dispatch error")
+
     # Build response headers
     headers = {}
     if exc.category == ErrorCategory.AUTHENTICATION:

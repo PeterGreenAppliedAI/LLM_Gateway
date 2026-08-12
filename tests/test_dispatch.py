@@ -722,3 +722,37 @@ class TestUpstream4xxPassthrough:
         assert Dispatcher._upstream_client_status("http_500") is None
         assert Dispatcher._upstream_client_status("timeout") is None
         assert Dispatcher._upstream_client_status(None) is None
+
+
+class TestLastErrorSurfaced:
+    """503s carry the last real upstream error instead of a generic message."""
+
+    @pytest.mark.asyncio
+    async def test_all_providers_unavailable_includes_last_error(
+        self, multi_provider_config, sample_request
+    ):
+        from gateway.errors import AllProvidersUnavailableError
+
+        registry = ProviderRegistry(multi_provider_config)
+        await registry.initialize()
+        registry._health["primary"].record_healthy()
+
+        failing = AsyncMock()
+        failing.chat = AsyncMock(
+            return_value=make_error_response(
+                "http_500", 'HTTP 500: {"error":"incomplete GLM tool call: XML syntax error"}'
+            )
+        )
+        registry._adapters["primary"] = failing
+        # Catalog: only primary has the model -> no fallback candidates
+        registry.get_endpoints_with_model = MagicMock(return_value=["primary"])
+
+        dispatcher = Dispatcher(registry)
+
+        with pytest.raises(AllProvidersUnavailableError) as exc_info:
+            await dispatcher.dispatch(sample_request)
+
+        assert "incomplete GLM tool call" in exc_info.value.details["last_error"]
+        assert "incomplete GLM tool call" in str(exc_info.value)
+
+        await registry.close()

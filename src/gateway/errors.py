@@ -316,11 +316,23 @@ class ProviderUnavailableError(DispatchError):
 class AllProvidersUnavailableError(DispatchError):
     """All providers unavailable."""
 
-    def __init__(self, attempted: list[str], retry_after: float = 10.0):
+    def __init__(
+        self,
+        attempted: list[str],
+        retry_after: float = 10.0,
+        last_error: str | None = None,
+    ):
+        details: dict = {"attempted_providers": attempted}
+        message = f"All providers unavailable. Tried: {', '.join(attempted)}"
+        if last_error:
+            # The generic message hides the actionable cause (upstream 500
+            # body, timeout) — carry the last real error to the client
+            details["last_error"] = last_error
+            message = f"{message}. Last error: {last_error}"
         super().__init__(
-            message=f"All providers unavailable. Tried: {', '.join(attempted)}",
+            message=message,
             code=ErrorCode.ALL_PROVIDERS_UNAVAILABLE,
-            details={"attempted_providers": attempted},
+            details=details,
             retry_after=retry_after,
         )
 

@@ -351,9 +351,15 @@ class Dispatcher:
         if model_name and model_name != request.model:
             request = request.model_copy(update={"model": model_name})
 
+        # Collect per-provider failure reasons so an eventual 503 can say
+        # WHY (the generic message hides upstream 500 bodies and timeouts)
+        errors_seen: list[str] = []
+
         # Try primary provider. When pinned, error responses raise with the
         # provider's actual error instead of silently returning None.
-        result = await self._try_provider(provider_name, request, raise_on_error=pinned)
+        result = await self._try_provider(
+            provider_name, request, raise_on_error=pinned, error_sink=errors_seen
+        )
         attempted.append(provider_name)
 
         if result is not None:
@@ -380,7 +386,7 @@ class Dispatcher:
         max_fallbacks = MAX_FALLBACK_ATTEMPTS - 1  # -1 for primary already tried
 
         for fallback_name in fallback_chain[:max_fallbacks]:
-            result = await self._try_provider(fallback_name, request)
+            result = await self._try_provider(fallback_name, request, error_sink=errors_seen)
             attempted.append(fallback_name)
 
             if result is not None:
@@ -392,13 +398,17 @@ class Dispatcher:
                 )
 
         # All providers failed
-        raise AllProvidersUnavailableError(attempted=attempted)
+        raise AllProvidersUnavailableError(
+            attempted=attempted,
+            last_error=errors_seen[-1] if errors_seen else None,
+        )
 
     async def _try_provider(
         self,
         provider_name: str,
         request: InternalRequest,
         raise_on_error: bool = False,
+        error_sink: list[str] | None = None,
     ) -> InternalResponse | None:
         """Attempt to dispatch request to a specific provider.
 
@@ -437,6 +447,8 @@ class Dispatcher:
                 error=str(e),
                 error_type=type(e).__name__,
             )
+            if error_sink is not None:
+                error_sink.append(f"{provider_name}: {e}")
             return None
 
         if response.is_error:
@@ -452,6 +464,8 @@ class Dispatcher:
                     error=response.error,
                     error_code=response.error_code,
                 )
+                if error_sink is not None:
+                    error_sink.append(f"{provider_name}: {response.error or 'unknown error'}")
                 return None
             raise ProviderError(
                 message=response.error or "Provider error",
