@@ -77,7 +77,7 @@ class ProviderConfig(BaseModel):
     type: ProviderType  # Enum validation ensures valid provider type
     base_url: ProviderUrl
     enabled: bool = True
-    timeout: float = Field(default=30.0, gt=0, le=300.0)  # Max 5 minutes
+    timeout: float = Field(default=30.0, gt=0, le=3600.0)  # operator-set ceiling, up to 1h
     # Separate connect timeout so a dead upstream fails in seconds instead
     # of holding the connection for the full read timeout
     connect_timeout: float = Field(default=3.0, gt=0, le=30.0)
@@ -111,7 +111,7 @@ class EndpointConfig(BaseModel):
     type: ProviderType  # ollama, vllm, etc.
     url: ProviderUrl  # e.g., http://localhost:11434
     enabled: bool = True
-    timeout: float = Field(default=30.0, gt=0, le=300.0)
+    timeout: float = Field(default=30.0, gt=0, le=3600.0)
     connect_timeout: float = Field(default=3.0, gt=0, le=30.0)
     max_retries: int = Field(default=3, ge=0, le=10)
     labels: dict[str, str] = Field(default_factory=dict)  # cold_flexible, prod_eligible, etc.

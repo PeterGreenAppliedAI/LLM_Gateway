@@ -427,7 +427,10 @@ class OllamaAdapter(ProviderAdapter):
             try:
                 line = await asyncio.wait_for(
                     aiter.__anext__(),
-                    timeout=self.STREAM_CHUNK_TIMEOUT,
+                    # At least as patient as the endpoint's configured
+                    # timeout: cold-loading a large model can stall the
+                    # first chunk far beyond the 120s floor
+                    timeout=max(self.STREAM_CHUNK_TIMEOUT, self.timeout),
                 )
                 yield line
             except StopAsyncIteration:

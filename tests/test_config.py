@@ -414,3 +414,25 @@ class TestConfigLoader:
         # Provider from providers.yaml should be used
         assert len(config.providers) == 1
         assert config.providers[0].name == provider_vllm_data["name"]
+
+
+class TestTimeoutCeiling:
+    """Endpoint timeouts are operator-configurable up to 1 hour."""
+
+    def test_timeout_up_to_3600_accepted(self):
+        from gateway.config import EndpointConfig
+
+        ep = EndpointConfig(
+            name="heavy-node", type="ollama", url="http://localhost:11434", timeout=900.0
+        )
+        assert ep.timeout == 900.0
+
+    def test_timeout_above_ceiling_rejected(self):
+        import pytest as _pytest
+
+        from gateway.config import EndpointConfig
+
+        with _pytest.raises(ValueError):
+            EndpointConfig(
+                name="heavy-node", type="ollama", url="http://localhost:11434", timeout=7200.0
+            )
