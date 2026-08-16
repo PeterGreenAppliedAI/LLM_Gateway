@@ -514,15 +514,25 @@ async def completions(
             update={"preferred_provider": auth.target_endpoint}
         )
 
-    # Check policies - raises domain errors on violation
+    # Queue-and-drain instead of 429: embedding bursts wait for rate-limit
+    # headroom (bounded); other policy violations still fail immediately
+    from gateway.errors import RateLimitError
+    from gateway.policy.embedding_queue import QueueSaturatedError
+    from gateway.routes.dependencies import get_embedding_queue
+
+    queue = get_embedding_queue(request)
     try:
-        enforcer.enforce(
-            internal_request,
-            rate_limit_key=auth.client_id,
-            allowed_models=auth.allowed_models,
-            allowed_endpoints=auth.allowed_endpoints,
-            rate_limit_rpm=auth.rate_limit_rpm,
+        await queue.admit(
+            lambda: enforcer.enforce(
+                internal_request,
+                rate_limit_key=auth.client_id,
+                allowed_models=auth.allowed_models,
+                allowed_endpoints=auth.allowed_endpoints,
+                rate_limit_rpm=auth.rate_limit_rpm,
+            )
         )
+    except QueueSaturatedError as e:
+        raise RateLimitError(message=str(e), retry_after=e.retry_after)
     except PolicyViolation as e:
         translate_policy_violation(e)
 

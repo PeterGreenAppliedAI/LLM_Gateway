@@ -226,6 +226,18 @@ class TokenBudgetYamlConfig(BaseModel):
     model_assignments: list[ModelAssignmentYamlConfig] = Field(default_factory=list, max_length=500)
 
 
+class EmbeddingQueueYamlConfig(BaseModel):
+    """Embedding admission queue settings (see policy/embedding_queue.py).
+
+    Embeddings queue-and-drain at the rate limit instead of 429ing;
+    chat/generate stay fail-fast.
+    """
+
+    enabled: bool = True
+    max_pending: int = Field(default=500, ge=1, le=10000)
+    max_wait_seconds: float = Field(default=30.0, gt=0, le=600.0)
+
+
 class GatewayConfig(BaseModel):
     """Main gateway configuration.
 
@@ -243,6 +255,9 @@ class GatewayConfig(BaseModel):
 
     # Token budgets
     token_budgets: TokenBudgetYamlConfig = Field(default_factory=TokenBudgetYamlConfig)
+
+    # Embedding admission queue
+    embedding_queue: EmbeddingQueueYamlConfig = Field(default_factory=EmbeddingQueueYamlConfig)
 
     # New endpoints architecture
     endpoints: list[EndpointConfig] = Field(default_factory=list, max_length=50)

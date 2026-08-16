@@ -189,6 +189,24 @@ def get_enforcer(request: Request) -> PolicyEnforcer:
     return enforcer
 
 
+def get_embedding_queue(request: Request):
+    """Get or create the embedding admission queue (cached in app state)."""
+    queue = getattr(request.app.state, "embedding_queue", None)
+    if queue is None:
+        from gateway.policy.embedding_queue import EmbeddingQueue, EmbeddingQueueConfig
+
+        cfg = get_config(request).embedding_queue
+        queue = EmbeddingQueue(
+            EmbeddingQueueConfig(
+                enabled=cfg.enabled,
+                max_pending=cfg.max_pending,
+                max_wait_seconds=cfg.max_wait_seconds,
+            )
+        )
+        request.app.state.embedding_queue = queue
+    return queue
+
+
 def get_audit_logger(request: Request) -> AuditLogger | None:
     """Get audit logger from app state.
 

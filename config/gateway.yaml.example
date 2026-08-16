@@ -11,6 +11,14 @@ rate_limits:
   max_tokens_per_request: 32768
   burst_limit: 60
 
+# Embedding admission queue: embedding bursts wait for rate-limit
+# headroom instead of getting 429s (chat stays fail-fast). 429 only when
+# the queue is full or a request waits past max_wait_seconds.
+embedding_queue:
+  enabled: true
+  max_pending: 500
+  max_wait_seconds: 30.0
+
 # =============================================================================
 # Token Budgets (optional)
 # Daily token quotas per API key with model-tier cost multipliers.
