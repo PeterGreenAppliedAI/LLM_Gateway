@@ -110,7 +110,7 @@ React + TypeScript monitoring UI with four tabs:
 cd dashboard && npm install && npx vite --host 0.0.0.0 --port 5174
 ```
 
-On first load, enter a gateway API key in the header field (top right) — the dashboard endpoints require one. The key is stored in the browser's localStorage and sent as `X-API-Key` on every request.
+On first load, enter the admin key (`GATEWAY_ADMIN_API_KEY`) in the header field (top right) — the dashboard endpoints require it. If no admin key is configured, any valid gateway key works. The key is stored in the browser's localStorage and sent as `X-API-Key` on every request.
 
 ## Security Architecture
 
@@ -145,7 +145,9 @@ Request → Auth → Sanitize → PII Scan → Policy Check → Route → Respon
 
 Both OpenAI and Ollama formats — your apps don't need to change.
 
-**Auth model:** inference endpoints work without an API key (stock Ollama/OpenAI clients just work; keys opt you into per-client routing, allowlists, and budgets). Management, dashboard, and security endpoints **require** a valid key when `auth.enabled: true` — they expose stored traffic and audit data.
+**Auth model:** inference endpoints work without an API key by default (stock Ollama/OpenAI clients just work; keys opt you into per-client routing, allowlists, and budgets). Keyless traffic is governed by `auth.anonymous` — disable it, or restrict its models, endpoints, and rate, so clients can't drop their key to escape its limits. Dashboard, security, budget, and key-management endpoints are the operator console: with `auth.enabled: true` they **require** `GATEWAY_ADMIN_API_KEY` (or, if none is set, any valid key — set one in production).
+
+**Environments:** a key bound to an environment (`environment: prod`) is routed only to that environment's endpoints and approved models, including on fallback; `X-Environment` can't override it. Keys without an environment may pick one with `X-Environment`, otherwise they get the default (`dev` if defined, else the first).
 
 **OpenAI:** `POST /v1/chat/completions`, `POST /v1/completions`, `POST /v1/embeddings`, `GET /v1/models`
 
@@ -217,7 +219,7 @@ auth:
 | `GATEWAY_GUARD_BASE_URL` | `http://localhost:11434` | Ollama server hosting guard model |
 | `GATEWAY_PII_ENABLED` | `false` | Enable PII detection |
 | `GATEWAY_PII_SCRUB_ENABLED` | `false` | Replace PII with placeholders |
-| `GATEWAY_ADMIN_API_KEY` | | Admin key for key management |
+| `GATEWAY_ADMIN_API_KEY` | | Operator key for the dashboard, key management, budgets, and security labeling |
 | `GATEWAY_CORS_ORIGINS` | `["*"]` | Allowed CORS origins |
 
 ## Production Deployment

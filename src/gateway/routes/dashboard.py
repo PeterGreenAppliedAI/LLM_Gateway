@@ -21,7 +21,6 @@ from gateway.routes.dependencies import (
     get_config,
     get_enforcer,
     require_admin,
-    require_api_key,
 )
 from gateway.storage import AuditLogger
 
@@ -55,7 +54,7 @@ class StatsResponse(BaseModel):
 @router.get("/api/stats", response_model=StatsResponse)
 async def get_stats(
     request: Request,
-    _client_id: Annotated[str, Depends(require_api_key)],
+    _client_id: Annotated[str, Depends(require_admin)],
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
     hours: int = 24,
     filter_client: str | None = None,
@@ -114,7 +113,7 @@ class RequestsListResponse(BaseModel):
 @router.get("/api/requests", response_model=RequestsListResponse)
 async def list_requests(
     request: Request,
-    _client_id: Annotated[str, Depends(require_api_key)],
+    _client_id: Annotated[str, Depends(require_admin)],
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
     limit: int = 50,
     offset: int = 0,
@@ -201,7 +200,7 @@ class RequestDetailResponse(BaseModel):
 async def get_request_detail(
     request: Request,
     request_id: str,
-    _client_id: Annotated[str, Depends(require_api_key)],
+    _client_id: Annotated[str, Depends(require_admin)],
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
 ) -> RequestDetailResponse:
     """Get detailed information about a specific request."""
@@ -278,7 +277,7 @@ class ModelsUsageResponse(BaseModel):
 @router.get("/api/models/usage", response_model=ModelsUsageResponse)
 async def get_models_usage(
     request: Request,
-    client_id: Annotated[str, Depends(require_api_key)],
+    client_id: Annotated[str, Depends(require_admin)],
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
     hours: int = 24,
 ) -> ModelsUsageResponse:
@@ -315,7 +314,7 @@ class EndpointsUsageResponse(BaseModel):
 @router.get("/api/endpoints/usage", response_model=EndpointsUsageResponse)
 async def get_endpoints_usage(
     request: Request,
-    client_id: Annotated[str, Depends(require_api_key)],
+    client_id: Annotated[str, Depends(require_admin)],
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
     hours: int = 24,
 ) -> EndpointsUsageResponse:
@@ -351,7 +350,7 @@ class DailyUsageResponse(BaseModel):
 @router.get("/api/usage/daily", response_model=DailyUsageResponse)
 async def get_daily_usage(
     request: Request,
-    client_id: Annotated[str, Depends(require_api_key)],
+    client_id: Annotated[str, Depends(require_admin)],
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
     days: int = 30,
     filter_client: str | None = None,
@@ -404,7 +403,7 @@ async def trigger_aggregation(
 @router.get("/api/budget/config")
 async def budget_config(
     request: Request,
-    _client_id: Annotated[str, Depends(require_api_key)],
+    _client_id: Annotated[str, Depends(require_admin)],
     enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
 ) -> dict:
     """Get token budget configuration, including tier assignments and unclassified models."""
@@ -451,7 +450,7 @@ async def budget_config(
 @router.get("/api/budget/usage")
 async def budget_usage(
     request: Request,
-    _client_id: Annotated[str, Depends(require_api_key)],
+    _client_id: Annotated[str, Depends(require_admin)],
     enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
     key: str | None = None,
 ) -> dict:
@@ -608,7 +607,7 @@ async def unassign_model_tier(
 
 @router.get("/api/pii/stats")
 async def pii_stats(
-    _client_id: Annotated[str, Depends(require_api_key)],
+    _client_id: Annotated[str, Depends(require_admin)],
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
     hours: int = 24,
 ) -> dict:
@@ -622,7 +621,7 @@ async def pii_stats(
 
 @router.get("/api/pii/events")
 async def pii_events(
-    _auth_client_id: Annotated[str, Depends(require_api_key)],
+    _auth_client_id: Annotated[str, Depends(require_admin)],
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
     limit: int = 50,
     pii_type: str | None = None,

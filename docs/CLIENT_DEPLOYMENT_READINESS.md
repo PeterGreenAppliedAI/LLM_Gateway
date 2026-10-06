@@ -15,15 +15,15 @@ or for anything sold on its policy and audit guarantees. The blockers are not
 missing features. They are places where an existing feature looks enforced or
 recorded but can be bypassed or silently skipped:
 
-1. **Per-key policy can be bypassed** by sending no key at all (section 1).
-2. **Environments (dev/prod) are configured but never applied** to routing (section 1).
-3. **Any client key can change budgets, delete alerts, and read every other client's traffic** (section 1).
+1. ~~**Per-key policy can be bypassed** by sending no key at all~~ (fixed; section 1).
+2. ~~**Environments (dev/prod) are configured but never applied** to routing~~ (fixed; section 1).
+3. ~~**Any client key can change budgets, delete alerts, and read every other client's traffic**~~ (fixed; section 1).
 4. **Streaming requests are not counted against token budgets**, and mid-stream
    failures are recorded as successes (section 2).
 5. **The audit trail is best-effort.** Failed writes are dropped, disconnected streams leave no
    record, and the default start script stores raw PII in request bodies (section 3).
 
-Fix these first. Everything else here is hardening.
+Fix 4 and 5 next. Everything else here is hardening.
 
 Severity key: **P0** means a guarantee the product claims does not hold. **P1** means it
 degrades or fails under real load. **P2** is hardening or polish.
@@ -34,12 +34,12 @@ degrades or fails under real load. **P2** is hardening or polish.
 
 | Pri | Gap | Where | Detail |
 |-----|-----|-------|--------|
-| P0 | Keyless requests bypass per-key policy | `routes/dependencies.py:468` | With `auth.enabled: true`, a request with no key is accepted as client `default`, with no model allowlist, no endpoint allowlist and no per-key RPM. A client restricted by its key can drop the header and get unrestricted access. Inference routes need a `require_key_for_inference` mode (default on when auth is enabled), or anonymous traffic needs its own explicit policy. |
-| P0 | Endpoint allowlist checks the requested endpoint, not the one used | `policy/enforcer.py:179` | `allowed_endpoints` is compared against `preferred_provider` only. When routing comes from the model catalog, priority order or fallback, the endpoint actually chosen is never checked, so a restricted key can be served by any endpoint that has the model. The check has to run inside the dispatcher, against each candidate. |
-| P0 | Environments are never applied | `dispatch/dispatcher.py:173`, `routes/dependencies.py` `get_environment` | `get_environment()` is defined but no route uses it, and `resolve_endpoint()` is called without an environment. `allowed_endpoints`, `endpoint_filter` and `approved_models` on environments have no effect. A key tagged `dev` can reach prod endpoints. Even once wired in, the `X-Environment` header lets any caller choose its environment, so it should not be able to override the key's environment. |
-| P0 | Control-plane writes need only a client key | `routes/dashboard.py:513,532,560,586,370`, `routes/security_api.py:109,333,376` | Budget tiers, model-to-tier assignments, alert deletion, scan labeling and aggregation all use `require_api_key`, not `require_admin`. Any app's key can reassign its model to a cheap tier, raise tier limits, or clear the security alerts it triggered. |
-| P0 | No tenant scoping on dashboard reads | `routes/dashboard.py`, `routes/security_api.py` | Any valid key can read every client's audit log, including stored prompts and responses, plus PII events and security scans. |
-| P1 | Admin falls back to any key | `routes/dependencies.py` `require_admin` | If `GATEWAY_ADMIN_API_KEY` is unset, any client key can create and revoke keys. Startup should fail when auth is on and no admin key is set, or at least log a loud warning. |
+| ~~P0~~ | **Fixed:** keyless requests bypass per-key policy | `routes/dependencies.py`, `config.py` `AnonymousAccessConfig` | `auth.anonymous` now governs keyless traffic: disable it, or restrict its models, endpoints and RPM. Still allowed and unrestricted by default for stock Ollama clients; startup logs a warning in that state. |
+| ~~P0~~ | **Fixed:** endpoint allowlist checked the requested endpoint, not the one used | `dispatch/dispatcher.py` `_permitted` | The dispatcher now enforces `InternalRequest.allowed_endpoints` on catalog routing, the default endpoint, fallback, streaming order and `endpoint/model` pins. |
+| ~~P0~~ | **Fixed:** environments were never applied | `routes/dependencies.py` `resolve_access_scope` | Environment endpoints and approved models are now enforced, intersected with the key's allowlist. A key bound to an environment can't switch with `X-Environment`, and unknown names are refused. |
+| ~~P0~~ | **Fixed:** control-plane writes needed only a client key | `routes/dashboard.py`, `routes/security_api.py` | Budget, aggregation, alert and labeling writes require the admin key. |
+| ~~P0~~ | **Fixed (as operator-only):** no tenant scoping on dashboard reads | same | Dashboard and security reads now require the admin key, so client keys can't read other clients' traffic. Per-tenant self-service views (a client reading only its own usage) are still open for Profile C. |
+| P1 | Admin falls back to any key | `routes/dependencies.py` `require_admin` | If `GATEWAY_ADMIN_API_KEY` is unset, any client key gets full operator access (keys, budgets, dashboard). Startup now logs a warning; consider failing startup instead when auth is on. |
 | P1 | Config-file keys can't carry per-key limits | `config.py` `ApiKeyConfig` | Only DB-created keys support `allowed_models`, `allowed_endpoints` and `rate_limit_rpm`. YAML keys, which the README shows, get global limits only. |
 | P1 | Budget pre-check passes when `max_tokens` is omitted | `policy/enforcer.py:193` | `estimated_tokens = max_tokens or 0`, so a key at 99% of its daily budget can still send unbounded requests. Estimate from prompt size plus a default completion size, or reject once the key is at its limit. |
 | P1 | Per-key token budget override is a TODO | `policy/enforcer.py` | `daily_limit_override=None  # TODO`. Every key shares the tier limits. |
@@ -155,14 +155,14 @@ while keyless or streaming traffic bypasses policy would be wrong.
 | PII scrubbing hooks (missing) | **Done.** Detect and scrub per route, hashed audit |
 | Prompt-injection defense | **Added.** Regex scanner plus async guard model, labeling and export |
 | Embedding backpressure | **Added.** Admission queue instead of 429 bursts |
-| Environment separation (listed as solid) | **Not enforced** (section 1) |
+| Environment separation (listed as solid) | **Now enforced** (was not; section 1) |
 | TLS, secrets vault, egress allowlist, Helm, hot-reload | Still missing |
 
 ## Recommended order
 
 **Step 1: make policy and audit claims true (P0)**
-1. Require keys on inference when auth is enabled; run the endpoint allowlist check on the endpoint actually chosen; wire environments into dispatch and stop `X-Environment` overriding a key's environment.
-2. Admin-only control-plane writes; scope dashboard reads per client (admin sees all).
+1. ~~Require keys on inference when auth is enabled; run the endpoint allowlist check on the endpoint actually chosen; wire environments into dispatch and stop `X-Environment` overriding a key's environment.~~ Done.
+2. ~~Admin-only control-plane writes; scope dashboard reads per client (admin sees all).~~ Done (dashboard is operator-only; per-tenant views still open).
 3. Charge streaming usage to budgets; record mid-stream errors and disconnects truthfully.
 4. Don't store unscrubbed bodies; durable audit writes; refuse to start or report not-ready without a DB.
 

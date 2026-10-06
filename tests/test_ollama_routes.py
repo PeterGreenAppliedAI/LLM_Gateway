@@ -589,7 +589,7 @@ class TestAuthSplit:
         assert self._anonymous_chat(auth_app, model="llama3.1:8b").status_code == 200
 
     def test_control_plane_writes_require_admin(self, auth_app, monkeypatch):
-        """A client key can read the dashboard but not change budgets."""
+        """With an admin key set, client keys can neither read nor change the control plane."""
         from pydantic import SecretStr
 
         import gateway.settings
@@ -611,11 +611,11 @@ class TestAuthSplit:
         resp = client.post("/api/budget/tiers", json=tier, headers={"X-API-Key": admin_key})
         assert resp.status_code == 200
 
-        # One dashboard key serves both: admin can read, client can read
+        # Dashboard reads expose every client's traffic: operator (admin) only
         assert client.get("/api/stats", headers={"X-API-Key": admin_key}).status_code == 200
         assert (
             client.get("/api/stats", headers={"X-API-Key": "test-api-key-12345678"}).status_code
-            == 200
+            == 401
         )
 
     def test_anonymous_policy_ignored_when_auth_disabled(self, auth_app):
