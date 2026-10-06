@@ -214,10 +214,12 @@ auth:
 |----------|---------|-------------|
 | `GATEWAY_DB_URL` | `sqlite:///./data/gateway.db` | Database URL (SQLite or PostgreSQL) |
 | `GATEWAY_DB_STORE_REQUEST_BODY` | `false` | Store prompts in audit log |
+| `GATEWAY_DB_REQUIRED` | `true` | Refuse to start if the database can't be initialized (no silent run without an audit trail) |
+| `GATEWAY_DB_AUDIT_SPILL_PATH` | `data/audit-spill.jsonl` | Audit rows that can't reach the DB after retries are written here and replayed on startup; watch `gateway_audit_write_failures_total` |
 | `GATEWAY_GUARD_ENABLED` | `false` | Enable guard model shadow analysis |
 | `GATEWAY_GUARD_MODEL_NAME` | `ibm/granite3.2-guardian:5b` | Guard model name |
 | `GATEWAY_GUARD_BASE_URL` | `http://localhost:11434` | Ollama server hosting guard model |
-| `GATEWAY_PII_ENABLED` | `false` | Enable PII detection |
+| `GATEWAY_PII_ENABLED` | `false` | Enable PII detection. Also redacts PII from stored audit bodies and security scans, even when scrubbing is off |
 | `GATEWAY_PII_SCRUB_ENABLED` | `false` | Replace PII with placeholders |
 | `GATEWAY_ADMIN_API_KEY` | | Operator key for the dashboard, key management, budgets, and security labeling |
 | `GATEWAY_CORS_ORIGINS` | `["*"]` | Allowed CORS origins |

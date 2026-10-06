@@ -5,17 +5,51 @@ to the database for compliance, debugging, and analytics.
 Uses async SQLAlchemy for non-blocking database I/O.
 """
 
+import asyncio
+import json
+import os
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
-from sqlalchemy import Integer, and_, bindparam, case, cast, delete, func, insert, select
+from sqlalchemy import Integer, Table, and_, bindparam, case, cast, delete, func, insert, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from gateway.observability import get_logger, get_metrics
 from gateway.storage.schema import audit_log, pii_events, usage_daily
 
 logger = get_logger(__name__)
+
+# Backoff between audit write attempts (the first attempt is immediate).
+# Short: the caller is usually still holding the client's response.
+WRITE_RETRY_DELAYS = (0.05, 0.25)
+
+_SPILLABLE_TABLES: dict[str, Table] = {t.name: t for t in (audit_log, pii_events)}
+_DATETIME_MARKER = "__datetime__"
+
+
+def _json_default(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return {_DATETIME_MARKER: value.isoformat()}
+    return str(value)
+
+
+def _restore_row(row: dict) -> dict:
+    return {
+        key: datetime.fromisoformat(value[_DATETIME_MARKER])
+        if isinstance(value, dict) and _DATETIME_MARKER in value
+        else value
+        for key, value in row.items()
+    }
+
+
+def _record_failure(table: str, outcome: str) -> None:
+    try:
+        get_metrics().record_audit_write_failure(table, outcome)
+    except Exception:
+        pass
 
 
 class AuditLogger:
@@ -31,6 +65,7 @@ class AuditLogger:
         store_request_body: bool = False,
         store_response_body: bool = False,
         body_redactor: Callable[[Any], Any] | None = None,
+        spill_path: str | Path | None = None,
     ):
         self._engine = engine
         self._store_request_body = store_request_body
@@ -38,6 +73,11 @@ class AuditLogger:
         # Applied to bodies before they are persisted (PII scrubbing), so
         # stored audit data never holds raw PII when detection is enabled
         self.body_redactor = body_redactor
+        # Rows that can't reach the database after retries are appended here
+        # as JSON lines and replayed on the next startup, so a DB outage
+        # doesn't silently drop the audit trail
+        self._spill_path = Path(spill_path) if spill_path else None
+        self._spill_lock = asyncio.Lock()
 
     async def log_request(
         self,
@@ -96,23 +136,142 @@ class AuditLogger:
         if self._store_response_body and response_body:
             values["response_body"] = self._redact(response_body)
 
-        try:
-            stmt = insert(audit_log).values(**values)
-            async with self._engine.connect() as conn:
-                await conn.execute(stmt)
-                await conn.commit()
-        except Exception as e:
-            logger.error("Failed to write audit log", error=str(e), request_id=request_id)
+        await self._write_rows(audit_log, [values], request_id)
+
+    async def _write_rows(self, table: Table, rows: list[dict], request_id: str) -> bool:
+        """Insert rows, retrying transient failures, spilling to disk if the DB stays down.
+
+        Returns True if the rows reached the database.
+        """
+        last_error: Exception | None = None
+        for delay in (0.0, *WRITE_RETRY_DELAYS):
+            if delay:
+                await asyncio.sleep(delay)
             try:
-                get_metrics().record_request(
-                    provider="audit",
-                    model="",
-                    task="audit_write",
-                    status="error",
-                    latency_ms=0,
+                async with self._engine.connect() as conn:
+                    await conn.execute(insert(table), rows)
+                    await conn.commit()
+                return True
+            except IntegrityError as e:
+                # Duplicate/invalid row: retrying or replaying can't fix it
+                logger.error(
+                    "Audit write rejected by database",
+                    table=table.name,
+                    request_id=request_id,
+                    error=str(e),
                 )
+                _record_failure(table.name, "rejected")
+                return False
+            except Exception as e:
+                last_error = e
+
+        logger.error(
+            "Audit write failed after retries",
+            table=table.name,
+            request_id=request_id,
+            error=str(last_error),
+        )
+        if await self._spill(table.name, rows):
+            _record_failure(table.name, "spilled")
+        else:
+            logger.critical(
+                "Audit rows LOST: database and spill file both unavailable",
+                table=table.name,
+                request_id=request_id,
+            )
+            _record_failure(table.name, "lost")
+        return False
+
+    async def _spill(self, table_name: str, rows: list[dict]) -> bool:
+        """Append rows to the spill file. Returns False if there is none or it failed."""
+        if self._spill_path is None:
+            return False
+        line = json.dumps({"table": table_name, "rows": rows}, default=_json_default) + "\n"
+
+        def _append() -> None:
+            self._spill_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._spill_path.open("a", encoding="utf-8") as f:
+                f.write(line)
+                f.flush()
+                os.fsync(f.fileno())
+
+        try:
+            async with self._spill_lock:
+                await asyncio.to_thread(_append)
+            return True
+        except Exception:
+            logger.exception("Failed to write audit spill file", path=str(self._spill_path))
+            return False
+
+    async def replay_spill(self) -> int:
+        """Insert rows saved to the spill file during a DB outage.
+
+        Call on startup. Rows that still can't be written stay in the spill
+        file; rows the database rejects (e.g. already present) are dropped.
+
+        Returns:
+            Number of rows written to the database.
+        """
+        if self._spill_path is None:
+            return 0
+        replaying = self._spill_path.with_suffix(self._spill_path.suffix + ".replaying")
+
+        def _take_lines() -> list[str]:
+            # A .replaying file left by an interrupted replay is read first
+            if self._spill_path.exists():
+                if replaying.exists():
+                    with replaying.open("a", encoding="utf-8") as f:
+                        f.write(self._spill_path.read_text("utf-8"))
+                    self._spill_path.unlink()
+                else:
+                    self._spill_path.replace(replaying)
+            if not replaying.exists():
+                return []
+            return replaying.read_text("utf-8").splitlines()
+
+        async with self._spill_lock:
+            lines = await asyncio.to_thread(_take_lines)
+        if not lines:
+            return 0
+
+        written = 0
+        failed_lines: list[str] = []
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+                table = _SPILLABLE_TABLES[record["table"]]
+                rows = [_restore_row(row) for row in record["rows"]]
             except Exception:
-                pass
+                logger.exception("Unreadable audit spill line; skipped")
+                continue
+            try:
+                async with self._engine.connect() as conn:
+                    await conn.execute(insert(table), rows)
+                    await conn.commit()
+                written += len(rows)
+            except IntegrityError:
+                logger.warning("Spilled audit rows already present; dropped", table=table.name)
+            except Exception:
+                failed_lines.append(line)
+
+        async with self._spill_lock:
+            if failed_lines:
+
+                def _restore() -> None:
+                    with self._spill_path.open("a", encoding="utf-8") as f:
+                        f.write("\n".join(failed_lines) + "\n")
+
+                await asyncio.to_thread(_restore)
+            await asyncio.to_thread(replaying.unlink)
+
+        logger.info(
+            "Replayed audit spill file",
+            rows_written=written,
+            records_remaining=len(failed_lines),
+        )
+        return written
 
     def _redact(self, body: Any) -> Any:
         if self.body_redactor is None:
@@ -528,10 +687,7 @@ class AuditLogger:
         if not rows:
             return 0
 
-        try:
-            async with self._engine.connect() as conn:
-                await conn.execute(insert(pii_events), rows)
-                await conn.commit()
+        if await self._write_rows(pii_events, rows, request_id):
             logger.info(
                 "PII events logged",
                 request_id=request_id,
@@ -539,8 +695,6 @@ class AuditLogger:
                 pii_types=list(set(r["pii_type"] for r in rows)),
                 scrubbed=was_scrubbed,
             )
-        except Exception as e:
-            logger.error("Failed to log PII events", error=str(e), request_id=request_id)
 
         return len(rows)
 

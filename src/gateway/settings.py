@@ -46,6 +46,18 @@ class DatabaseSettings(BaseSettings):
     # Table creation
     create_tables: bool = Field(default=True, description="Auto-create tables on startup")
 
+    # Audit durability
+    required: bool = Field(
+        default=True,
+        description="Refuse to start if the database can't be initialized. Set false only "
+        "for deployments that accept running with no audit trail.",
+    )
+    audit_spill_path: str = Field(
+        default="data/audit-spill.jsonl",
+        description="Where audit rows go when the database is unreachable; replayed on "
+        "startup. Empty string disables spilling.",
+    )
+
     # Data retention
     retention_days: int = Field(
         default=90,

@@ -108,14 +108,29 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             store_request_body=settings.db.store_request_body,
             store_response_body=settings.db.store_response_body,
             body_redactor=body_redactor,
+            spill_path=settings.db.audit_spill_path or None,
         )
         app.state.audit_logger = audit_logger
         logger.info(f"Database initialized: {settings.db.url.split('://')[0]}")
     except Exception as e:
-        logger.error(f"Failed to initialize database: {e}")
-        # Continue without database - audit logging will be disabled
+        if settings.db.required:
+            # No database means no audit trail, no DB-backed keys and no
+            # security scans; serving traffic anyway would be silent
+            raise RuntimeError(
+                f"Database initialization failed: {e}. Set GATEWAY_DB_REQUIRED=false to "
+                "run without an audit trail."
+            ) from e
+        logger.error(f"Failed to initialize database, continuing WITHOUT audit logging: {e}")
         app.state.db_engine = None
         app.state.audit_logger = None
+
+    if app.state.audit_logger:
+        try:
+            replayed = await app.state.audit_logger.replay_spill()
+            if replayed:
+                logger.warning("Recovered audit rows from spill file", rows=replayed)
+        except Exception:
+            logger.exception("Audit spill replay failed; rows remain in the spill file")
 
     # Initialize registry and discovery service if endpoints are configured
     if app.state.config and app.state.config.endpoints:

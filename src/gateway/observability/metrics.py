@@ -166,6 +166,16 @@ class MetricsCollector:
             **reg_kwargs,
         )
 
+        # Audit writes that didn't reach the database on the first path
+        # (outcome: spilled = saved to the spill file for replay,
+        # lost = not saved anywhere, rejected = refused by the database)
+        self._audit_write_failures = Counter(
+            f"{prefix}_audit_write_failures_total",
+            "Audit/PII event writes that failed to reach the database",
+            ["table", "outcome"],
+            **reg_kwargs,
+        )
+
         # Active requests gauge
         self._active_requests = Gauge(
             f"{prefix}_active_requests", "Number of active requests", ["provider"], **reg_kwargs
@@ -232,6 +242,14 @@ class MetricsCollector:
             self._tokens_per_second.labels(provider=provider, model=model).observe(
                 tokens_per_second
             )
+
+    def record_audit_write_failure(self, table: str, outcome: str) -> None:
+        """Record an audit write that failed (outcome: spilled, lost, rejected)."""
+        if not self._enabled:
+            return
+        self._audit_write_failures.labels(
+            table=self._sanitize_label(table), outcome=self._sanitize_label(outcome)
+        ).inc()
 
     def record_error(self, provider: str, error_type: str) -> None:
         """Record a provider error.
