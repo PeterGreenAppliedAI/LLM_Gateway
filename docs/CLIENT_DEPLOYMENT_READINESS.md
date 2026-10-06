@@ -1,312 +1,200 @@
 # Client Deployment Readiness Assessment
 
-## What This Gateway Becomes in Client Infrastructure
+_Last reviewed: 2026-10-06, against `main` at `a17a0d8`. Test suite: 562 passing._
 
-A **local AI service mesh / API gateway** that sits between:
-- Client apps/workflows (Zapier/Make replacements, internal tools, RAG apps, chat frontends)
-- Their model runtimes (Ollama/vLLM/TGI/etc) and optionally external APIs
+This replaces the January 2026 assessment. Much of what that version listed as
+missing has since shipped (see [What changed since January](#what-changed-since-january)).
+This pass reviews the code against what a production gateway needs to process
+real-time traffic, and folds in outside feedback on the operator dashboard.
 
-**The product isn't the dashboard. The product is:**
-- Consistent API surface
-- Routing + policy enforcement
-- Observability
-- Governance
-- Reliability in their environment
+## Verdict
 
----
+The gateway works well as a **single-node, trusted-network gateway for a small team**
+(client Profile A below). It is **not yet ready** for multi-team or multi-tenant use,
+or for anything sold on its policy and audit guarantees. The blockers are not
+missing features. They are places where an existing feature looks enforced or
+recorded but can be bypassed or silently skipped:
 
-## Deployment Modes
+1. **Per-key policy can be bypassed** by sending no key at all (section 1).
+2. **Environments (dev/prod) are configured but never applied** to routing (section 1).
+3. **Any client key can change budgets, delete alerts, and read every other client's traffic** (section 1).
+4. **Streaming requests are not counted against token budgets**, and mid-stream
+   failures are recorded as successes (section 2).
+5. **The audit trail is best-effort.** Failed writes are dropped, disconnected streams leave no
+   record, and the default start script stores raw PII in request bodies (section 3).
 
-### Mode A: "Local-only"
-- Endpoints are only internal runtimes
-- No external egress allowed
-- Policies default to "deny" for outbound
-- **Current Support: READY** - Works today
+Fix these first. Everything else here is hardening.
 
-### Mode B: "Hybrid"
-- Local endpoints + fallback to external (OpenAI/Anthropic/etc)
-- Strong PII scrubbing + allowlist domains + audit
-- **Current Support: PARTIAL** - External providers work, but no PII scrubbing or egress controls
-
----
-
-## Current State Assessment
-
-### 1. State Model
-
-| Item | Status | Location |
-|------|--------|----------|
-| Config file loading (YAML) | **EXISTS** | `src/gateway/config.py` |
-| Database storage (audit, usage, keys) | **EXISTS** | `src/gateway/storage/schema.py` |
-| Supported DBs | **EXISTS** | SQLite, PostgreSQL, MySQL |
-| Migration framework | **MISSING** | No Alembic - uses auto-create |
-| Config hot-reload | **MISSING** | Restart required |
-
-### 2. Auth & Per-Key Limits
-
-| Item | Status | Location |
-|------|--------|----------|
-| API key authentication | **EXISTS** | `routes/dependencies.py:152-225` |
-| Bearer + X-API-Key header | **EXISTS** | Dual auth methods |
-| Timing-safe comparison | **EXISTS** | `secrets.compare_digest()` |
-| Per-key environment scoping | **EXISTS** | Keys link to dev/prod |
-| Global rate limiting | **EXISTS** | `policy/rate_limiter.py` |
-| Per-key rate limits | **PARTIAL** | Schema exists, enforcement missing |
-| Per-key allowed_models | **PARTIAL** | Schema exists, not enforced |
-| Per-key allowed_endpoints | **PARTIAL** | Schema exists, not enforced |
-| Per-key quotas | **PARTIAL** | Schema exists, not enforced |
-| Key rotation | **MISSING** | Manual config update |
-| DB-backed key validation | **MISSING** | Only config-file keys work |
-
-### 3. Policy Engine
-
-| Item | Status | Location |
-|------|--------|----------|
-| Rate limiting | **EXISTS** | `policy/enforcer.py` |
-| Token limits per request | **EXISTS** | `policy/token_limiter.py` |
-| Task-provider authorization | **EXISTS** | Declarative in code |
-| Policies in config file | **MISSING** | Hardcoded in Python |
-| Policy hot-reload | **MISSING** | Requires restart |
-
-### 4. Operability (Day 2)
-
-| Item | Status | Location |
-|------|--------|----------|
-| Health endpoint | **EXISTS** | `GET /health` with provider status |
-| Structured JSON logging | **EXISTS** | `observability/logging.py` |
-| Configurable log level | **EXISTS** | `GATEWAY_LOG_LEVEL` env var |
-| Prometheus metrics | **EXISTS** | `GET /metrics` |
-| Grafana dashboards | **EXISTS** | `docker-compose.yaml` |
-| Graceful shutdown | **EXISTS** | Lifespan context manager |
-| Config hot-reload | **MISSING** | No watch/reload endpoint |
-| Liveness probe | **EXISTS** | `/health` endpoint |
-| Readiness probe | **EXISTS** | `/health` includes provider status |
-
-### 5. Security Posture
-
-| Item | Status | Location |
-|------|--------|----------|
-| API key auth | **EXISTS** | Format validation + timing-safe |
-| Audit logs with trace IDs | **EXISTS** | UUID4 request_id in all logs |
-| Input validation | **EXISTS** | Safe identifiers, Pydantic |
-| SecretStr for sensitive fields | **EXISTS** | Prevents accidental logging |
-| TLS/mTLS | **MISSING** | Must use reverse proxy |
-| Secrets vault integration | **MISSING** | Plaintext in YAML config |
-| Egress controls/allowlist | **MISSING** | No domain filtering |
-
-### 6. Packaging
-
-| Item | Status | Location |
-|------|--------|----------|
-| Dockerfile | **EXISTS** | `docker/Dockerfile` (non-root, healthcheck) |
-| Docker Compose | **EXISTS** | Gateway + Prometheus + Grafana |
-| Environment variable config | **EXISTS** | `GATEWAY_*` prefix, comprehensive |
-| Helm charts | **MISSING** | No Kubernetes manifests |
-| Install scripts | **MISSING** | Manual setup required |
-| Health verification script | **MISSING** | No automated checks |
+Severity key: **P0** means a guarantee the product claims does not hold. **P1** means it
+degrades or fails under real load. **P2** is hardening or polish.
 
 ---
 
-## The 5 Non-Negotiables for Client Shipping
+## 1. Policy and access control
 
-### 1. Tenancy and Identity ✅ PARTIAL
-Even single-tenant needs internal separation:
-- [x] org/project keys (schema exists)
-- [ ] per-key quotas and limits (schema exists, enforcement missing)
-- [ ] per-key allowed models/endpoints (schema exists, enforcement missing)
-- [ ] per-key retention rules (not implemented)
+| Pri | Gap | Where | Detail |
+|-----|-----|-------|--------|
+| P0 | Keyless requests bypass per-key policy | `routes/dependencies.py:468` | With `auth.enabled: true`, a request with no key is accepted as client `default`, with no model allowlist, no endpoint allowlist and no per-key RPM. A client restricted by its key can drop the header and get unrestricted access. Inference routes need a `require_key_for_inference` mode (default on when auth is enabled), or anonymous traffic needs its own explicit policy. |
+| P0 | Endpoint allowlist checks the requested endpoint, not the one used | `policy/enforcer.py:179` | `allowed_endpoints` is compared against `preferred_provider` only. When routing comes from the model catalog, priority order or fallback, the endpoint actually chosen is never checked, so a restricted key can be served by any endpoint that has the model. The check has to run inside the dispatcher, against each candidate. |
+| P0 | Environments are never applied | `dispatch/dispatcher.py:173`, `routes/dependencies.py` `get_environment` | `get_environment()` is defined but no route uses it, and `resolve_endpoint()` is called without an environment. `allowed_endpoints`, `endpoint_filter` and `approved_models` on environments have no effect. A key tagged `dev` can reach prod endpoints. Even once wired in, the `X-Environment` header lets any caller choose its environment, so it should not be able to override the key's environment. |
+| P0 | Control-plane writes need only a client key | `routes/dashboard.py:513,532,560,586,370`, `routes/security_api.py:109,333,376` | Budget tiers, model-to-tier assignments, alert deletion, scan labeling and aggregation all use `require_api_key`, not `require_admin`. Any app's key can reassign its model to a cheap tier, raise tier limits, or clear the security alerts it triggered. |
+| P0 | No tenant scoping on dashboard reads | `routes/dashboard.py`, `routes/security_api.py` | Any valid key can read every client's audit log, including stored prompts and responses, plus PII events and security scans. |
+| P1 | Admin falls back to any key | `routes/dependencies.py` `require_admin` | If `GATEWAY_ADMIN_API_KEY` is unset, any client key can create and revoke keys. Startup should fail when auth is on and no admin key is set, or at least log a loud warning. |
+| P1 | Config-file keys can't carry per-key limits | `config.py` `ApiKeyConfig` | Only DB-created keys support `allowed_models`, `allowed_endpoints` and `rate_limit_rpm`. YAML keys, which the README shows, get global limits only. |
+| P1 | Budget pre-check passes when `max_tokens` is omitted | `policy/enforcer.py:193` | `estimated_tokens = max_tokens or 0`, so a key at 99% of its daily budget can still send unbounded requests. Estimate from prompt size plus a default completion size, or reject once the key is at its limit. |
+| P1 | Per-key token budget override is a TODO | `policy/enforcer.py` | `daily_limit_override=None  # TODO`. Every key shares the tier limits. |
+| P2 | CORS `*` with credentials | `main.py:203` | `allow_origins=["*"]` together with `allow_credentials=True`. Default to the dashboard origin. |
 
-### 2. Policy Engine as Config ❌ MISSING
-Clients will demand:
-- "this app can't call external models"
-- "this user can't use model X"
-- "redact/strip PII before any egress"
-- "log prompts but not responses"
+## 2. Real-time request processing
 
-These must be declarative and auditable. Currently hardcoded in Python.
+The request path does a lot right: separate connect and read timeouts, upstream
+cancellation when the client disconnects (non-streaming), passing upstream 4xx
+errors through instead of failing over, first-chunk peeking before committing to
+a stream, an embedding admission queue, and TTFT and tokens-per-second metrics.
+The gaps are in capacity management and in streaming correctness.
 
-### 3. Operability Package (Day 2) ✅ MOSTLY READY
-- [x] Logs/metrics (Prometheus, structured JSON)
-- [x] Health checks
-- [x] Graceful shutdown
-- [ ] Config hot-reload
-- [ ] Upgrade path documentation
-- [ ] Secret rotation guide
-- [ ] HA deployment guide
-- [ ] Backup/restore procedures
+### Throughput and capacity
 
-### 4. Security Posture ✅ PARTIAL
-- [x] authn/authz (API keys)
-- [ ] TLS/mTLS (reverse proxy required)
-- [ ] outbound allowlist and egress controls
-- [x] audit logs with trace IDs
-- [ ] secret management (env vars only, no Vault/KMS)
+| Pri | Gap | Where | Detail |
+|-----|-----|-------|--------|
+| P1 | No load balancing across endpoints | `dispatch/dispatcher.py` `resolve_endpoint` | When several endpoints have the same model, every request goes to the first in priority order until it fails. Other GPUs sit idle while the first one queues. Add least-in-flight or weighted round-robin among healthy candidates, with priority as the tiebreaker. |
+| P1 | No concurrency limit or queue for chat/generate | routes, dispatcher | Only embeddings are admission-controlled. Chat traffic is limited by request rate, not by how many requests are in flight, so a burst of long generations stacks up inside Ollama (`OLLAMA_NUM_PARALLEL`) or the httpx pool, where the gateway can't see it, and then times out. Add a per-endpoint in-flight cap with a short bounded wait, then fail fast with 429/503 and `Retry-After`. |
+| P1 | httpx connection pool not configurable | `providers/ollama.py:60`, `providers/openai.py:119` | Default `Limits` (100 connections, 20 keep-alive) per endpoint, with the pool wait inheriting the read timeout (up to 1h). Above 100 concurrent requests, requests wait silently. Expose `max_connections` and `max_keepalive`, and set a short pool timeout. |
+| P1 | Burst cap is global and can't be overridden | `policy/rate_limiter.py` | `burst_limit` (default 10 per 10s) applies to every key and ignores `rate_limit_rpm`. A key granted 600 RPM is effectively capped at 60. All keyless traffic shares the single `default` bucket, so one noisy keyless client throttles every keyless client. |
+| P1 | Rate limits and budgets are in process memory | `policy/rate_limiter.py`, `policy/token_budget.py` | Counts reset on every restart and aren't shared between uvicorn workers or replicas. Budget tier changes made from the dashboard are lost on restart, even though the README says "no restart needed". Persist budget usage and assignments to the DB, and add a Redis-backed limiter before running more than one process. |
+| P1 | Single worker | `start-gateway.sh`, `docker/Dockerfile` | One uvicorn process means one event loop, so CPU work on the hot path (regex injection scan, PII scan, JSON for large bodies) competes with streaming. Fine for evaluation. Production needs multiple workers, which depends on the in-memory state above. |
+| P2 | `max_retries` is configured but unused | `providers/base.py` | Stored on every adapter and never read. Either implement retries for idempotent calls (embeddings, connection errors before the first byte) or remove the setting. |
 
-### 5. Packaging + Install Story ✅ PARTIAL
-- [x] Docker Compose for small shops
-- [ ] Helm chart for Kubernetes shops
-- [ ] Single binary option
-- [ ] One-command health verification script
+### Hot-path latency
 
----
+| Pri | Gap | Where | Detail |
+|-----|-----|-------|--------|
+| P1 | Two DB writes before the request can complete | `storage/keys.py:185`, `storage/audit.py` | Each DB-backed key check runs a SELECT plus an UPDATE and commit of `last_used_at`, with no cache. The audit insert is then awaited before the response returns, and before `[DONE]` on streams. On SQLite (`NullPool`, a new connection per write) these all contend for the single writer lock, adding latency and, past the default 5s lock wait, "database is locked" errors that drop audit rows. Cache validated keys for ~30–60s, batch `last_used_at`, and move audit writes to a bounded background writer. |
+| P1 | PII audit write runs before dispatch | `routes/openai.py` (chat), `routes/ollama.py` | When PII is detected, `log_pii_events` is awaited before the upstream call starts, so DB latency is added directly to TTFT. |
+| P1 | Unhealthy endpoint triggers a health check inside the request | `dispatch/dispatcher.py:431` | Every request routed to an endpoint marked unhealthy runs a blocking health check (up to 10s) first. With N concurrent requests that's N probes against a dead box. Replace with a circuit breaker: open after K failures, one half-open probe, then close. |
 
-## Critical Gaps (Must Fix Before Production)
+### Streaming correctness
 
-| Priority | Gap | Effort | Impact |
-|----------|-----|--------|--------|
-| **P0** | Per-key limit enforcement | Medium | Security, multi-tenancy |
-| **P0** | TLS documentation/config | Low | Security compliance |
-| **P0** | Secrets management | Medium | Security compliance |
-| **P1** | Config hot-reload endpoint | Low | Operability |
-| **P1** | DB-backed key validation | Medium | Key management |
-| **P1** | Egress allowlist | Medium | Hybrid mode security |
-| **P2** | Helm chart | Medium | K8s deployment |
-| **P2** | Alembic migrations | Low | Schema versioning |
-| **P2** | Policy config file | High | Flexibility |
+| Pri | Gap | Where | Detail |
+|-----|-----|-------|--------|
+| P0 | Streaming usage isn't charged to token budgets | `routes/openai.py:310`, `routes/ollama.py:394,674` | `record_token_usage` is only called on non-streaming paths. Any client that streams, which is most chat UIs, never consumes its daily budget. |
+| P0 | Mid-stream failures recorded as success | same | Providers report any failure as a chunk with `finish_reason=ERROR`. The routes treat any chunk with a finish reason as the end of the stream and log `status="success"`, so audit and metrics count failed generations as successful. |
+| P1 | Client disconnect mid-stream leaves no audit record | `routes/openai.py` `_stream_chat_response`, Ollama equivalents | A disconnect raises `CancelledError`/`GeneratorExit`, which `except Exception` doesn't catch, so no audit row, no metrics and no budget charge. Record a `client_disconnected` row with the partial usage in `finally`. |
+| P1 | Upstream stream not closed on failover | `dispatch/dispatcher.py:627` | When the first chunk is an error or empty, the dispatcher moves to the next provider without `aclose()` on the abandoned iterator, so its upstream connection stays open until garbage collection. |
+| P1 | Stream errors lose their cause | `providers/ollama.py`, `providers/openai.py` `chat_stream` | Every exception, including upstream 4xx such as "model not found", becomes an empty `ERROR` chunk. So the stream dispatcher fails over on client errors (the non-streaming path correctly doesn't), and the final 503 doesn't say why (`AllProvidersUnavailableError` gets no `last_error`). |
+| P1 | Pre-stream failures return HTTP 200 | `routes/openai.py` `_stream_chat_response` | `dispatch_stream` runs inside the generator after the 200 headers are sent, so "all providers unavailable" reaches the client as a 200 with an error event. Load balancers and SDK retry logic can't see it. Resolve the provider and peek the first chunk before returning the `StreamingResponse`. |
+| P1 | Tool calls disable streaming on the OpenAI API | `routes/openai.py:167` | `tools` plus `stream: true` is silently turned into one buffered response. For agent workloads TTFT then equals total latency. The Ollama route already streams tool calls; the OpenAI route needs `tool_calls` delta support. |
+| P1 | Stalled stream can hang for up to an hour | `providers/*` `_iter_lines_with_timeout` | The gap allowed between chunks is `max(120s, endpoint timeout)`, and endpoint timeouts now go up to 3600s. The first-chunk timeout (cold model load) should be separate from the between-chunk timeout, which should be short (~30–60s). |
+| P2 | Response text accumulated with `+=` | `routes/openai.py:303`, `routes/ollama.py:365,666` | Quadratic on long generations, and it happens even when `store_response_body` is off. Use a list join, and only when storing. |
 
----
+### Request handling
 
-## Recommended Implementation Order
+| Pri | Gap | Where | Detail |
+|-----|-----|-------|--------|
+| P1 | OpenAI-route images silently dropped | `models/openai.py:66` `content_as_str` | Content-part arrays are flattened to text only, so `image_url` parts never reach the model. Vision works only through the Ollama API. The request should either pass images through or be rejected. |
+| P2 | No request ID returned to the client | — | `request_id` is generated and audited but never sent in a response header (`X-Request-ID`), so clients can't correlate a failure with the audit log. Honor an inbound `X-Request-ID` too. |
+| P2 | No request-size bounds | `models/openai.py`, `models/ollama.py` | No limit on message count, body size or image payload size. The regex and PII scans run synchronously over the whole body. |
+| P2 | Proxy headers not trusted | `start-gateway.sh`, `Dockerfile` | Behind nginx or Caddy, without `--proxy-headers --forwarded-allow-ips`, `request.client.host` is the proxy's address, which breaks `scan_allowlist_ips` and audit `source_ip`. |
 
-### Week 1: Security & Auth Hardening
-1. **Per-key enforcement** - Wire up `allowed_models`/`allowed_endpoints` checks in routes
-2. **DB-backed key validation** - Use existing schema in `api_keys` table
-3. **TLS documentation** - Document reverse proxy setup (nginx/Caddy)
+## 3. Audit and data handling
 
-### Week 2: Operability
-4. **Config hot-reload** - Add `POST /admin/reload` endpoint
-5. **Health verification script** - Check gateway, endpoints, models, latency
-6. **Upgrade guide** - Document versioning and migration path
+| Pri | Gap | Where | Detail |
+|-----|-----|-------|--------|
+| P0 | Default start script stores raw PII | `start-gateway.sh:25,35` | `STORE_REQUEST_BODY=true` together with `PII_SCRUB_ENABLED=false` means detected PII is hashed in `pii_events` but saved in plaintext in `audit_log.request_body`. That contradicts the README's "raw PII never stored". Either scrub before storing bodies, or keep body storage off unless scrubbing is on. |
+| P0 | Audit writes fail open, silently | `storage/audit.py` `log_request` | Write errors are logged and dropped. A compliance product needs a durable path: a bounded queue with retry, a spill-to-disk fallback, an `audit_write_failures` alert, and an optional fail-closed mode for regulated deployments. |
+| P0 | Gateway starts without a database | `main.py` lifespan | If DB init fails, the gateway serves traffic with audit, DB keys and scans all disabled, and `/health` still reports healthy. This should be a startup failure, or at least a readiness failure. |
+| P1 | Retention cleanup is fragile | `main.py:153`, `settings.py:54` | The first cleanup runs 24h after boot, so a gateway restarted daily never cleans up. One exception kills the loop for good. The "0 = no cleanup" option is rejected by `ge=1`. `usage_daily` is never filled automatically because `aggregate_daily_usage` has no scheduler. |
+| P1 | Security scans dropped silently under load | `security/analyzer.py` `queue_request` | When the queue is full the scan is dropped and only an internal counter goes up. Expose it as a metric and alert on it, since "every request is scanned" stops being true. |
+| P2 | No fallback or routing reason recorded | `storage/schema.py` `audit_log` | `DispatchResult.was_fallback` and `attempted_providers` exist but aren't stored. Needed for the operator view in section 5. |
 
-### Week 3: Hybrid Mode
-7. **Egress allowlist** - Domain/IP filtering for external providers
-8. **PII scrubbing hooks** - Pre-route policy action
-9. **External provider adapters** - OpenAI, Anthropic, etc.
+## 4. Operability
 
-### Week 4: Packaging
-10. **Helm chart skeleton** - Deployment, Service, ConfigMap, Secret
-11. **Install automation** - Setup scripts for common environments
-12. **Alembic migrations** - Schema versioning for upgrades
+| Pri | Gap | Where | Detail |
+|-----|-----|-------|--------|
+| P1 | `/health` never fails | `routes/health.py:71` | Always returns 200: "degraded" when every endpoint is down, with no DB check. Split it into `/livez` (process up) and `/readyz` (DB reachable and at least one healthy endpoint), and return 503 when not ready. |
+| P1 | No graceful drain for streams | `Dockerfile`, `start-gateway.sh` | No `--timeout-graceful-shutdown`. Deploys cut active streams mid-generation. |
+| P1 | No config hot-reload | — | Endpoints, keys and limits from YAML need a restart, which (see above) also resets rate limits and budgets. |
+| P2 | `/metrics` unauthenticated | `routes/health.py` | Exposes client IDs and model names. Fine on a private network; document it or put it on a separate port. |
+| P2 | Not yet in place from January | — | Helm chart, HA guide, backup/restore runbook, upgrade guide, secret rotation guide, Vault/KMS integration, egress allowlist for hybrid mode. |
 
----
+## 5. Operator legibility (dashboard)
 
-## Product Split Recommendation
+Outside feedback, from screenshots only (Oct 2026), raised two issues. Both hold up against the code:
 
-### Gateway Core (must be stable)
-- API surface (OpenAI-compatible)
-- Policy enforcement
-- Resolver
-- Telemetry
-- Endpoint adapters
+1. **The dashboard shows state but not priority.** Each panel reports its own signals (endpoint
+   Healthy/Unhealthy badge, unclassified-model count, "flagged only" PII card), but nothing
+   collects them into "what needs attention first". Security alerts are the only signal with
+   severity, and only inside their own tab.
+2. **Signals lack meaning and a next action.** Request detail shows the model and endpoint used,
+   but not why that endpoint was chosen, whether fallback happened, whether the request stayed
+   in budget, or whether a PII or security finding needs review.
 
-### UI/Console (optional addon)
-- Dashboards
-- Request explorer
-- Config editor (eventually)
-- **API Key Management** (see below)
+What it takes:
 
-Many clients will run **headless** and only care about metrics + logs.
+| Pri | Item | Backend prerequisite |
+|-----|------|----------------------|
+| P1 | **Needs Attention** strip on the Dashboard tab: unhealthy endpoints (with whether a fallback exists), unclassified models (with "default multiplier applied"), flagged-unscrubbed PII, critical security alerts, audit or scan drops, keys near budget | Mostly none. The data is already loaded in `App.tsx`. Audit and scan drop counters need exposing (section 3). |
+| P1 | Request detail: routing reason, fallback path, budget impact, linked PII and scan findings | Store `was_fallback`, `attempted_providers`, a routing-reason enum and weighted tokens on `audit_log`. Join `pii_events` and `security_scans` by `request_id`. |
+| P2 | Next-action affordances (classify model, label scan, scrub-enable route, adjust limit) next to each signal | Admin-only write endpoints (section 1). |
+| P2 | PII "review required" workflow | Doesn't exist today. Flag-only is detection without scrubbing, not a queue. Build a review state on `pii_events` before the UI promises review. |
 
----
-
-## Future: Dashboard API Key Management
-
-### Vision
-Generate and manage API keys directly from the dashboard with:
-- Point-and-click key creation
-- Per-key configuration (target endpoint, allowed models, quotas)
-- Auto-generated usage instructions for each key
-
-### Key Creation Flow
-```
-1. Click "Create API Key"
-2. Select:
-   - Application name (client_id)
-   - Target endpoint (optional, e.g., gpu-node-3060)
-   - Allowed models (optional, e.g., phi4:*, llama3.2:*)
-   - Rate limits / quotas
-3. Generate key
-4. Show usage instructions:
-   - cURL example with the key
-   - Python code snippet
-   - Environment variable setup
-   - Copy-to-clipboard for each
-```
-
-### Generated Instructions Example
-```
-# Your API Key: est-xxxxxxxxxxxxxxxx
-
-# Environment Variable
-export LLM_GATEWAY_API_KEY="est-xxxxxxxxxxxxxxxx"
-
-# cURL
-curl http://192.168.1.184:8001/v1/chat/completions \
-  -H "Authorization: Bearer est-xxxxxxxxxxxxxxxx" \
-  -H "Content-Type: application/json" \
-  -d '{"model": "phi4:latest", "messages": [...]}'
-
-# Python
-import openai
-client = openai.OpenAI(
-    base_url="http://192.168.1.184:8001/v1",
-    api_key="est-xxxxxxxxxxxxxxxx"
-)
-
-# This key routes to: gpu-node-3060
-# Allowed models: phi4:*
-```
-
-### Implementation Requirements
-- [ ] Backend: `POST /api/keys` - Create new API key
-- [ ] Backend: `GET /api/keys` - List keys (masked)
-- [ ] Backend: `DELETE /api/keys/{key_id}` - Revoke key
-- [ ] Backend: `PATCH /api/keys/{key_id}` - Update key config
-- [ ] DB: Store keys in `api_keys` table (already exists)
-- [ ] Dashboard: Key management UI component
-- [ ] Dashboard: Usage instructions generator
-- [ ] Dashboard: Copy-to-clipboard functionality
+Do the section 1–3 fixes first. A triage layer that reports "within policy"
+while keyless or streaming traffic bypasses policy would be wrong.
 
 ---
 
-## Target Client Profiles
+## What changed since January
 
-### Profile A: SMB with 1-2 GPU servers
-- Docker Compose deployment
-- SQLite database
-- Local-only mode
-- Single API key per app
-- Minimal ops overhead
+| Item (January status) | Now |
+|-----------------------|-----|
+| Alembic migrations (missing) | **Done.** `alembic/versions/`, 2 revisions |
+| DB-backed key validation (missing) | **Done.** `storage/keys.py`, SHA-256 hashed |
+| Per-key allowed models, endpoints and RPM (schema only) | **Partly done.** Enforced for DB keys; endpoint check incomplete, keyless bypass (section 1) |
+| Per-key quotas (schema only) | **Partly done.** Daily token budgets with cost tiers; no per-key override, streaming not counted |
+| Key management API and UI (future) | **Done.** Create, list and revoke; no update (`PATCH`) or expiry setting in API |
+| PII scrubbing hooks (missing) | **Done.** Detect and scrub per route, hashed audit |
+| Prompt-injection defense | **Added.** Regex scanner plus async guard model, labeling and export |
+| Embedding backpressure | **Added.** Admission queue instead of 429 bursts |
+| Environment separation (listed as solid) | **Not enforced** (section 1) |
+| TLS, secrets vault, egress allowlist, Helm, hot-reload | Still missing |
 
-### Profile B: Mid-market with Kubernetes
-- Helm chart deployment
-- PostgreSQL database
-- Hybrid mode with external fallback
-- Per-team API keys with quotas
-- Prometheus/Grafana integration
+## Recommended order
 
-### Profile C: MSP-managed
-- Multi-tenant considerations
-- Strict isolation requirements
-- Audit log retention policies
-- SLA monitoring
-- Custom integrations
+**Step 1: make policy and audit claims true (P0)**
+1. Require keys on inference when auth is enabled; run the endpoint allowlist check on the endpoint actually chosen; wire environments into dispatch and stop `X-Environment` overriding a key's environment.
+2. Admin-only control-plane writes; scope dashboard reads per client (admin sees all).
+3. Charge streaming usage to budgets; record mid-stream errors and disconnects truthfully.
+4. Don't store unscrubbed bodies; durable audit writes; refuse to start or report not-ready without a DB.
+
+**Step 2: real-time capacity (P1)**
+5. Per-endpoint in-flight caps with fail-fast backpressure; least-in-flight balancing across endpoints.
+6. Key-validation cache; background audit writer; circuit breaker instead of in-request health probes.
+7. Fix stream lifecycle: close abandoned iterators, carry error causes, return a real status before streaming starts, separate first-chunk and between-chunk timeouts, streaming tool calls on the OpenAI route.
+8. Persist budgets and assignments; Redis limiter; then multiple workers.
+
+**Step 3: operations and operator view**
+9. `/livez` and `/readyz`, graceful drain, proxy headers, `X-Request-ID`.
+10. Needs Attention strip and routing/fallback detail in the dashboard.
+11. Helm, HA, backup and upgrade docs, egress allowlist for hybrid mode.
 
 ---
 
-## What's Actually Solid Today
+## Deployment modes and client profiles
 
-✅ Request pipeline with policy hooks
-✅ Observability (metrics, logging, audit)
-✅ Multi-endpoint routing + discovery
-✅ Environment separation (dev/prod)
-✅ Health monitoring
-✅ OpenAI + Ollama API compatibility
-✅ Streaming support with TTFT metrics
-✅ Non-root Docker container
-✅ Structured logging with request context
+| | Status |
+|-|--------|
+| **Mode A, local-only** (internal runtimes only) | Ready for a single trusted team. Not ready where keys must isolate teams (section 1). |
+| **Mode B, hybrid** (local plus external fallback) | Not ready. PII scrubbing exists, but there's no egress allowlist, and fallback can reach any endpoint regardless of key or environment restrictions. |
+| **Profile A**: SMB, 1–2 GPU servers, Docker Compose, SQLite | Usable today with `PII_SCRUB_ENABLED=true` or body storage off. |
+| **Profile B**: mid-market, Kubernetes, Postgres, per-team keys | Needs steps 1 and 2. |
+| **Profile C**: MSP, multi-tenant | Needs steps 1–3 plus tenant scoping throughout. |
 
-The foundation is strong. The gaps are mostly:
-- "Wire up what's already in the schema"
-- "Externalize what's currently in code"
-- "Document what's already possible"
+## What's solid
+
+- Clean adapter boundary; OpenAI and Ollama API compatibility with full Ollama passthrough (`format`, `options`, `think`, tools, images).
+- Endpoint pins honored; upstream 4xx passed through, not failed over (non-streaming).
+- Upstream cancellation when non-streaming clients disconnect.
+- Separate connect and read timeouts; per-endpoint read timeout.
+- Hashed PII audit design; async guard model with a labeling loop.
+- Structured logging, Prometheus histograms for latency, TTFT and tokens per second.
+- 562 tests, CI with lint, format and coverage gates; non-root container.
