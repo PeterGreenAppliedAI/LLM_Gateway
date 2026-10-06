@@ -54,6 +54,7 @@ from gateway.routes.dependencies import (
     should_scrub_pii,
     translate_policy_violation,
 )
+from gateway.routes.stream_recorder import StreamRecorder
 from gateway.security import AsyncSecurityAnalyzer, PIIScrubber, Sanitizer
 from gateway.storage import AuditLogger
 
@@ -273,6 +274,7 @@ async def ollama_chat(
             ctx,
             audit_logger,
             request_body=audit_request_body,
+            enforcer=enforcer,
         )
 
     # Non-streaming
@@ -351,18 +353,36 @@ async def _stream_ollama_chat(
     ctx,
     audit_logger: AuditLogger | None,
     request_body: dict | None = None,
+    enforcer: PolicyEnforcer | None = None,
 ) -> StreamingResponse:
     """Stream Ollama chat response."""
+    recorder = StreamRecorder(
+        ctx=ctx,
+        internal_request=internal_request,
+        model=model,
+        task="chat",
+        audit_logger=audit_logger,
+        enforcer=enforcer,
+        request_body=request_body,
+    )
 
     async def generate() -> AsyncGenerator[bytes, None]:
-        provider_name = None
-        full_content = ""
-
+        stream = None
         try:
-            provider_name, stream = await dispatcher.dispatch_stream(internal_request)
+            recorder.provider, stream = await dispatcher.dispatch_stream(internal_request)
 
             async for chunk in stream:
-                full_content += chunk.delta or ""
+                recorder.observe(chunk)
+
+                if recorder.is_error(chunk):
+                    # Provider failed mid-stream: tell the client, record an error
+                    yield json.dumps({"error": "Stream interrupted", "done": True}) + "\n"
+                    await recorder.finish(
+                        status="error",
+                        error_code="stream_error",
+                        error_message="Provider stream failed",
+                    )
+                    return
 
                 # Tool calls stream through untouched (Ollama shape:
                 # function.arguments stays an object, never stringified)
@@ -402,40 +422,18 @@ async def _stream_ollama_chat(
                         eval_count=chunk.usage.completion_tokens if chunk.usage else 0,
                     )
                     yield json.dumps(final.model_dump()) + "\n"
+                    await recorder.finish()
 
-                    final_prompt_tokens = chunk.usage.prompt_tokens if chunk.usage else 0
-                    final_completion_tokens = chunk.usage.completion_tokens if chunk.usage else 0
-                    ctx.record_complete(
-                        prompt_tokens=final_prompt_tokens,
-                        completion_tokens=final_completion_tokens,
-                    )
-
-                    # Audit log
-                    if audit_logger and provider_name:
-                        await audit_logger.log_request(
-                            request_id=ctx.request_id,
-                            client_id=internal_request.client_id,
-                            task="chat",
-                            model=model,
-                            endpoint=provider_name,
-                            status="success",
-                            stream=True,
-                            latency_ms=ctx.total_latency_ms,
-                            time_to_first_token_ms=ctx.time_to_first_token_ms,
-                            tokens_per_second=ctx.tokens_per_second,
-                            prompt_tokens=final_prompt_tokens,
-                            completion_tokens=final_completion_tokens,
-                            request_body=request_body,
-                            response_body={"content": full_content},
-                        )
-
-        except Exception:
+        except Exception as e:
             logger.exception("Error in Ollama chat stream")
-            error_response = {
-                "error": "Stream interrupted",
-                "done": True,
-            }
-            yield json.dumps(error_response) + "\n"
+            yield json.dumps({"error": "Stream interrupted", "done": True}) + "\n"
+            await recorder.finish(
+                status="error",
+                error_code=getattr(getattr(e, "code", None), "value", "stream_error"),
+                error_message=str(e),
+            )
+        finally:
+            await recorder.finish_disconnected(stream)
 
     return StreamingResponse(
         generate(),
@@ -592,6 +590,7 @@ async def ollama_generate(
             ctx,
             audit_logger,
             request_body=audit_request_body,
+            enforcer=enforcer,
         )
 
     # Non-streaming
@@ -651,18 +650,36 @@ async def _stream_ollama_generate(
     ctx,
     audit_logger: AuditLogger | None,
     request_body: dict | None = None,
+    enforcer: PolicyEnforcer | None = None,
 ) -> StreamingResponse:
     """Stream Ollama generate response."""
+    recorder = StreamRecorder(
+        ctx=ctx,
+        internal_request=internal_request,
+        model=model,
+        task="generate",
+        audit_logger=audit_logger,
+        enforcer=enforcer,
+        request_body=request_body,
+    )
 
     async def generate() -> AsyncGenerator[bytes, None]:
-        provider_name = None
-
+        stream = None
         try:
-            provider_name, stream = await dispatcher.dispatch_stream(internal_request)
+            recorder.provider, stream = await dispatcher.dispatch_stream(internal_request)
 
-            full_content = ""
             async for chunk in stream:
-                full_content += chunk.delta or ""
+                recorder.observe(chunk)
+
+                if recorder.is_error(chunk):
+                    yield json.dumps({"error": "Stream interrupted", "done": True}) + "\n"
+                    await recorder.finish(
+                        status="error",
+                        error_code="stream_error",
+                        error_message="Provider stream failed",
+                    )
+                    return
+
                 response = {
                     "model": model,
                     "created_at": _now_iso(),
@@ -674,27 +691,21 @@ async def _stream_ollama_generate(
                     response["prompt_eval_count"] = chunk.usage.prompt_tokens if chunk.usage else 0
                     response["eval_count"] = chunk.usage.completion_tokens if chunk.usage else 0
 
-                    if audit_logger and provider_name:
-                        await audit_logger.log_request(
-                            request_id=ctx.request_id,
-                            client_id=internal_request.client_id,
-                            task="generate",
-                            model=model,
-                            endpoint=provider_name,
-                            status="success",
-                            stream=True,
-                            latency_ms=ctx.total_latency_ms,
-                            prompt_tokens=chunk.usage.prompt_tokens if chunk.usage else 0,
-                            completion_tokens=chunk.usage.completion_tokens if chunk.usage else 0,
-                            request_body=request_body,
-                            response_body={"content": full_content},
-                        )
-
                 yield json.dumps(response) + "\n"
 
-        except Exception:
+                if chunk.finish_reason:
+                    await recorder.finish()
+
+        except Exception as e:
             logger.exception("Error in Ollama generate stream")
             yield json.dumps({"error": "Stream interrupted", "done": True}) + "\n"
+            await recorder.finish(
+                status="error",
+                error_code=getattr(getattr(e, "code", None), "value", "stream_error"),
+                error_message=str(e),
+            )
+        finally:
+            await recorder.finish_disconnected(stream)
 
     return StreamingResponse(
         generate(),

@@ -56,6 +56,7 @@ from gateway.routes.dependencies import (
     should_scrub_pii,
     translate_policy_violation,
 )
+from gateway.routes.stream_recorder import StreamRecorder
 from gateway.security import AsyncSecurityAnalyzer, PIIScrubber, Sanitizer
 from gateway.storage import AuditLogger
 
@@ -188,7 +189,18 @@ async def chat_completions(
     # Handle streaming (skip for tool calls - return non-streaming JSON instead)
     if body.stream and not body.tools:
         return await _stream_chat_response(
-            dispatcher, internal_request, body.model, ctx, audit_logger
+            dispatcher,
+            internal_request,
+            body.model,
+            ctx,
+            audit_logger,
+            enforcer=enforcer,
+            request_body={
+                "messages": [
+                    m.model_dump(exclude_none=True) for m in internal_request.messages or []
+                ],
+                "response_format": body.response_format,
+            },
         )
 
     # Non-streaming: dispatch and wait
@@ -279,116 +291,62 @@ async def _stream_chat_response(
     model: str,
     ctx,
     audit_logger: AuditLogger | None,
+    enforcer: PolicyEnforcer | None = None,
+    request_body: dict | None = None,
 ) -> StreamingResponse:
     """Create streaming response for chat completions.
 
     Note: Streaming errors are sent as SSE error events rather than
     raising exceptions, since the HTTP response has already started.
     """
+    recorder = StreamRecorder(
+        ctx=ctx,
+        internal_request=internal_request,
+        model=model,
+        task="chat",
+        audit_logger=audit_logger,
+        enforcer=enforcer,
+        request_body=request_body,
+    )
 
     async def generate() -> AsyncGenerator[bytes, None]:
-        provider_name = None
-        final_prompt_tokens = 0
-        final_completion_tokens = 0
-        full_content = ""
-
+        stream = None
         try:
-            provider_name, stream = await dispatcher.dispatch_stream(internal_request)
+            recorder.provider, stream = await dispatcher.dispatch_stream(internal_request)
 
-            first_chunk = True
             async for chunk in stream:
-                if first_chunk:
-                    ctx.record_first_token()
-                    first_chunk = False
-                full_content += chunk.delta or ""
+                recorder.observe(chunk)
 
                 # Convert to OpenAI streaming format
                 response = OpenAIChatStreamResponse.from_chunk(chunk, model)
                 yield f"data: {response.model_dump_json()}\n\n".encode()
 
-                # If this is the final chunk, record completion
                 if chunk.finish_reason:
-                    final_prompt_tokens = chunk.usage.prompt_tokens if chunk.usage else 0
-                    final_completion_tokens = chunk.usage.completion_tokens if chunk.usage else 0
-                    ctx.record_complete(
-                        prompt_tokens=final_prompt_tokens,
-                        completion_tokens=final_completion_tokens,
-                    )
-                    metrics.record_request(
-                        provider=provider_name,
-                        model=model,
-                        task="chat",
-                        status="success",
-                        latency_ms=ctx.total_latency_ms or 0,
-                        time_to_first_token_ms=ctx.time_to_first_token_ms,
-                        tokens_per_second=ctx.tokens_per_second,
-                    )
-
-                    # Audit log for streaming
-                    if audit_logger and provider_name:
-                        await audit_logger.log_request(
-                            request_id=ctx.request_id,
-                            client_id=internal_request.client_id,
-                            task="chat",
-                            model=model,
-                            endpoint=provider_name,
-                            status="success",
-                            user_id=internal_request.user_id,
-                            stream=True,
-                            max_tokens=internal_request.max_tokens,
-                            temperature=internal_request.temperature,
-                            latency_ms=ctx.total_latency_ms,
-                            time_to_first_token_ms=ctx.time_to_first_token_ms,
-                            tokens_per_second=ctx.tokens_per_second,
-                            prompt_tokens=final_prompt_tokens,
-                            completion_tokens=final_completion_tokens,
-                            response_body={"content": full_content},
+                    if recorder.is_error(chunk):
+                        await recorder.finish(
+                            status="error",
+                            error_code="stream_error",
+                            error_message="Provider stream failed",
                         )
+                    else:
+                        await recorder.finish()
 
             # Send [DONE] marker
             yield b"data: [DONE]\n\n"
 
         except DispatchError as e:
             # For streaming, send error as SSE event
-            ctx.record_error(e.code.value, str(e))
-            error_response = e.to_dict()
-            yield f"data: {json.dumps(error_response)}\n\n".encode()
-
-            # Audit log error
-            if audit_logger:
-                await audit_logger.log_request(
-                    request_id=ctx.request_id,
-                    client_id=internal_request.client_id,
-                    task="chat",
-                    model=model,
-                    endpoint=provider_name or "unknown",
-                    status="error",
-                    stream=True,
-                    error_code=e.code.value,
-                    error_message=str(e),
-                )
+            yield f"data: {json.dumps(e.to_dict())}\n\n".encode()
+            await recorder.finish(status="error", error_code=e.code.value, error_message=str(e))
 
         except Exception as e:
             # Wrap unexpected errors
-            ctx.record_error("stream_error", str(e))
             logger.exception("Error in chat stream")
             stream_error = StreamError(message="Stream interrupted")
             yield f"data: {json.dumps(stream_error.to_dict())}\n\n".encode()
-
-            # Audit log error
-            if audit_logger:
-                await audit_logger.log_request(
-                    request_id=ctx.request_id,
-                    client_id=internal_request.client_id,
-                    task="chat",
-                    model=model,
-                    endpoint=provider_name or "unknown",
-                    status="error",
-                    stream=True,
-                    error_code="stream_error",
-                    error_message=str(e),
-                )
+            await recorder.finish(status="error", error_code="stream_error", error_message=str(e))
         finally:
+            await recorder.finish_disconnected(stream)
             clear_request_context()
 
     return StreamingResponse(
