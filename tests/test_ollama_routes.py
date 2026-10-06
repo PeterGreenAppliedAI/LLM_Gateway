@@ -553,6 +553,46 @@ class TestAuthSplit:
             auth_app.dependency_overrides.pop(get_dispatcher, None)
         assert resp.status_code == 200
 
+    def _anonymous_chat(self, auth_app, model: str = "phi4:14b"):
+        dispatcher = AsyncMock(spec=Dispatcher)
+        dispatcher.dispatch = AsyncMock(
+            return_value=DispatchResult(
+                response=make_chat_response(),
+                provider_used="ollama",
+                was_fallback=False,
+                attempted_providers=["ollama"],
+            )
+        )
+        auth_app.dependency_overrides[get_dispatcher] = lambda: dispatcher
+        try:
+            return TestClient(auth_app).post(
+                "/api/chat",
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "stream": False,
+                },
+            )
+        finally:
+            auth_app.dependency_overrides.pop(get_dispatcher, None)
+
+    def test_anonymous_disabled_requires_key(self, auth_app):
+        auth_app.state.config.auth.anonymous.enabled = False
+        assert self._anonymous_chat(auth_app).status_code == 401
+
+    def test_anonymous_model_allowlist_applies(self, auth_app):
+        """Dropping the key must not escape model restrictions."""
+        auth_app.state.config.auth.anonymous.allowed_models = ["llama3.1:*"]
+        resp = self._anonymous_chat(auth_app, model="phi4:14b")
+        assert resp.status_code == 403
+        assert resp.json()["error"]["code"] == "model_not_allowed"
+        assert self._anonymous_chat(auth_app, model="llama3.1:8b").status_code == 200
+
+    def test_anonymous_policy_ignored_when_auth_disabled(self, auth_app):
+        auth_app.state.config.auth.enabled = False
+        auth_app.state.config.auth.anonymous.enabled = False
+        assert self._anonymous_chat(auth_app).status_code == 200
+
 
 class TestThinkPassthrough:
     """The `think` parameter reaches the engine; `thinking` comes back.

@@ -52,6 +52,19 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     app.state.settings = settings
 
+    auth = app.state.config.auth
+    if auth.enabled and auth.anonymous.enabled and auth.anonymous.unrestricted:
+        logger.warning(
+            "Keyless inference is unrestricted: any client can omit its key to bypass "
+            "per-key model/endpoint allowlists and rate limits. Set auth.anonymous.enabled: "
+            "false or restrict auth.anonymous in gateway.yaml."
+        )
+    if auth.enabled and not settings.admin_api_key:
+        logger.warning(
+            "GATEWAY_ADMIN_API_KEY is not set: any valid client key can manage keys, "
+            "budgets, and security labels."
+        )
+
     # Initialize database and audit logger
     db_config = DatabaseConfig(
         url=settings.db.url,

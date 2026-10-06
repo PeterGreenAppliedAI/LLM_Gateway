@@ -464,9 +464,21 @@ async def authenticate_with_environment(
     elif x_api_key:
         api_key = x_api_key
 
-    # If no key provided, use default (auth is optional - keys enable features like target_endpoint)
+    # No key: anonymous client "default". With auth enabled, the anonymous
+    # policy decides whether that's allowed and what it may reach —
+    # otherwise dropping the key would escape every per-key restriction.
     if not api_key:
-        return AuthResult("default", None, None)
+        if not config.auth.enabled:
+            return AuthResult("default", None, None)
+        anonymous = config.auth.anonymous
+        if not anonymous.enabled:
+            raise AuthenticationError(message="API key required")
+        return AuthResult(
+            client_id="default",
+            allowed_models=anonymous.allowed_models,
+            allowed_endpoints=anonymous.allowed_endpoints,
+            rate_limit_rpm=anonymous.rate_limit_rpm,
+        )
 
     # Validate key if provided (pass db_engine for DB-backed key lookup)
     db_engine = getattr(request.app.state, "db_engine", None)

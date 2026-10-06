@@ -132,3 +132,12 @@ auth:
     - key: "${GATEWAY_KEY_DEV}"
       client_id: dev-user
       description: "Development testing"
+
+  # Keyless inference (stock Ollama/OpenAI clients that send no key).
+  # Allowed by default, but unrestricted keyless access lets any client drop
+  # its key to bypass per-key limits. Disable it, or fence it in:
+  # anonymous:
+  #   enabled: true
+  #   allowed_models: ["llama3.1:*"]
+  #   allowed_endpoints: [gpu-node-1]
+  #   rate_limit_rpm: 30   # shared by all keyless traffic

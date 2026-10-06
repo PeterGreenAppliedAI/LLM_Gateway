@@ -165,11 +165,37 @@ class ApiKeyConfig(BaseModel):
     )
 
 
+class AnonymousAccessConfig(BaseModel):
+    """Policy for keyless inference requests when auth is enabled.
+
+    Stock Ollama/OpenAI clients send no key, so keyless inference stays
+    allowed by default. Without restrictions here, though, any client can
+    drop its key to escape that key's allowlists and rate limit — set
+    enabled: false, or restrict what keyless traffic may reach.
+    """
+
+    enabled: bool = Field(default=True, description="Allow keyless inference requests")
+    allowed_models: list[str] | None = Field(
+        default=None, max_length=500, description="Glob patterns keyless requests may use"
+    )
+    allowed_endpoints: list[SafeIdentifier] | None = Field(
+        default=None, max_length=50, description="Endpoints keyless requests may reach"
+    )
+    rate_limit_rpm: int | None = Field(
+        default=None, gt=0, description="Requests per minute for all keyless traffic combined"
+    )
+
+    @property
+    def unrestricted(self) -> bool:
+        return not (self.allowed_models or self.allowed_endpoints or self.rate_limit_rpm)
+
+
 class AuthConfig(BaseModel):
     """Authentication configuration."""
 
     enabled: bool = Field(default=False, description="Enable API key authentication")
     api_keys: list[ApiKeyConfig] = Field(default_factory=list, max_length=1000)
+    anonymous: AnonymousAccessConfig = Field(default_factory=AnonymousAccessConfig)
 
 
 class RateLimitConfig(BaseModel):
