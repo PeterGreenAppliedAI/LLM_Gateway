@@ -12,6 +12,31 @@ from pydantic import BaseModel, Field
 from gateway.config import EnvironmentConfig
 
 
+def endpoint_allowed_in_environment(
+    endpoint: str,
+    environment: EnvironmentConfig,
+    endpoint_labels: dict[str, dict[str, str]],
+) -> bool:
+    """Whether an environment's allowed_endpoints and label filter admit an endpoint."""
+    if environment.allowed_endpoints and endpoint not in environment.allowed_endpoints:
+        return False
+
+    if environment.endpoint_filter:
+        labels = endpoint_labels.get(endpoint, {})
+        for key, value in environment.endpoint_filter.items():
+            if labels.get(key) != value:
+                return False
+
+    return True
+
+
+def model_approved_in_environment(model: str, environment: EnvironmentConfig) -> bool:
+    """Whether a model is approved in an environment (empty list = all approved)."""
+    if environment.allow_all_discovered or not environment.approved_models:
+        return True
+    return any(fnmatch.fnmatch(model, pattern) for pattern in environment.approved_models)
+
+
 class DiscoveredModel(BaseModel):
     """A model discovered from an endpoint.
 
@@ -168,35 +193,11 @@ class ModelCatalog(BaseModel):
         endpoint_labels: dict[str, dict[str, str]],
     ) -> bool:
         """Check if endpoint is allowed in environment."""
-        # Check explicit allowed_endpoints
-        if environment.allowed_endpoints:
-            if endpoint not in environment.allowed_endpoints:
-                return False
-
-        # Check label filters
-        if environment.endpoint_filter:
-            labels = endpoint_labels.get(endpoint, {})
-            for key, value in environment.endpoint_filter.items():
-                if labels.get(key) != value:
-                    return False
-
-        return True
+        return endpoint_allowed_in_environment(endpoint, environment, endpoint_labels)
 
     def _model_approved(self, model: str, environment: EnvironmentConfig) -> bool:
         """Check if model is approved in environment."""
-        if environment.allow_all_discovered:
-            return True
-
-        if not environment.approved_models:
-            # No approved models list = allow all
-            return True
-
-        # Check if model matches any approved pattern
-        for pattern in environment.approved_models:
-            if fnmatch.fnmatch(model, pattern):
-                return True
-
-        return False
+        return model_approved_in_environment(model, environment)
 
     def find_model(self, model_pattern: str) -> list[DiscoveredModel]:
         """Find all models matching a pattern.

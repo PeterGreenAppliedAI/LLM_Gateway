@@ -631,3 +631,124 @@ class TestEndpointConfigValidation:
             )
 
         assert "nonexistent" in str(exc_info.value)
+
+
+# =============================================================================
+# Endpoint allowlist enforcement (key + environment scope)
+# =============================================================================
+
+
+class TestAllowedEndpointsEnforced:
+    """allowed_endpoints applies to the endpoint actually used.
+
+    Regression: the allowlist was only compared against preferred_provider,
+    so catalog routing, priority order, fallback and endpoint/model pins
+    could all reach an endpoint the key excluded.
+    """
+
+    @pytest.fixture
+    async def setup(self, endpoints_config):
+        from unittest.mock import AsyncMock
+
+        from gateway.models.common import FinishReason
+        from gateway.models.internal import InternalResponse, StreamChunk
+
+        registry = ProviderRegistry(endpoints_config)
+        await registry.initialize()
+        calls: list[str] = []
+
+        for name in ("gpunode-ollama", "dgxspark-ollama"):
+            registry.catalog.add_model(DiscoveredModel(name="shared:7b", endpoint=name))
+            registry.get_health(name).record_healthy()
+            adapter = registry.get(name)
+
+            async def chat(request, _name=name):
+                calls.append(_name)
+                return InternalResponse(
+                    request_id=request.request_id,
+                    task=request.task,
+                    provider=_name,
+                    model=request.model,
+                    content="ok",
+                    finish_reason=FinishReason.STOP,
+                )
+
+            async def chat_stream(request, _name=name):
+                calls.append(_name)
+                yield StreamChunk(
+                    request_id=request.request_id,
+                    index=0,
+                    delta="ok",
+                    finish_reason=FinishReason.STOP,
+                )
+
+            adapter.chat = AsyncMock(side_effect=chat)
+            adapter.chat_stream = chat_stream
+
+        dispatcher = Dispatcher(registry, endpoints_config.resolution)
+        yield dispatcher, registry, calls
+        await registry.close()
+
+    @staticmethod
+    def _request(model: str = "shared:7b", **kwargs) -> InternalRequest:
+        return InternalRequest(
+            task=TaskType.CHAT,
+            model=model,
+            messages=[Message(role=MessageRole.USER, content="Hello")],
+            **kwargs,
+        )
+
+    @pytest.mark.asyncio
+    async def test_catalog_routing_skips_disallowed_priority_endpoint(self, setup):
+        dispatcher, _, calls = setup
+        result = await dispatcher.dispatch(self._request(allowed_endpoints=["dgxspark-ollama"]))
+        # gpunode-ollama is first by priority but not allowed
+        assert result.provider_used == "dgxspark-ollama"
+        assert calls == ["dgxspark-ollama"]
+
+    @pytest.mark.asyncio
+    async def test_fallback_never_reaches_disallowed_endpoint(self, setup):
+        dispatcher, registry, calls = setup
+        from gateway.errors import AllProvidersUnavailableError
+        from gateway.models.common import HealthStatus
+
+        registry.get_health("gpunode-ollama").record_unhealthy(HealthStatus.UNHEALTHY)
+        registry.get("gpunode-ollama").health = _unhealthy
+        with pytest.raises(AllProvidersUnavailableError):
+            await dispatcher.dispatch(self._request(allowed_endpoints=["gpunode-ollama"]))
+        assert "dgxspark-ollama" not in calls
+
+    @pytest.mark.asyncio
+    async def test_pin_to_disallowed_endpoint_refused(self, setup):
+        dispatcher, _, calls = setup
+        from gateway.errors import PolicyError
+
+        request = self._request(
+            model="gpunode-ollama/shared:7b", allowed_endpoints=["dgxspark-ollama"]
+        )
+        with pytest.raises(PolicyError) as exc:
+            await dispatcher.dispatch(request)
+        assert exc.value.code.value == "endpoint_not_allowed"
+        assert calls == []
+
+    @pytest.mark.asyncio
+    async def test_stream_respects_allowlist(self, setup):
+        dispatcher, _, calls = setup
+        provider, stream = await dispatcher.dispatch_stream(
+            self._request(stream=True, allowed_endpoints=["dgxspark-ollama"])
+        )
+        assert provider == "dgxspark-ollama"
+        assert [chunk.delta async for chunk in stream] == ["ok"]
+        assert calls == ["dgxspark-ollama"]
+
+    @pytest.mark.asyncio
+    async def test_unrestricted_when_none(self, setup):
+        dispatcher, _, _ = setup
+        result = await dispatcher.dispatch(self._request())
+        assert result.provider_used == "gpunode-ollama"
+
+
+async def _unhealthy():
+    from gateway.models.common import HealthStatus
+
+    return HealthStatus.UNHEALTHY

@@ -708,3 +708,116 @@ class TestThinkPassthrough:
         msg = resp.json()["message"]
         assert msg["content"] == "4"
         assert msg["thinking"] == "The user asks 2+2. That is 4."
+
+
+# =============================================================================
+# Environments scope routing
+# =============================================================================
+
+
+class TestEnvironmentScope:
+    """Environments restrict endpoints and models; keys can't escape theirs.
+
+    Regression: get_environment() existed but no route used it, so
+    environment allowed_endpoints/endpoint_filter/approved_models had no
+    effect, and an unknown X-Environment silently meant "no restrictions".
+    """
+
+    PROD_KEY = "prod-key-1234567890"
+
+    @pytest.fixture
+    def env_app(self) -> FastAPI:
+        from gateway.config import ApiKeyConfig, EndpointConfig, EnvironmentConfig
+
+        app = FastAPI()
+        register_exception_handlers(app)
+        app.include_router(ollama_router)
+        app.state.config = GatewayConfig(
+            endpoints=[
+                EndpointConfig(
+                    name="gpu-prod",
+                    type=ProviderType.OLLAMA,
+                    url="http://gpu-prod:11434",
+                    labels={"tier": "prod"},
+                ),
+                EndpointConfig(
+                    name="gpu-dev",
+                    type=ProviderType.OLLAMA,
+                    url="http://gpu-dev:11434",
+                ),
+            ],
+            environments=[
+                EnvironmentConfig(name="dev", allow_all_discovered=True),
+                EnvironmentConfig(
+                    name="prod",
+                    endpoint_filter={"tier": "prod"},
+                    approved_models=["phi4:*"],
+                ),
+            ],
+            auth=AuthConfig(
+                enabled=True,
+                api_keys=[
+                    ApiKeyConfig(key=self.PROD_KEY, client_id="prod-app", environment="prod")
+                ],
+            ),
+        )
+        app.state.registry = None
+        app.state.enforcer = None
+        return app
+
+    def _chat(self, app, model="phi4:14b", headers=None):
+        dispatcher = AsyncMock(spec=Dispatcher)
+        dispatcher.dispatch = AsyncMock(
+            return_value=DispatchResult(
+                response=make_chat_response(),
+                provider_used="gpu-prod",
+                was_fallback=False,
+                attempted_providers=["gpu-prod"],
+            )
+        )
+        app.dependency_overrides[get_dispatcher] = lambda: dispatcher
+        try:
+            resp = TestClient(app).post(
+                "/api/chat",
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "stream": False,
+                },
+                headers=headers or {},
+            )
+        finally:
+            app.dependency_overrides.pop(get_dispatcher, None)
+        sent = dispatcher.dispatch.call_args[0][0] if dispatcher.dispatch.called else None
+        return resp, sent
+
+    def test_key_environment_limits_endpoints(self, env_app):
+        resp, sent = self._chat(env_app, headers={"X-API-Key": self.PROD_KEY})
+        assert resp.status_code == 200
+        assert sent.environment == "prod"
+        assert sent.allowed_endpoints == ["gpu-prod"]
+
+    def test_key_environment_cannot_be_overridden(self, env_app):
+        resp, sent = self._chat(
+            env_app, headers={"X-API-Key": self.PROD_KEY, "X-Environment": "dev"}
+        )
+        assert resp.status_code == 403
+        assert resp.json()["error"]["code"] == "environment_not_allowed"
+        assert sent is None
+
+    def test_unapproved_model_refused(self, env_app):
+        resp, sent = self._chat(env_app, model="llama3.1:8b", headers={"X-API-Key": self.PROD_KEY})
+        assert resp.status_code == 403
+        assert resp.json()["error"]["code"] == "model_not_allowed"
+        assert sent is None
+
+    def test_unknown_environment_refused(self, env_app):
+        resp, sent = self._chat(env_app, headers={"X-Environment": "nope"})
+        assert resp.status_code == 403
+        assert sent is None
+
+    def test_default_environment_for_keyless(self, env_app):
+        resp, sent = self._chat(env_app, model="llama3.1:8b")
+        assert resp.status_code == 200
+        assert sent.environment == "dev"
+        assert sent.allowed_endpoints == ["gpu-dev", "gpu-prod"]

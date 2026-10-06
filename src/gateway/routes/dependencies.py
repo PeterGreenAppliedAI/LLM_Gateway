@@ -502,56 +502,86 @@ async def authenticate_with_environment(
     )
 
 
-async def get_environment(
-    request: Request,
-    x_environment: Annotated[str | None, Header(alias="X-Environment")] = None,
-    authorization: Annotated[str | None, Header()] = None,
-    x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
-) -> EnvironmentConfig | None:
-    """Get environment configuration for the request.
+def resolve_environment(request: Request, auth: AuthResult) -> EnvironmentConfig | None:
+    """Pick the environment for a request.
 
-    Resolution order:
-    1. X-Environment header (explicit override)
-    2. Environment from API key configuration
-    3. Default environment from config
-
-    Args:
-        request: FastAPI request
-        x_environment: Optional explicit environment header
-        authorization: Optional auth header (for env lookup)
-        x_api_key: Optional API key header (for env lookup)
-
-    Returns:
-        EnvironmentConfig if environment is configured, None otherwise
+    An API key bound to an environment always gets that environment; an
+    X-Environment header naming a different one is refused rather than
+    silently ignored. Keys without one (and keyless requests) may choose
+    with the header, else get the default. Unknown names are refused —
+    falling through to "no environment" would lift every restriction.
     """
     config = get_config(request)
-
-    # If no environments configured, return None
     if not config.environments:
         return None
 
-    env_name: str | None = None
+    header = request.headers.get("X-Environment")
+    if auth.environment:
+        if header and header != auth.environment:
+            raise PolicyError(
+                message=f"API key is bound to environment '{auth.environment}'",
+                code=ErrorCode.ENVIRONMENT_NOT_ALLOWED,
+            )
+        name = auth.environment
+    else:
+        name = header
 
-    # Priority 1: Explicit header
-    if x_environment:
-        env_name = x_environment
+    if not name:
+        return config.get_default_environment()
 
-    # Priority 2: From API key
-    if not env_name:
-        try:
-            auth_result = await authenticate_with_environment(request, authorization, x_api_key)
-            env_name = auth_result.environment
-        except AuthenticationError:
-            # Auth failed, will use default
-            pass
+    environment = config.get_environment(name)
+    if environment is None:
+        raise PolicyError(
+            message=f"Unknown environment '{name}'",
+            code=ErrorCode.ENVIRONMENT_NOT_ALLOWED,
+        )
+    return environment
 
-    # Priority 3: Default environment
-    if not env_name:
-        default_env = config.get_default_environment()
-        return default_env
 
-    # Look up environment by name
-    return config.get_environment(env_name)
+async def resolve_access_scope(request: Request, auth: AuthResult, model: str | None) -> dict:
+    """Routing restrictions for a request, as InternalRequest field updates.
+
+    Combines the API key's target/allowed endpoints with the environment's
+    endpoints and approved models. The dispatcher enforces the resulting
+    allowed_endpoints on every endpoint it tries, so catalog routing and
+    fallback can't reach an endpoint the key or environment excludes.
+
+    Raises:
+        PolicyError: Unknown/conflicting environment, or model not approved
+            in the environment.
+    """
+    from gateway.catalog.models import (
+        endpoint_allowed_in_environment,
+        model_approved_in_environment,
+    )
+
+    updates: dict = {}
+    if auth.target_endpoint:
+        updates["preferred_provider"] = auth.target_endpoint
+
+    allowed = set(auth.allowed_endpoints) if auth.allowed_endpoints else None
+
+    environment = resolve_environment(request, auth)
+    if environment is not None:
+        updates["environment"] = environment.name
+        bare_model = Dispatcher.parse_provider_from_model(model)[1] or ""
+        if not model_approved_in_environment(bare_model, environment):
+            raise PolicyError(
+                message=f"Model '{bare_model}' is not approved in environment '{environment.name}'",
+                code=ErrorCode.MODEL_NOT_ALLOWED,
+            )
+        registry = await get_registry(request)
+        labels = registry.get_endpoint_labels()
+        in_environment = {
+            name
+            for name in registry.list_providers()
+            if endpoint_allowed_in_environment(name, environment, labels)
+        }
+        allowed = in_environment if allowed is None else allowed & in_environment
+
+    if allowed is not None:
+        updates["allowed_endpoints"] = sorted(allowed)
+    return updates
 
 
 def setup_request_context(

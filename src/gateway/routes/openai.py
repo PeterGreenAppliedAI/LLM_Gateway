@@ -50,6 +50,7 @@ from gateway.routes.dependencies import (
     get_pii_scrubber,
     get_sanitizer,
     get_security_analyzer,
+    resolve_access_scope,
     run_unless_disconnected,
     setup_request_context,
     should_scrub_pii,
@@ -167,11 +168,10 @@ async def chat_completions(
     if body.tools and body.stream:
         internal_request = internal_request.model_copy(update={"stream": False})
 
-    # Apply per-client target endpoint if configured
-    if auth.target_endpoint:
-        internal_request = internal_request.model_copy(
-            update={"preferred_provider": auth.target_endpoint}
-        )
+    # Apply per-key and per-environment routing restrictions
+    internal_request = internal_request.model_copy(
+        update=await resolve_access_scope(request, auth, internal_request.model)
+    )
 
     # Check policies - raises domain errors on violation
     try:
@@ -508,11 +508,10 @@ async def completions(
     # Convert to internal format
     internal_request = body.to_internal(client_id=client_id, task=TaskType.COMPLETION)
 
-    # Apply per-client target endpoint if configured
-    if auth.target_endpoint:
-        internal_request = internal_request.model_copy(
-            update={"preferred_provider": auth.target_endpoint}
-        )
+    # Apply per-key and per-environment routing restrictions
+    internal_request = internal_request.model_copy(
+        update=await resolve_access_scope(request, auth, internal_request.model)
+    )
 
     # Queue-and-drain instead of 429: embedding bursts wait for rate-limit
     # headroom (bounded); other policy violations still fail immediately
@@ -709,11 +708,10 @@ async def embeddings(
     # Convert to internal format
     internal_request = body.to_internal(client_id=client_id)
 
-    # Apply per-client target endpoint if configured
-    if auth.target_endpoint:
-        internal_request = internal_request.model_copy(
-            update={"preferred_provider": auth.target_endpoint}
-        )
+    # Apply per-key and per-environment routing restrictions
+    internal_request = internal_request.model_copy(
+        update=await resolve_access_scope(request, auth, internal_request.model)
+    )
 
     # Check policies - raises domain errors on violation
     try:

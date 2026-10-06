@@ -32,8 +32,10 @@ from gateway.errors import (
     AllProvidersUnavailableError,
     AmbiguousModelError,
     EndpointNotFoundError,
+    ErrorCode,
     GatewayError,
     NoProviderError,
+    PolicyError,
     ProviderError,
     ProviderUnavailableError,
 )
@@ -100,7 +102,8 @@ class Dispatcher:
         self._registry = registry
         self._resolution_config = resolution_config or ResolutionConfig()
 
-    def parse_provider_from_model(self, model: str | None) -> tuple[str | None, str | None]:
+    @classmethod
+    def parse_provider_from_model(cls, model: str | None) -> tuple[str | None, str | None]:
         """Parse provider and model from model string.
 
         Supports formats:
@@ -121,7 +124,7 @@ class Dispatcher:
         if not model:
             return None, None
 
-        match = self.MODEL_PROVIDER_PATTERN.match(model)
+        match = cls.MODEL_PROVIDER_PATTERN.match(model)
         if match:
             provider_hint = match.group(1)
             model_name = match.group(2)
@@ -168,16 +171,38 @@ class Dispatcher:
         # request lands on the default endpoint and 404s for models that
         # only exist elsewhere.
         if request.model:
-            candidates = self._registry.get_endpoints_with_model(request.model)
+            candidates = self._permitted(
+                request, self._registry.get_endpoints_with_model(request.model)
+            )
             if candidates:
                 return self.resolve_endpoint(request, available_endpoints=candidates)
 
-        # Fall back to default (catalog empty or model not yet discovered)
+        # Fall back to default (catalog empty or model not yet discovered),
+        # or the first permitted endpoint when the default is off-limits
         default = self._registry.get_default_provider()
+        if default and not self._permitted(request, [default]):
+            permitted = self._permitted(request, self._registry.list_providers())
+            if permitted:
+                default = permitted[0]
         if default:
             return default, request.model
 
         raise NoProviderError()
+
+    @staticmethod
+    def _permitted(request: InternalRequest, endpoints: list[str]) -> list[str]:
+        """Endpoints the request may be served by, order preserved."""
+        if request.allowed_endpoints is None:
+            return list(endpoints)
+        return [name for name in endpoints if name in request.allowed_endpoints]
+
+    def _require_permitted(self, request: InternalRequest, endpoint: str) -> None:
+        """Refuse an endpoint outside the request's allowed set."""
+        if not self._permitted(request, [endpoint]):
+            raise PolicyError(
+                message=f"Endpoint '{endpoint}' is not allowed for this API key or environment",
+                code=ErrorCode.ENDPOINT_NOT_ALLOWED,
+            )
 
     def resolve_endpoint(
         self,
@@ -345,6 +370,7 @@ class Dispatcher:
         pinned = self.parse_provider_from_model(request.model)[0] is not None
 
         provider_name, model_name = self.resolve_provider(request)
+        self._require_permitted(request, provider_name)
         attempted: list[str] = []
 
         # Update request with resolved model (strip provider prefix)
@@ -375,7 +401,9 @@ class Dispatcher:
             raise ProviderUnavailableError(provider=provider_name, fallback_disabled=True)
 
         # Get fallback chain - limited to prevent unbounded attempts
-        fallback_chain = self._registry.get_fallback_chain(exclude=provider_name)
+        fallback_chain = self._permitted(
+            request, self._registry.get_fallback_chain(exclude=provider_name)
+        )
         # Only fall back to endpoints that actually have the model —
         # anything else converts the real failure into a confusing 404
         if request.model:
@@ -599,16 +627,20 @@ class Dispatcher:
         pinned = self.parse_provider_from_model(request.model)[0] is not None
 
         provider_name, model_name = self.resolve_provider(request)
+        self._require_permitted(request, provider_name)
 
         # Update request with resolved model
         if model_name and model_name != request.model:
             request = request.model_copy(update={"model": model_name})
 
-        providers_to_try = self._get_stream_provider_order(
-            provider_name,
-            model_name,
+        providers_to_try = self._permitted(
             request,
-            pinned=pinned,
+            self._get_stream_provider_order(
+                provider_name,
+                model_name,
+                request,
+                pinned=pinned,
+            ),
         )
 
         if not providers_to_try:

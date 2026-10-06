@@ -48,6 +48,7 @@ from gateway.routes.dependencies import (
     get_pii_scrubber,
     get_sanitizer,
     get_security_analyzer,
+    resolve_access_scope,
     run_unless_disconnected,
     setup_request_context,
     should_scrub_pii,
@@ -228,9 +229,8 @@ async def ollama_chat(
     if extensions:
         request_kwargs["extensions"] = extensions
 
-    # Apply per-client target endpoint if configured
-    if auth.target_endpoint:
-        request_kwargs["preferred_provider"] = auth.target_endpoint
+    # Apply per-key and per-environment routing restrictions
+    request_kwargs.update(await resolve_access_scope(request, auth, request_kwargs.get("model")))
 
     if options.get("temperature") is not None:
         request_kwargs["temperature"] = options["temperature"]
@@ -552,9 +552,8 @@ async def ollama_generate(
     if body.format is not None:
         request_kwargs["response_format"] = _normalize_ollama_format(body.format)
 
-    # Apply per-client target endpoint if configured
-    if auth.target_endpoint:
-        request_kwargs["preferred_provider"] = auth.target_endpoint
+    # Apply per-key and per-environment routing restrictions
+    request_kwargs.update(await resolve_access_scope(request, auth, request_kwargs.get("model")))
 
     if options.get("temperature") is not None:
         request_kwargs["temperature"] = options["temperature"]
@@ -819,9 +818,8 @@ async def _run_embeddings(
         "client_id": client_id,
     }
 
-    # Apply per-client target endpoint if configured
-    if auth.target_endpoint:
-        request_kwargs["preferred_provider"] = auth.target_endpoint
+    # Apply per-key and per-environment routing restrictions
+    request_kwargs.update(await resolve_access_scope(request, auth, request_kwargs.get("model")))
 
     internal_request = InternalRequest(**request_kwargs)
 

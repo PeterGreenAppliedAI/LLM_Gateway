@@ -143,6 +143,10 @@ class InternalRequest(BaseModel):
     preferred_provider: str | None = Field(default=None, max_length=64)
     fallback_allowed: bool = True
     environment: str | None = Field(default=None, max_length=64)  # dev, prod, etc.
+    # Endpoints this request may be served by (API key allowlist intersected
+    # with the environment's endpoints). None = unrestricted. The dispatcher
+    # enforces it on every endpoint it tries, including fallbacks.
+    allowed_endpoints: list[str] | None = Field(default=None, max_length=50)
 
     # Tool calling
     tools: list[dict[str, Any]] | None = None  # Tool definitions (OpenAI/Ollama format)
