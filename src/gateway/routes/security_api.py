@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 
 from gateway.routes.dependencies import (
     get_security_analyzer,
+    require_admin,
     require_api_key,
 )
 from gateway.security import AsyncSecurityAnalyzer
@@ -109,7 +110,7 @@ async def get_security_stats(
 @router.delete("/api/security/alerts")
 async def clear_security_alerts(
     request: Request,
-    client_id: Annotated[str, Depends(require_api_key)],
+    client_id: Annotated[str, Depends(require_admin)],
     security_analyzer: Annotated[AsyncSecurityAnalyzer | None, Depends(get_security_analyzer)],
 ) -> dict[str, Any]:
     """Clear all security alerts from memory."""
@@ -335,7 +336,7 @@ async def label_security_scan(
     request: Request,
     request_id: str,
     body: LabelRequest,
-    client_id: Annotated[str, Depends(require_api_key)],
+    client_id: Annotated[str, Depends(require_admin)],
 ) -> dict[str, Any]:
     """Apply a human label to a security scan for training data."""
     scan_store = _get_scan_store(request)
@@ -377,7 +378,7 @@ class BulkLabelRequest(BaseModel):
 async def bulk_label_scans(
     request: Request,
     body: BulkLabelRequest,
-    client_id: Annotated[str, Depends(require_api_key)],
+    client_id: Annotated[str, Depends(require_admin)],
 ) -> dict[str, Any]:
     """Bulk label multiple security scans."""
     scan_store = _get_scan_store(request)

@@ -588,6 +588,36 @@ class TestAuthSplit:
         assert resp.json()["error"]["code"] == "model_not_allowed"
         assert self._anonymous_chat(auth_app, model="llama3.1:8b").status_code == 200
 
+    def test_control_plane_writes_require_admin(self, auth_app, monkeypatch):
+        """A client key can read the dashboard but not change budgets."""
+        from pydantic import SecretStr
+
+        import gateway.settings
+        from gateway.settings import Settings
+
+        admin_key = "admin-key-1234567890"
+        monkeypatch.setattr(
+            gateway.settings,
+            "get_settings",
+            lambda: Settings(admin_api_key=SecretStr(admin_key)),
+        )
+        client = TestClient(auth_app)
+        tier = {"name": "cheap", "cost_multiplier": 0.1}
+
+        resp = client.post(
+            "/api/budget/tiers", json=tier, headers={"X-API-Key": "test-api-key-12345678"}
+        )
+        assert resp.status_code == 401
+        resp = client.post("/api/budget/tiers", json=tier, headers={"X-API-Key": admin_key})
+        assert resp.status_code == 200
+
+        # One dashboard key serves both: admin can read, client can read
+        assert client.get("/api/stats", headers={"X-API-Key": admin_key}).status_code == 200
+        assert (
+            client.get("/api/stats", headers={"X-API-Key": "test-api-key-12345678"}).status_code
+            == 200
+        )
+
     def test_anonymous_policy_ignored_when_auth_disabled(self, auth_app):
         auth_app.state.config.auth.enabled = False
         auth_app.state.config.auth.anonymous.enabled = False

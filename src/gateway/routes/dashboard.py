@@ -20,6 +20,7 @@ from gateway.routes.dependencies import (
     get_audit_logger,
     get_config,
     get_enforcer,
+    require_admin,
     require_api_key,
 )
 from gateway.storage import AuditLogger
@@ -370,7 +371,7 @@ async def get_daily_usage(
 @router.post("/api/usage/aggregate")
 async def trigger_aggregation(
     request: Request,
-    client_id: Annotated[str, Depends(require_api_key)],
+    client_id: Annotated[str, Depends(require_admin)],
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
     date: str | None = None,
 ) -> dict[str, Any]:
@@ -513,7 +514,7 @@ class TierCreateRequest(BaseModel):
 @router.post("/api/budget/tiers")
 async def create_tier(
     body: TierCreateRequest,
-    _client_id: Annotated[str, Depends(require_api_key)],
+    _client_id: Annotated[str, Depends(require_admin)],
     enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
 ) -> dict:
     """Create or update a cost tier at runtime (no restart needed)."""
@@ -532,7 +533,7 @@ async def create_tier(
 @router.delete("/api/budget/tiers/{tier_name}")
 async def delete_tier(
     tier_name: str,
-    _client_id: Annotated[str, Depends(require_api_key)],
+    _client_id: Annotated[str, Depends(require_admin)],
     enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
 ) -> dict:
     """Remove a cost tier. Fails if models are still assigned to it."""
@@ -561,7 +562,7 @@ class ModelAssignmentRequest(BaseModel):
 async def assign_model_tier(
     request: Request,
     body: ModelAssignmentRequest,
-    _client_id: Annotated[str, Depends(require_api_key)],
+    _client_id: Annotated[str, Depends(require_admin)],
     enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
 ) -> dict:
     """Assign a model to a cost tier at runtime (no restart needed)."""
@@ -586,7 +587,7 @@ async def assign_model_tier(
 @router.delete("/api/budget/assignments/{model_name:path}")
 async def unassign_model_tier(
     model_name: str,
-    _client_id: Annotated[str, Depends(require_api_key)],
+    _client_id: Annotated[str, Depends(require_admin)],
     enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
 ) -> dict:
     """Remove a model's tier assignment (reverts to default cost multiplier)."""

@@ -325,6 +325,28 @@ async def authenticate(
     return result.client_id
 
 
+ADMIN_CLIENT_ID = "admin"
+
+
+def _extract_api_key(authorization: str | None, x_api_key: str | None) -> str | None:
+    """Pull the API key from a Bearer header or X-API-Key."""
+    if authorization:
+        if authorization.lower().startswith("bearer "):
+            return authorization[7:].strip()
+        raise AuthenticationError(message="Invalid authorization header format")
+    return x_api_key or None
+
+
+def _is_admin_key(api_key: str) -> bool:
+    """Whether api_key is the configured GATEWAY_ADMIN_API_KEY (constant-time)."""
+    from gateway.settings import get_settings
+
+    admin_key = get_settings().admin_api_key
+    return admin_key is not None and secrets.compare_digest(
+        api_key.encode(), admin_key.get_secret_value().encode()
+    )
+
+
 async def require_api_key(
     request: Request,
     authorization: Annotated[str | None, Header()] = None,
@@ -350,17 +372,14 @@ async def require_api_key(
     if not config.auth.enabled:
         return "default"
 
-    api_key = None
-    if authorization:
-        if authorization.lower().startswith("bearer "):
-            api_key = authorization[7:].strip()
-        else:
-            raise AuthenticationError(message="Invalid authorization header format")
-    elif x_api_key:
-        api_key = x_api_key
-
+    api_key = _extract_api_key(authorization, x_api_key)
     if not api_key:
         raise AuthenticationError(message="API key required")
+
+    # The admin key is a superset of a client key: the dashboard sends one
+    # key for both reads and admin writes
+    if _is_admin_key(api_key):
+        return ADMIN_CLIENT_ID
 
     db_engine = getattr(request.app.state, "db_engine", None)
     key_info = await validate_api_key(api_key, config, db_engine)
@@ -391,24 +410,14 @@ async def require_admin(
     if not settings.admin_api_key:
         return await require_api_key(request, authorization, x_api_key)
 
-    # Extract API key from headers
-    api_key = None
-    if authorization:
-        if authorization.lower().startswith("bearer "):
-            api_key = authorization[7:].strip()
-        else:
-            raise AuthenticationError(message="Invalid authorization header format")
-    elif x_api_key:
-        api_key = x_api_key
-
+    api_key = _extract_api_key(authorization, x_api_key)
     if not api_key:
         raise AuthenticationError(message="Admin authentication required")
 
-    # Compare against admin key using constant-time comparison
-    if not secrets.compare_digest(api_key, settings.admin_api_key.get_secret_value()):
+    if not _is_admin_key(api_key):
         raise AuthenticationError(message="Invalid admin credentials")
 
-    return "admin"
+    return ADMIN_CLIENT_ID
 
 
 async def get_auth(
