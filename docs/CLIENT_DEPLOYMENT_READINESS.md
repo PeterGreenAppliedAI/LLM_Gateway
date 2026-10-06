@@ -10,20 +10,22 @@ real-time traffic, and folds in outside feedback on the operator dashboard.
 ## Verdict
 
 The gateway works well as a **single-node, trusted-network gateway for a small team**
-(client Profile A below). It is **not yet ready** for multi-team or multi-tenant use,
-or for anything sold on its policy and audit guarantees. The blockers are not
-missing features. They are places where an existing feature looks enforced or
-recorded but can be bypassed or silently skipped:
+(client Profile A below). With the P0 fixes below it can back its policy and audit claims for a single
+organization; multi-tenant use still needs per-tenant views, and real-time load needs the
+section 2 capacity work. The P0 blockers were not missing features. They were places
+where an existing feature looked enforced or recorded but could be bypassed or silently
+skipped:
 
 1. ~~**Per-key policy can be bypassed** by sending no key at all~~ (fixed; section 1).
 2. ~~**Environments (dev/prod) are configured but never applied** to routing~~ (fixed; section 1).
 3. ~~**Any client key can change budgets, delete alerts, and read every other client's traffic**~~ (fixed; section 1).
-4. **Streaming requests are not counted against token budgets**, and mid-stream
-   failures are recorded as successes (section 2).
-5. **The audit trail is best-effort.** Failed writes are dropped, disconnected streams leave no
-   record, and the default start script stores raw PII in request bodies (section 3).
+4. ~~**Streaming requests are not counted against token budgets**, and mid-stream
+   failures are recorded as successes~~ (fixed; section 2).
+5. ~~**The audit trail is best-effort.** Failed writes are dropped, disconnected streams leave no
+   record, and the default start script stores raw PII in request bodies~~ (fixed; section 3).
 
-Fix 4 and 5 next. Everything else here is hardening.
+All five are fixed on `docs/readiness-gap-report`. What remains is P1 capacity and
+streaming hardening (section 2) and operations (section 4).
 
 Severity key: **P0** means a guarantee the product claims does not hold. **P1** means it
 degrades or fails under real load. **P2** is hardening or polish.
@@ -77,15 +79,15 @@ The gaps are in capacity management and in streaming correctness.
 
 | Pri | Gap | Where | Detail |
 |-----|-----|-------|--------|
-| P0 | Streaming usage isn't charged to token budgets | `routes/openai.py:310`, `routes/ollama.py:394,674` | `record_token_usage` is only called on non-streaming paths. Any client that streams, which is most chat UIs, never consumes its daily budget. |
-| P0 | Mid-stream failures recorded as success | same | Providers report any failure as a chunk with `finish_reason=ERROR`. The routes treat any chunk with a finish reason as the end of the stream and log `status="success"`, so audit and metrics count failed generations as successful. |
-| P1 | Client disconnect mid-stream leaves no audit record | `routes/openai.py` `_stream_chat_response`, Ollama equivalents | A disconnect raises `CancelledError`/`GeneratorExit`, which `except Exception` doesn't catch, so no audit row, no metrics and no budget charge. Record a `client_disconnected` row with the partial usage in `finally`. |
+| ~~P0~~ | **Fixed:** streaming usage wasn't charged to token budgets | `routes/stream_recorder.py` | All streaming routes charge budgets through a shared `StreamRecorder`, including failed and abandoned streams (estimated from chunks when no usage arrives). |
+| ~~P0~~ | **Fixed:** mid-stream failures recorded as success | same | `finish_reason=ERROR` is now audited as `status=error, error_code=stream_error`; Ollama streams send the client an error instead of a normal `done`. |
+| ~~P1~~ | **Fixed:** client disconnect mid-stream left no audit record | same | Disconnects close the upstream stream and write a `client_disconnected` row with partial content and tokens, shielded against Starlette's cancel scope. |
 | P1 | Upstream stream not closed on failover | `dispatch/dispatcher.py:627` | When the first chunk is an error or empty, the dispatcher moves to the next provider without `aclose()` on the abandoned iterator, so its upstream connection stays open until garbage collection. |
 | P1 | Stream errors lose their cause | `providers/ollama.py`, `providers/openai.py` `chat_stream` | Every exception, including upstream 4xx such as "model not found", becomes an empty `ERROR` chunk. So the stream dispatcher fails over on client errors (the non-streaming path correctly doesn't), and the final 503 doesn't say why (`AllProvidersUnavailableError` gets no `last_error`). |
 | P1 | Pre-stream failures return HTTP 200 | `routes/openai.py` `_stream_chat_response` | `dispatch_stream` runs inside the generator after the 200 headers are sent, so "all providers unavailable" reaches the client as a 200 with an error event. Load balancers and SDK retry logic can't see it. Resolve the provider and peek the first chunk before returning the `StreamingResponse`. |
 | P1 | Tool calls disable streaming on the OpenAI API | `routes/openai.py:167` | `tools` plus `stream: true` is silently turned into one buffered response. For agent workloads TTFT then equals total latency. The Ollama route already streams tool calls; the OpenAI route needs `tool_calls` delta support. |
 | P1 | Stalled stream can hang for up to an hour | `providers/*` `_iter_lines_with_timeout` | The gap allowed between chunks is `max(120s, endpoint timeout)`, and endpoint timeouts now go up to 3600s. The first-chunk timeout (cold model load) should be separate from the between-chunk timeout, which should be short (~30–60s). |
-| P2 | Response text accumulated with `+=` | `routes/openai.py:303`, `routes/ollama.py:365,666` | Quadratic on long generations, and it happens even when `store_response_body` is off. Use a list join, and only when storing. |
+| ~~P2~~ | **Fixed:** response text accumulated with `+=` | same | Now a list join. Still accumulated when bodies aren't stored. |
 
 ### Request handling
 
@@ -100,11 +102,12 @@ The gaps are in capacity management and in streaming correctness.
 
 | Pri | Gap | Where | Detail |
 |-----|-----|-------|--------|
-| P0 | Default start script stores raw PII | `start-gateway.sh:25,35` | `STORE_REQUEST_BODY=true` together with `PII_SCRUB_ENABLED=false` means detected PII is hashed in `pii_events` but saved in plaintext in `audit_log.request_body`. That contradicts the README's "raw PII never stored". Either scrub before storing bodies, or keep body storage off unless scrubbing is on. |
-| P0 | Audit writes fail open, silently | `storage/audit.py` `log_request` | Write errors are logged and dropped. A compliance product needs a durable path: a bounded queue with retry, a spill-to-disk fallback, an `audit_write_failures` alert, and an optional fail-closed mode for regulated deployments. |
-| P0 | Gateway starts without a database | `main.py` lifespan | If DB init fails, the gateway serves traffic with audit, DB keys and scans all disabled, and `/health` still reports healthy. This should be a startup failure, or at least a readiness failure. |
+| ~~P0~~ | **Fixed:** default start script stored raw PII | `security/pii.py` `redact`, `main.py` | With PII detection on, audit bodies **and `security_scans.messages`** (which stored every prompt regardless of body settings) are redacted before persisting, even in flag-only mode. Startup warns if bodies are stored with detection off. |
+| ~~P0~~ | **Fixed:** audit writes failed open, silently | `storage/audit.py` | Audit and PII-event writes retry, then go to a fsynced spill file replayed on startup; `gateway_audit_write_failures_total{table,outcome}` counts spills and losses. Still open: an optional fail-closed mode, and moving writes off the request path (section 2). |
+| ~~P0~~ | **Fixed:** gateway started without a database | `main.py` lifespan | Startup fails unless `GATEWAY_DB_REQUIRED=false`. `/health` still doesn't check the DB (section 4). |
 | P1 | Retention cleanup is fragile | `main.py:153`, `settings.py:54` | The first cleanup runs 24h after boot, so a gateway restarted daily never cleans up. One exception kills the loop for good. The "0 = no cleanup" option is rejected by `ge=1`. `usage_daily` is never filled automatically because `aggregate_daily_usage` has no scheduler. |
 | P1 | Security scans dropped silently under load | `security/analyzer.py` `queue_request` | When the queue is full the scan is dropped and only an internal counter goes up. Expose it as a metric and alert on it, since "every request is scanned" stops being true. |
+| P1 | PII scrubbing truncates long messages | `security/pii.py` `scan` | Found during the fixes. Text is cut at 100k characters before scanning, and the scrubbed text is built from the cut copy, so with scrubbing on, the tail of a long prompt that contains PII never reaches the model. Scrub in windows, or reject oversized input explicitly. |
 | P2 | No fallback or routing reason recorded | `storage/schema.py` `audit_log` | `DispatchResult.was_fallback` and `attempted_providers` exist but aren't stored. Needed for the operator view in section 5. |
 
 ## 4. Operability
@@ -163,8 +166,8 @@ while keyless or streaming traffic bypasses policy would be wrong.
 **Step 1: make policy and audit claims true (P0)**
 1. ~~Require keys on inference when auth is enabled; run the endpoint allowlist check on the endpoint actually chosen; wire environments into dispatch and stop `X-Environment` overriding a key's environment.~~ Done.
 2. ~~Admin-only control-plane writes; scope dashboard reads per client (admin sees all).~~ Done (dashboard is operator-only; per-tenant views still open).
-3. Charge streaming usage to budgets; record mid-stream errors and disconnects truthfully.
-4. Don't store unscrubbed bodies; durable audit writes; refuse to start or report not-ready without a DB.
+3. ~~Charge streaming usage to budgets; record mid-stream errors and disconnects truthfully.~~ Done.
+4. ~~Don't store unscrubbed bodies; durable audit writes; refuse to start or report not-ready without a DB.~~ Done (readiness probe still open).
 
 **Step 2: real-time capacity (P1)**
 5. Per-endpoint in-flight caps with fail-fast backpressure; least-in-flight balancing across endpoints.
