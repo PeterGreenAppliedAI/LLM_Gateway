@@ -4,7 +4,9 @@ Stores every security analysis result (regex + guard verdicts + original message
 for training data collection. Supports human labeling workflow and training data export.
 """
 
+from collections.abc import Callable
 from datetime import datetime, timezone
+from typing import Any
 
 from sqlalchemy import and_, desc, func, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -24,8 +26,20 @@ class SecurityScanStore:
     - Training data export in finetuning format
     """
 
-    def __init__(self, engine: AsyncEngine):
+    def __init__(self, engine: AsyncEngine, redactor: Callable[[Any], Any] | None = None):
         self._engine = engine
+        # Applied to messages before they are persisted (PII scrubbing)
+        self.redactor = redactor
+
+    def _redact(self, messages: list[dict]) -> list[dict]:
+        if self.redactor is None:
+            return messages
+        try:
+            return self.redactor(messages)
+        except Exception:
+            # Never fall back to storing unredacted content
+            logger.exception("Message redaction failed; messages not stored")
+            return [{"role": "system", "content": "[REDACTION FAILED]"}]
 
     async def store_scan(
         self,
@@ -61,7 +75,7 @@ class SecurityScanStore:
             "client_id": client_id,
             "model": model,
             "task": task,
-            "messages": messages,
+            "messages": self._redact(messages),
             "regex_threat_level": regex_threat_level,
             "regex_match_count": regex_match_count,
             "regex_matches": regex_matches,

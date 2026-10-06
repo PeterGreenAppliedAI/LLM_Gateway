@@ -308,3 +308,25 @@ class TestPolicyEnforcementPerKey:
         enforcer.enforce(
             req, rate_limit_key="test", allowed_endpoints=["openai-main", "ollama-server"]
         )
+
+
+class TestRedactForStorage:
+    """redact() scrubs every string in a JSON-like value, for data at rest."""
+
+    def test_nested_values_redacted(self):
+        scrubber = PIIScrubber()
+        body = {
+            "messages": [{"role": "user", "content": "mail me at a.b@example.com"}],
+            "meta": {"note": "SSN 123-45-6789", "count": 3, "ok": True, "none": None},
+        }
+        out = scrubber.redact(body)
+        assert out["messages"][0]["content"] == "mail me at [EMAIL]"
+        assert out["meta"] == {"note": "SSN [SSN]", "count": 3, "ok": True, "none": None}
+        # Input untouched
+        assert body["messages"][0]["content"] == "mail me at a.b@example.com"
+
+    def test_text_beyond_scan_limit_not_stored(self):
+        scrubber = PIIScrubber(max_input_length=20)
+        out = scrubber.redact("x" * 20 + " a.b@example.com")
+        assert "example.com" not in out
+        assert out.endswith("[TRUNCATED: not scanned for PII]")

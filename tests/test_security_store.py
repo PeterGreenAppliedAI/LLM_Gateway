@@ -387,3 +387,20 @@ class TestExportTrainingData:
 
         all_data = await store.export_training_data(labeled_only=False)
         assert len(all_data) == 2
+
+
+@pytest.mark.asyncio
+async def test_messages_redacted_before_storage(engine):
+    """Training data must not persist raw PII when detection is enabled."""
+    from gateway.security.pii import PIIScrubber
+
+    store = SecurityScanStore(engine, redactor=PIIScrubber().redact)
+    await store.store_scan(
+        request_id="req-pii",
+        client_id="app",
+        messages=[{"role": "user", "content": "call 555-123-4567"}],
+        regex_threat_level="none",
+        regex_match_count=0,
+    )
+    scan = await store.get_scan_by_id("req-pii")
+    assert scan["messages"] == [{"role": "user", "content": "call [PHONE]"}]

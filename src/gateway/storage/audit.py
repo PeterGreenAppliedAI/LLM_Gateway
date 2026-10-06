@@ -5,7 +5,9 @@ to the database for compliance, debugging, and analytics.
 Uses async SQLAlchemy for non-blocking database I/O.
 """
 
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 from sqlalchemy import Integer, and_, bindparam, case, cast, delete, func, insert, select
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -28,10 +30,14 @@ class AuditLogger:
         engine: AsyncEngine,
         store_request_body: bool = False,
         store_response_body: bool = False,
+        body_redactor: Callable[[Any], Any] | None = None,
     ):
         self._engine = engine
         self._store_request_body = store_request_body
         self._store_response_body = store_response_body
+        # Applied to bodies before they are persisted (PII scrubbing), so
+        # stored audit data never holds raw PII when detection is enabled
+        self.body_redactor = body_redactor
 
     async def log_request(
         self,
@@ -86,9 +92,9 @@ class AuditLogger:
         }
 
         if self._store_request_body and request_body:
-            values["request_body"] = request_body
+            values["request_body"] = self._redact(request_body)
         if self._store_response_body and response_body:
-            values["response_body"] = response_body
+            values["response_body"] = self._redact(response_body)
 
         try:
             stmt = insert(audit_log).values(**values)
@@ -107,6 +113,16 @@ class AuditLogger:
                 )
             except Exception:
                 pass
+
+    def _redact(self, body: Any) -> Any:
+        if self.body_redactor is None:
+            return body
+        try:
+            return self.body_redactor(body)
+        except Exception:
+            # Never fall back to storing the unredacted body
+            logger.exception("Body redaction failed; body not stored")
+            return {"redaction_failed": True}
 
     async def get_recent_requests(
         self,

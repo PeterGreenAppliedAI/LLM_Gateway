@@ -65,6 +65,27 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             "budgets, and security labels."
         )
 
+    # Initialize PII scrubber first: stores below redact with it, so raw PII
+    # is never persisted even in flag-only mode (scrub_enabled: false)
+    pii_scrubber = None
+    if settings.pii.enabled:
+        from gateway.security.pii import PIIScrubber
+
+        pii_scrubber = PIIScrubber()
+        app.state.pii_scrubber = pii_scrubber
+        app.state.pii_settings = settings.pii
+        logger.info(
+            "PII detection enabled",
+            scrub_enabled=settings.pii.scrub_enabled,
+            scrub_routes=settings.pii.scrub_routes or ["all"],
+        )
+    elif settings.db.store_request_body or settings.db.store_response_body:
+        logger.warning(
+            "Request/response bodies are stored but PII detection is off: stored bodies "
+            "may contain raw PII. Set GATEWAY_PII_ENABLED=true to redact them."
+        )
+    body_redactor = pii_scrubber.redact if pii_scrubber else None
+
     # Initialize database and audit logger
     db_config = DatabaseConfig(
         url=settings.db.url,
@@ -86,6 +107,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             engine=db_engine,
             store_request_body=settings.db.store_request_body,
             store_response_body=settings.db.store_response_body,
+            body_redactor=body_redactor,
         )
         app.state.audit_logger = audit_logger
         logger.info(f"Database initialized: {settings.db.url.split('://')[0]}")
@@ -128,7 +150,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Create security scan store for training data collection
     scan_store = None
     if getattr(app.state, "db_engine", None):
-        scan_store = SecurityScanStore(app.state.db_engine)
+        scan_store = SecurityScanStore(app.state.db_engine, redactor=body_redactor)
         app.state.scan_store = scan_store
         logger.info("Security scan store enabled (training data collection)")
 
@@ -143,19 +165,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     if scan_allowlist_ips:
         logger.info("Security scan allowlist", allowlisted_ips=scan_allowlist_ips)
     logger.info("Security analyzer started")
-
-    # Initialize PII scrubber
-    if settings.pii.enabled:
-        from gateway.security.pii import PIIScrubber
-
-        pii_scrubber = PIIScrubber()
-        app.state.pii_scrubber = pii_scrubber
-        app.state.pii_settings = settings.pii
-        logger.info(
-            "PII detection enabled",
-            scrub_enabled=settings.pii.scrub_enabled,
-            scrub_routes=settings.pii.scrub_routes or ["all"],
-        )
 
     # Start periodic audit log cleanup
     retention_days = settings.db.retention_days
