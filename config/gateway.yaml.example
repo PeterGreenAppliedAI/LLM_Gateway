@@ -107,6 +107,9 @@ endpoints:
   #   type: openai
   #   url: http://192.168.1.100:8880
   #   capabilities: [tts]
+  #   profile: kokoro          # optional: config/profiles/kokoro.yaml adds voice
+  #                            # languages/genders, blending and speed ranges
+  #   # voices: [alpha, beta]  # only for engines that can't list their own
   #
   # Speech-to-text, e.g. speaches (faster-whisper) or vLLM with vllm[audio]:
   # - name: whisper
@@ -114,6 +117,7 @@ endpoints:
   #   url: http://192.168.1.100:8000
   #   timeout: 600.0          # long recordings take a while
   #   capabilities: [stt]
+  #   profile: speaches        # Whisper language list for the dashboard
 
 # =============================================================================
 # Environments

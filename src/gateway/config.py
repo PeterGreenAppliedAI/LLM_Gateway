@@ -151,6 +151,11 @@ class EndpointConfig(BaseModel):
     # Media tasks this endpoint serves (D-020). Chat/completions/embeddings
     # need no declaration; media routes only use endpoints that declare it.
     capabilities: list[MediaCapability] = Field(default_factory=list, max_length=4)
+    # Engine profile (config/profiles/<name>.yaml) describing voices, languages
+    # and setting ranges for this engine family (D-020). Optional.
+    profile: SafeIdentifier | None = None
+    # Voices for engines that don't list their own (admin-declared, D-020)
+    voices: list[str] = Field(default_factory=list, max_length=1000)
 
     @model_validator(mode="after")
     def _media_needs_openai_contract(self) -> "EndpointConfig":

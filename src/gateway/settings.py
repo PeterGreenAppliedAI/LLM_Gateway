@@ -165,6 +165,9 @@ class Settings(BaseSettings):
     providers_config_path: str = Field(
         default="config/providers.yaml", description="Providers config file path"
     )
+    profiles_path: str = Field(
+        default="config/profiles", description="Directory of engine profiles (<name>.yaml)"
+    )
 
     # Security
     # SecretStr prevents accidental exposure in logs, repr, etc.

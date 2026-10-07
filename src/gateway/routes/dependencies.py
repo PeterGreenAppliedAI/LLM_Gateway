@@ -565,7 +565,8 @@ async def resolve_access_scope(request: Request, auth: AuthResult, model: str | 
     if environment is not None:
         updates["environment"] = environment.name
         bare_model = Dispatcher.parse_provider_from_model(model)[1] or ""
-        if not model_approved_in_environment(bare_model, environment):
+        # model None = listing (e.g. GET /v1/audio/voices): scope only, no model check
+        if model is not None and not model_approved_in_environment(bare_model, environment):
             raise PolicyError(
                 message=f"Model '{bare_model}' is not approved in environment '{environment.name}'",
                 code=ErrorCode.MODEL_NOT_ALLOWED,

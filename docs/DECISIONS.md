@@ -551,3 +551,45 @@ is observe-only).
   the registry, `GET /v1/audio/voices`. Today an unknown voice is rejected by the engine (400
   passed through) or silently replaced, depending on the engine.
 - **What works now:** `tests/test_audio_routes.py` (18 tests).
+
+## D-028: Voice registry: discovery, profiles, voice-aware routing (M1b)
+
+- **Status:** Implemented, 2026-10-07
+- **Problem:** After M1a, an unknown voice was rejected by some engines and silently swapped by
+  others, and nothing could tell the dashboard what voices or ranges exist.
+- **Fix:**
+  - **Profiles** are YAML in `config/profiles/` (shipped: `kokoro`, `speaches`, `vllm-omni`,
+    from source-verified research). An endpoint opts in with `profile:`. A profile describes:
+    - where the voice list lives;
+    - how to read language and gender from voice IDs (Kokoro's `af_` → American English,
+      female);
+    - whether blends are allowed;
+    - per-setting types and ranges;
+    - Whisper language codes for dropdowns.
+
+    Profiles are validated at startup. A broken profile, or an endpoint naming a missing one,
+    fails startup.
+  - **Media catalog** polls every media endpoint (60 s) for `/v1/models` and its voice list.
+    It normalizes every voice-list shape seen in research (Kokoro objects or strings,
+    speaches `{name, language, gender}`, vLLM-Omni `uploaded_voices`, Piper `{id: config}`)
+    and falls back to admin-declared `voices:`.
+  - **Validation is routing.** Each candidate endpoint is checked: unknown voice (each
+    component of a blend), or a setting outside the profile's range. Requests go only to
+    endpoints that can serve them, so a voice on box B routes to B. When none can, the
+    response is 422 with the reason and the available voices.
+  - **Listings:** `GET /v1/audio/voices` returns the union across the endpoints the caller's
+    key may use, with language, gender and serving endpoints. Admin `GET /api/media/catalog`
+    and `POST .../refresh` return everything the dashboard needs.
+- **What didn't work / rejected:**
+  - *Rejecting requests to engines we know nothing about:* an engine with no voice list and no
+    profile is never blocked, because unknown is not invalid.
+  - *Using each model's own speed range:* where limits differ by model inside one engine
+    (speaches: Kokoro 0.5–2.0, Piper 0.25–4.0), the profile uses the widest range so the
+    gateway never rejects what the engine would accept.
+  - *Validating STT language codes:* engines support languages beyond any list we ship. The
+    list feeds the dashboard only.
+- **What works now:** `tests/test_media_catalog.py` (19 tests: shapes, profile enrichment,
+  declared voices, routing by voice, blend validation, ranges, unknown engines, scoped
+  listing, admin catalog, startup failure).
+- **Trade-offs:** The voice list can be up to 60 s stale. A just-added voice may be rejected
+  until the next poll; `POST /api/media/catalog/refresh` forces one.

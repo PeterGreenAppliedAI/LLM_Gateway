@@ -39,6 +39,10 @@ logger = get_logger(__name__)
 # uploaded file must be rewound by the builder).
 RequestBuilder = Callable[[httpx.AsyncClient, str], httpx.Request]
 
+# Why an endpoint can't serve the request (unknown voice, setting out of
+# range), or None if it can. From the media catalog (D-028).
+CompatibilityCheck = Callable[[str], str | None]
+
 
 @dataclass
 class UpstreamMedia:
@@ -106,10 +110,12 @@ class MediaDispatcher:
         capability: MediaCapability,
         request: InternalRequest,
         build: RequestBuilder,
+        compatible: CompatibilityCheck | None = None,
     ) -> UpstreamMedia:
         """Open the upstream response on the first endpoint that accepts the request.
 
         Raises:
+            ValidationError: No candidate can serve it (e.g. unknown voice).
             ProviderError: Upstream 4xx (passed through, not retried elsewhere).
             AllProvidersUnavailableError: Every candidate failed retryably.
         """
@@ -117,7 +123,17 @@ class MediaDispatcher:
         attempted: list[str] = []
         errors: list[str] = []
 
-        for name in self.candidates(capability, request)[:MAX_FALLBACK_ATTEMPTS]:
+        candidates = self.candidates(capability, request)
+        if compatible is not None:
+            # Route only where the request can succeed: a voice that exists
+            # on one box goes to that box; if none can serve it, say why
+            reasons = {name: compatible(name) for name in candidates}
+            able = [name for name in candidates if reasons[name] is None]
+            if not able:
+                raise ValidationError(message=reasons[candidates[0]])
+            candidates = able
+
+        for name in candidates[:MAX_FALLBACK_ATTEMPTS]:
             adapter = self._registry.get(name)
             if adapter is None:
                 continue

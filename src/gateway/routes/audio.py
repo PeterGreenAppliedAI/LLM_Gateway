@@ -26,6 +26,7 @@ from gateway.config import GatewayConfig, MediaCapability
 from gateway.dispatch import ProviderRegistry
 from gateway.dispatch.media import MediaDispatcher, UpstreamMedia
 from gateway.errors import GatewayError, PayloadTooLargeError, ValidationError
+from gateway.media.catalog import MediaCatalog
 from gateway.models.common import TaskType
 from gateway.models.internal import InternalRequest
 from gateway.observability import get_logger, get_metrics
@@ -55,6 +56,10 @@ router = APIRouter(prefix="/v1/audio", tags=["audio"])
 
 # Transcript text kept for the audit row (redacted at rest, D-005)
 _AUDIT_TEXT_LIMIT = 100_000
+
+
+def get_media_catalog(request: Request) -> MediaCatalog | None:
+    return getattr(request.app.state, "media_catalog", None)
 
 
 def get_media_dispatcher(
@@ -196,11 +201,12 @@ async def _open_upstream(
     outcome: _MediaOutcome,
     build,
     usage: dict,
+    compatible=None,
 ) -> UpstreamMedia:
     """Pick an endpoint and get its status before responding (D-013)."""
     try:
         upstream = await run_unless_disconnected(
-            request, dispatcher.send(capability, internal, build)
+            request, dispatcher.send(capability, internal, build, compatible)
         )
     except ClientDisconnected:
         await outcome.record(
@@ -245,6 +251,7 @@ async def create_speech(
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
     pii_scrubber: Annotated[PIIScrubber | None, Depends(get_pii_scrubber)],
     config: Annotated[GatewayConfig, Depends(get_config)],
+    catalog: Annotated[MediaCatalog | None, Depends(get_media_catalog)],
 ) -> StreamingResponse:
     """Text-to-speech. Audio is relayed as the engine produces it."""
     limit = config.media.max_tts_characters
@@ -296,7 +303,16 @@ async def create_speech(
         payload.update(model=model, input=text)
         return client.build_request("POST", "/v1/audio/speech", json=payload)
 
-    upstream = await _open_upstream(request, dispatcher, "tts", internal, outcome, build, usage)
+    compatible = None
+    if catalog is not None:
+        params = body.model_dump(exclude={"model", "input", "voice"}, exclude_none=True)
+
+        def compatible(endpoint: str) -> str | None:
+            return catalog.check_speech(endpoint, body.voice, params)
+
+    upstream = await _open_upstream(
+        request, dispatcher, "tts", internal, outcome, build, usage, compatible
+    )
 
     async def relay() -> AsyncGenerator[bytes, None]:
         sent = 0
@@ -333,6 +349,30 @@ async def create_speech(
                 )
 
     return StreamingResponse(relay(), headers=_response_headers(upstream))
+
+
+@router.get("/voices")
+async def list_voices(
+    request: Request,
+    auth: Annotated[AuthResult, Depends(get_auth)],
+    registry: Annotated[ProviderRegistry, Depends(get_registry)],
+    catalog: Annotated[MediaCatalog | None, Depends(get_media_catalog)],
+) -> dict:
+    """Voices on the text-to-speech endpoints this key may use.
+
+    Each voice lists the endpoints that serve it, plus language and gender
+    when the engine or its profile provides them. Not part of OpenAI's API,
+    but the de-facto path engines use (Kokoro-FastAPI, speaches, vLLM-Omni).
+    """
+    scope = await resolve_access_scope(request, auth, None)
+    allowed = scope.get("allowed_endpoints")
+    endpoints = [
+        name
+        for name in registry.list_providers()
+        if "tts" in getattr(registry.get_endpoint_config(name), "capabilities", [])
+        and (allowed is None or name in allowed)
+    ]
+    return {"object": "list", "voices": catalog.voices(endpoints) if catalog else []}
 
 
 # =============================================================================

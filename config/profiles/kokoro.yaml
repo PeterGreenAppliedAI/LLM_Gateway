@@ -1,0 +1,27 @@
+# Kokoro-FastAPI (remsky). Verified from source 2026-10-07 (v0.9.x).
+description: Kokoro-FastAPI text-to-speech (82M, voice blending, 9 languages)
+tts:
+  voices_path: /v1/audio/voices
+  # Voice IDs: first letter = language, second = gender (af_heart, bm_george, ...)
+  voice_id:
+    pattern: '^(?P<language>[abefhijpz])(?P<gender>[fm])_'
+    language:
+      a: American English
+      b: British English
+      e: Spanish
+      f: French
+      h: Hindi
+      i: Italian
+      j: Japanese
+      p: Brazilian Portuguese
+      z: Mandarin Chinese
+    gender:
+      f: female
+      m: male
+  blending: true   # af_bella(2)+af_sky(1); '-' subtracts a voice
+  params:
+    speed: {type: number, min: 0.25, max: 4.0, default: 1.0}
+    response_format: {type: enum, values: [mp3, opus, aac, flac, wav, pcm], default: mp3}
+    lang_code: {type: enum, values: [a, b, e, f, h, i, j, p, z]}
+    volume_multiplier: {type: number, min: 0, max: 10, default: 1.0}
+    stream: {type: boolean, default: true}

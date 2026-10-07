@@ -172,6 +172,25 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await registry.start_health_monitoring()
         app.state.registry = registry
 
+        # Media catalog: voices/models per media endpoint, enriched by engine
+        # profiles (D-020/D-028). A profile name that doesn't exist is a
+        # config error, so fail startup rather than serve without it.
+        from gateway.media.catalog import MediaCatalog
+        from gateway.media.profiles import load_profiles
+
+        profiles = load_profiles(settings.profiles_path)
+        missing = sorted(
+            {ep.profile for ep in app.state.config.endpoints if ep.profile} - set(profiles)
+        )
+        if missing:
+            raise RuntimeError(
+                f"Endpoint profiles not found in {settings.profiles_path}: {missing}"
+            )
+        if any(ep.capabilities for ep in app.state.config.endpoints):
+            media_catalog = MediaCatalog(registry, profiles)
+            await media_catalog.start()
+            app.state.media_catalog = media_catalog
+
         # Start model discovery service
         discovery = ModelDiscoveryService(
             endpoints=app.state.config.get_enabled_endpoints(),
@@ -242,6 +261,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     if hasattr(app.state, "discovery_service"):
         await app.state.discovery_service.stop()
+
+    if hasattr(app.state, "media_catalog"):
+        await app.state.media_catalog.stop()
 
     if hasattr(app.state, "registry"):
         await app.state.registry.close()

@@ -698,6 +698,30 @@ async def update_pii_config(
     return _pii_config_view(request)
 
 
+@router.get("/api/media/catalog")
+async def media_catalog(
+    request: Request,
+    _client_id: Annotated[str, Depends(require_admin)],
+) -> dict:
+    """Voice/media endpoints with their discovered models, voices, profile
+    and setting ranges: everything the dashboard's media controls need."""
+    catalog = getattr(request.app.state, "media_catalog", None)
+    return {"endpoints": catalog.snapshot() if catalog else []}
+
+
+@router.post("/api/media/catalog/refresh")
+async def refresh_media_catalog(
+    request: Request,
+    _client_id: Annotated[str, Depends(require_admin)],
+) -> dict:
+    """Re-discover voices and models now instead of waiting for the next poll."""
+    catalog = getattr(request.app.state, "media_catalog", None)
+    if catalog is None:
+        return {"endpoints": []}
+    await catalog.refresh()
+    return {"endpoints": catalog.snapshot()}
+
+
 @router.get("/api/pii/events")
 async def pii_events(
     _auth_client_id: Annotated[str, Depends(require_admin)],

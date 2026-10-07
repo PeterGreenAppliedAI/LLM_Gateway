@@ -151,7 +151,7 @@ Both OpenAI and Ollama formats — your apps don't need to change.
 
 **OpenAI:** `POST /v1/chat/completions`, `POST /v1/completions`, `POST /v1/embeddings`, `GET /v1/models`
 
-**Voice (OpenAI audio API):** `POST /v1/audio/speech` (text-to-speech, streamed), `POST /v1/audio/transcriptions` and `/v1/audio/translations` (speech-to-text, multipart). Works with any engine that speaks OpenAI's audio API (Kokoro-FastAPI, speaches/faster-whisper, vLLM, vLLM-Omni, ...): declare the endpoint with `type: openai` and `capabilities: [tts]` or `[stt]`. Same auth, scope, PII, audit and budget rules as chat. Engine setup notes: [docs/MEDIA_ENGINES.md](docs/MEDIA_ENGINES.md).
+**Voice (OpenAI audio API):** `POST /v1/audio/speech` (text-to-speech, streamed), `POST /v1/audio/transcriptions` and `/v1/audio/translations` (speech-to-text, multipart). Works with any engine that speaks OpenAI's audio API (Kokoro-FastAPI, speaches/faster-whisper, vLLM, vLLM-Omni, ...): declare the endpoint with `type: openai` and `capabilities: [tts]` or `[stt]`. Same auth, scope, PII, audit and budget rules as chat. `GET /v1/audio/voices` lists the voices the gateway discovered (with language/gender where known). Optional engine profiles (`config/profiles/`, e.g. `profile: kokoro`) add voice metadata, blending and setting ranges; requests then route to an endpoint that has the requested voice, and unknown voices or out-of-range settings are rejected with the valid choices. Engine setup notes: [docs/MEDIA_ENGINES.md](docs/MEDIA_ENGINES.md).
 
 **Ollama:** `POST /api/chat`, `POST /api/generate`, `POST /api/embed`, `POST /api/embeddings` (legacy), `GET /api/tags`
 

@@ -1,0 +1,8 @@
+# vLLM-Omni text-to-speech (Qwen3-TTS, CosyVoice3, Voxtral-TTS, ...). Verified 2026-10-07.
+description: vLLM-Omni text-to-speech
+tts:
+  voices_path: /v1/audio/voices   # {"voices": [names], "uploaded_voices": [...]}
+  params:
+    speed: {type: number, min: 0.25, max: 4.0, default: 1.0}
+    response_format: {type: enum, values: [wav, mp3, flac, pcm, opus], default: wav}
+    stream_format: {type: enum, values: [audio, sse]}
