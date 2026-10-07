@@ -48,6 +48,7 @@ is observe-only).
   outside the allowlist gets 403 (`tests/test_ollama_routes.py::TestAuthSplit`).
 - **Trade-offs:** The default is still open. Closing it is a config change the operator has to make.
 - **Revisit when:** No keyless clients remain. Then default `enabled: false`.
+- **Update:** the default is now `enabled: false`, restricted to `allowed_networks` (D-042).
 
 ## D-002: Any client key could run the control plane
 
@@ -214,7 +215,8 @@ is observe-only).
 
 ## D-011: Inline images pass through; image URLs are rejected
 
-- **Status:** Accepted, 2026-10-07 (phase 5)
+- **Status:** Implemented, 2026-10-07, `df17d9b` (planned for phase 5; brought forward by the
+  external review, see D-041)
 - **Problem:** The OpenAI route drops all image parts silently, so vision models answer as if no
   image was sent.
 - **What didn't work:** *Downloading `http(s)` image URLs in the gateway:* rejected.
@@ -222,8 +224,14 @@ is observe-only).
     cloud metadata).
   - It would make arbitrary outbound requests, breaking air-gapped and egress-controlled sites.
   - The audit trail would hold only a URL whose content can change.
-- **Fix (planned):** Pass inline `data:` images through. Reject image URLs with 400 and a message
-  saying to send the image inline.
+- **Fix:**
+  - Text parts are sanitized in place; inline `data:` images pass through (Ollama gets them in
+    its native `images` field).
+  - Image URLs and unsupported part types are refused (validation error) with a message
+    saying to send the image inline.
+  - Stored audit bodies replace image bytes with a short description (type and size), in
+    line with D-023. Media is redacted before the body is stored.
+- **What works now:** `tests/test_wire.py` checks the engine receives the image.
 - **Revisit when:** A customer needs URL images. Then add opt-in fetching with a domain allowlist,
   private addresses blocked, and size and time caps.
 
@@ -1435,3 +1443,200 @@ worker" readiness item), not SQLite.
 
   **End to end:** a cached key gave 200, 200, then 401 immediately after `DELETE
   /api/keys/{id}`; `last_used_at` was written at clean shutdown.
+
+---
+
+## External review of `4390209`
+
+An outside reviewer read the branch at `4390209` and ran the suite on Windows/Python 3.10.
+Each finding below was reproduced before it was fixed. The fixes are D-041 to D-045.
+
+## D-041: Unscrubbed PII reached engines (embeddings) and stayed in security scans
+
+- **Status:** Implemented, 2026-10-07, `df17d9b`
+- **Problem 1, embeddings:** `/v1/embeddings` scrubbed the input, logged "scrubbed", and then
+  built the dispatched request from the **raw** body. The engine received the original
+  text.
+- **What didn't work:** *passing the scrubbed input as-is.* That exposed a second bug: text
+  with no PII "scrubbed" to `None` (meaning "nothing changed"), so the request failed
+  validation with 422.
+- **Fix 1:** the dispatched request is built from the sanitized input, falling back to the
+  original only when the scrubber reports no change (`is not None`, not truthiness).
+  `tests/test_wire.py` now checks what the engine actually receives on the chat and
+  embeddings routes (OpenAI and Ollama), rather than what the gateway logged.
+- **Problem 2, security scans:** every scan stored the full prompt. It was redacted only
+  when PII detection was on, and scans were never deleted. That contradicted the audit
+  settings (request bodies are off by default; D-005 keeps raw PII out of audit rows) and kept
+  raw prompts forever.
+- **Fix 2:**
+  - **Messages are kept only by opt-in:** `GATEWAY_SECURITY_STORE_MESSAGES`.
+    - `none` (default): verdicts and metadata only.
+    - `flagged`: messages of requests the regex scanner or the guard model flagged, for
+      review.
+    - `all`: every request, for training-data collection.
+  - **Kept messages are always PII-redacted**, whether or not PII detection is on for the
+    request path.
+  - **Scans and PII events expire:** `GATEWAY_SECURITY_RETENTION_DAYS` (default 90, 0 =
+    keep). This runs in the same retention loop as audit rows.
+  - Training-data export skips scans whose messages weren't kept, instead of exporting
+    empty prompts.
+- **Trade-off:** the dashboard's scan review and labeling show a placeholder for scans
+  without messages. Teams that label scans set `flagged` (or `all`) explicitly.
+- **What works now:**
+  - `tests/test_wire.py` (12 tests): engines receive scrubbed text, inline images and
+    unchanged clean text.
+  - `tests/test_security_store.py`: the default stores no messages; `flagged` keeps only
+    flagged ones; `all` keeps everything and is redacted; old scans are deleted; export
+    skips withheld scans.
+
+## D-042: Access modes: keys, solo and a test mode; secure by default
+
+- **Status:** Implemented, 2026-10-07, `b8e0228`. **Reverses D-001's default** and part of
+  D-002.
+- **Problem:** secure operation depended on optional config.
+  - Keyless inference was on unless turned off (D-001 left the default open).
+  - With auth on but no `GATEWAY_ADMIN_API_KEY`, **any client key** could reach the
+    dashboard, key management and budgets.
+  - With auth off, the gateway accepted requests from anywhere.
+- **Also needed:** a way for the operator to try a real config without minting keys
+  ("We need like a test mode I can use to test stuff out").
+- **Fix, three modes:**
+  - **keys** (`auth.enabled: true`):
+    - every request needs a key;
+    - keyless requests only if `auth.anonymous.enabled`, and then only from
+      `auth.anonymous.allowed_networks` (default: this machine);
+    - admin routes need `GATEWAY_ADMIN_API_KEY`. Without it they refuse with 403
+      `admin_key_required`, rather than falling back to client keys.
+  - **solo** (`auth.enabled: false`): one person on one machine. No keys, but requests only
+    from `auth.anonymous.allowed_networks` (default loopback). A key doesn't bypass the
+    network check.
+  - **test mode** (`GATEWAY_DEV_MODE=true`, or `./start-gateway.sh --dev`):
+    - keyless inference and dashboard from `GATEWAY_DEV_NETWORKS` (default this machine),
+      whatever the auth config says;
+    - requests that send a key are still checked (a wrong key is still 401);
+    - audited as client `dev`;
+    - the script uses a separate database (`data/dev.db`) and journal;
+    - loud everywhere: startup banner, `/health` `access.mode`, dashboard banner.
+  - **`GATEWAY_PROFILE=production`** refuses to start with test mode on, auth off, no admin
+    key, or keyless access with no model, endpoint or rate restriction. It lists every
+    problem at once.
+- **"This machine" is the TCP peer address.** A request carrying proxy headers
+  (`X-Forwarded-For`, `Forwarded`, `X-Real-IP`, `X-Forwarded-Host`) never counts as local.
+  With a reverse proxy on the same host, every internet request would otherwise arrive from
+  127.0.0.1. Trusted-proxy support is a separate step, not built.
+- **Breaking change:** keyless clients on other machines (LocalClaw, stock Ollama clients)
+  need:
+
+  ```yaml
+  auth:
+    anonymous:
+      enabled: true
+      allowed_networks: ["192.168.1.40/32"]   # the client's address or subnet
+  ```
+
+- **Alternatives considered:**
+  - *Keep the open default with a louder warning:* that's what D-001 did; the review showed
+    warnings aren't a control.
+  - *Test mode as "auth off":* it would also drop key checks for clients that do send keys,
+    so the config being tested isn't the one that runs.
+- **What works now:** `tests/test_access_modes.py` (15 tests): keyless refused by default;
+  opt-in only from allowed networks; admin key required; solo is local-only; a key doesn't
+  bypass locality; proxied requests aren't local; test mode works with auth on, still checks
+  keys and is limited to its networks; `GATEWAY_DEV_NETWORKS` parsing; the production
+  profile's checks.
+
+## D-043: Budgets are hard limits: reserve at admission, settle on completion
+
+- **Status:** Implemented, 2026-10-07, `68f5968`. Amends D-037.
+- **Problem** (reproduced through the real route):
+  - Usage counted only after a request finished, so concurrent requests all passed a check
+    against the same remaining budget. **10 concurrent requests against a 100-token
+    budget: all 10 admitted.**
+  - An exhausted budget admitted zero-estimate requests: `used + 0 > limit` is false at
+    `used == limit`.
+  - A request with no `max_tokens` estimated zero output.
+  - An interrupted stream that produced only reasoning (`thinking`) or tool-call chunks
+    counted as zero tokens.
+- **Fix:**
+  - **Admission reserves** the estimated cost. The check and the hold happen with no
+    `await` between them, so on one event loop they're atomic.
+  - **Completion settles:** the hold is replaced with actual usage (streams included).
+  - **Failure releases:** holds of failed or abandoned requests are released when the
+    request ends (the same teardown that releases key slots).
+  - **A lost hold expires** after 10 minutes, so a bug can't pin a budget forever.
+  - **Estimate:** prompt (about 4 characters per token, plus 1) plus `max_tokens`, or the
+    configured default when unset. Embeddings and audio have no output tokens.
+  - **Exhausted is exhausted:** `used >= limit` refuses, whatever the estimate.
+  - Thinking and tool-call chunks count toward a stream's estimate.
+- **Scope:** reservations are per process. Several gateway processes sharing a budget can
+  each admit up to the remaining budget once. The shared Redis route (D-035) can carry
+  reservations later; not built.
+- **What works now:** `tests/test_budget_reservations.py` (10 tests):
+  - 10 concurrent requests on a 100-token budget: exactly 1 admitted, settled to the
+    actual 10 tokens;
+  - a failing engine leaves no hold and no usage;
+  - a streamed request settles to the usage the engine reported (7), not the 500 estimate;
+  - the tracker's reserve, settle, release, expiry and exhausted-budget rules.
+
+## D-044: Compose keeps its data, and the dashboard works from any browser
+
+- **Status:** Implemented, 2026-10-07, `e065815`
+- **Problem:**
+  - The gateway's SQLite database and audit intent log lived in the container's filesystem.
+    `docker compose down` and `up` lost every key, budget and audit row.
+  - The dashboard image was built against `http://gateway:8000`, a name only Docker's
+    internal DNS resolves. Browsers couldn't reach the API.
+- **Fix:**
+  - `/app/data` is a named volume (`gateway-data`), owned by the image's non-root user.
+  - The dashboard is served by nginx, which also proxies `/api`, `/v1`, `/health` and
+    `/metrics` to the gateway. It's built with an empty API base (same origin). Streams are
+    unbuffered (`proxy_buffering off`).
+  - **Compose requires `GATEWAY_ADMIN_API_KEY`** (`${GATEWAY_ADMIN_API_KEY:?}`). Behind the
+    proxy nothing counts as local (D-042), so the operator key is the only way into the
+    dashboard.
+  - The gateway image no longer installs curl; its healthcheck uses Python. A
+    `.dockerignore` keeps `node_modules`, `data` and `.git` out of the build context.
+  - Redis is under the `ha` Compose profile, so it starts only when asked for.
+- **What didn't work** (in this sandbox, not in the shipped files): apt has no plain-HTTP
+  egress here, so `apt-get install curl` failed. That is one reason the image dropped
+  curl. Image builds were verified with scratch copies that add the proxy CA.
+- **What works now** (verified by building both images and running the Compose file):
+  - `docker compose up` without the admin key refuses to start and names the variable;
+  - the dashboard and API work through nginx;
+  - a key created before `down`/`up` still works afterwards.
+
+## D-045: CI proves the PostgreSQL, Redis and Windows claims
+
+- **Status:** Implemented, 2026-10-07, `5b7e7e3`
+- **Problem:**
+  - CI ran SQLite only. The PostgreSQL and Redis tests skipped silently, so "works on
+    PostgreSQL" and "works with Redis" were tested only on the developer's machine.
+  - The reviewer's Windows/Python 3.10 run had 6 failures: 5 in the audit intent log, 1
+    timing.
+- **Fix:**
+  - **Linux CI** (Python 3.10, 3.11, 3.12) runs against `postgres:16` and `redis:7` service
+    containers. `GATEWAY_TEST_REQUIRE_SERVICES=1` makes an unreachable server an
+    **error** instead of a skip.
+  - **A `windows-latest` job** (Python 3.10, 3.12) runs the suite on SQLite.
+  - **The intent log on Windows:**
+    - process locks use `msvcrt` byte-range locking where `fcntl` is missing. Before, orphan
+      recovery was simply off on Windows, so a crashed process's log was never drained;
+    - shutdown closes the active segment before the final drain deletes it;
+    - orphan recovery unlocks a drained orphan before removing its directory. Windows can't
+      delete a file that is still open; POSIX can, which is why Linux never failed.
+  - **The timing test** measured a real disk `fsync` (tens of milliseconds on Windows
+    runners) against a 40 ms bound. It now stubs `fsync` and checks the no-batching-window
+    property it was written for.
+- **What works now:** locally, the full suite with services required: 914 passed, 0
+  skipped. Windows is proven by the CI job, not locally.
+- **Found while checking Python 3.10:**
+  - **The bug:** shutting down could hang forever. `RedisConcurrency.close()` hung in
+    `test_shared_state_redis.py` every time.
+  - **Cause:** on Python before 3.12, `asyncio.wait_for(event.wait(), t)` returns normally if
+    the event is set at the same moment the task is cancelled (CPython gh-86296). The
+    Redis slot pump is woken by a release and cancelled right after, so it never stopped. The
+    audit drainer had the same pattern.
+  - **Fix:** both loops use `gateway.aio.wait_event`, built on `asyncio.wait`, which never
+    swallows a cancellation.
+  - **Proven by:** `tests/test_aio.py`. The old pattern hangs on 3.10 and not on 3.13,
+    which is why it went unseen on 3.13.

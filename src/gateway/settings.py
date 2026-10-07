@@ -91,7 +91,7 @@ class DatabaseSettings(BaseSettings):
     # Data retention
     retention_days: int = Field(
         default=90,
-        ge=1,
+        ge=0,
         le=3650,
         description="Days to retain audit log entries (0 = no cleanup)",
     )

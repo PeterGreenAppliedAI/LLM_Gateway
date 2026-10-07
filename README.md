@@ -47,7 +47,7 @@ cp .env.example .env
 ./start-gateway.sh
 ```
 
-Point your apps at `http://your-server:8001`. Use OpenAI format or Ollama format — both work.
+Point your apps at `http://your-server:8001`. Use OpenAI format or Ollama format — both work. Clients need an API key; keyless clients on other machines need `auth.anonymous` (see [Access modes](#api-compatibility)). To try things out without keys, run `./start-gateway.sh --dev` (test mode, this machine only).
 
 ```python
 # Works with any OpenAI-compatible client
@@ -111,7 +111,7 @@ React + TypeScript monitoring UI with five tabs:
 cd dashboard && npm install && npx vite --host 0.0.0.0 --port 5174
 ```
 
-On first load, enter the admin key (`GATEWAY_ADMIN_API_KEY`) in the header field (top right) — the dashboard endpoints require it. If no admin key is configured, any valid gateway key works. The key is stored in the browser's localStorage and sent as `X-API-Key` on every request.
+On first load, enter the admin key (`GATEWAY_ADMIN_API_KEY`) in the header field (top right) — with `auth.enabled: true` the dashboard endpoints require it, and client keys are refused. In solo mode (`auth.enabled: false`) and test mode the dashboard works from this machine without a key. The key is stored in the browser's localStorage and sent as `X-API-Key` on every request.
 
 ## Security Architecture
 
@@ -146,7 +146,22 @@ Request → Auth → Sanitize → PII Scan → Policy Check → Route → Respon
 
 Both OpenAI and Ollama formats — your apps don't need to change.
 
-**Auth model:** inference endpoints work without an API key by default (stock Ollama/OpenAI clients just work; keys opt you into per-client routing, allowlists, and budgets). Keyless traffic is governed by `auth.anonymous` — disable it, or restrict its models, endpoints, and rate, so clients can't drop their key to escape its limits. Dashboard, security, budget, and key-management endpoints are the operator console: with `auth.enabled: true` they **require** `GATEWAY_ADMIN_API_KEY` (or, if none is set, any valid key — set one in production).
+**Access modes** (D-042):
+
+- **Keys** (`auth.enabled: true`) — every request needs an API key. Keyless requests (stock Ollama clients such as LocalClaw) are refused unless you enable `auth.anonymous` and list the networks they come from in `auth.anonymous.allowed_networks`; restrict their models, endpoints and rate too, so clients can't drop their key to escape its limits. Dashboard, security, budget and key-management endpoints are the operator console and **require** `GATEWAY_ADMIN_API_KEY`; without it they return 403.
+- **Solo** (`auth.enabled: false`) — no keys, for one person on one machine. Requests are accepted only from `auth.anonymous.allowed_networks` (default: this machine). A request that arrived through a reverse proxy never counts as local.
+- **Test mode** (`./start-gateway.sh --dev`, or `GATEWAY_DEV_MODE=true`) — try a real config without minting keys: keyless inference and dashboard from `GATEWAY_DEV_NETWORKS` (default: this machine), keys that are sent are still checked, traffic is audited as client `dev`, and the script uses a separate `data/dev.db`. Shown in the startup log, `/health` and the dashboard.
+
+Set `GATEWAY_PROFILE=production` to refuse startup with test mode on, auth off, no admin key, or unrestricted keyless access.
+
+**Upgrading:** keyless access used to be on by default. Keyless clients on other machines now need:
+
+```yaml
+auth:
+  anonymous:
+    enabled: true
+    allowed_networks: ["192.168.1.40/32"]   # the client's address or subnet
+```
 
 **Environments:** a key bound to an environment (`environment: prod`) is routed only to that environment's endpoints and approved models, including on fallback; `X-Environment` can't override it. Keys without an environment may pick one with `X-Environment`, otherwise they get the default (`dev` if defined, else the first).
 
@@ -228,7 +243,13 @@ auth:
 | `GATEWAY_GUARD_BASE_URL` | `http://localhost:11434` | Ollama server hosting guard model |
 | `GATEWAY_PII_ENABLED` | `false` | Enable PII detection. Also redacts PII from stored audit bodies and security scans, even when scrubbing is off |
 | `GATEWAY_PII_SCRUB_ENABLED` | `false` | Replace PII with placeholders. Startup default only: admins can change scrubbing (on/off, all or selected routes) live from the dashboard's Security tab, and that saved setting overrides this |
-| `GATEWAY_ADMIN_API_KEY` | | Operator key for the dashboard, key management, budgets, and security labeling |
+| `GATEWAY_ADMIN_API_KEY` | | Operator key for the dashboard, key management, budgets, and security labeling. Required for those routes when `auth.enabled: true` |
+| `GATEWAY_DEV_MODE` | `false` | Test mode: keyless inference and dashboard from `GATEWAY_DEV_NETWORKS`, whatever the auth config says. Keys that are sent are still checked. Never in production |
+| `GATEWAY_DEV_NETWORKS` | `127.0.0.0/8,::1/128` | Comma-separated addresses or CIDRs test mode accepts keyless requests from |
+| `GATEWAY_PROFILE` | `default` | `production` refuses to start with test mode on, auth off, no admin key, or unrestricted keyless access |
+| `GATEWAY_DB_RETENTION_DAYS` | `90` | Delete audit rows and budget history older than this (`0` = keep) |
+| `GATEWAY_SECURITY_STORE_MESSAGES` | `none` | What security scans keep of the prompt (D-041). `none`: verdicts only. `flagged`: messages of flagged requests, for review and labeling. `all`: every request (training-data collection). Kept messages are always PII-redacted |
+| `GATEWAY_SECURITY_RETENTION_DAYS` | `90` | Delete security scans and PII events older than this (`0` = keep) |
 | `GATEWAY_CORS_ORIGINS` | `["*"]` | Allowed CORS origins |
 | `GATEWAY_REDIS_URL` | | **Optional.** Share rate limits and concurrency slots across gateway processes or replicas (e.g. `redis://:password@host:6379/0`). Unset, everything stays in process memory and nothing else needs to run. If Redis becomes unreachable, each process falls back to its own limits and `/health` reports `shared_state.status: degraded` |
 | `GATEWAY_REDIS_PREFIX` | `devmesh` | Key prefix, so several gateways can share one Redis |
@@ -258,9 +279,11 @@ For evaluation, `./start-gateway.sh` is all you need. For production:
 ## Testing
 
 ```bash
-pytest tests/ -v              # 538 tests
+pytest tests/ -v              # ~915 tests
 pytest tests/ --cov=gateway   # With coverage
 ```
+
+PostgreSQL and Redis tests run when a server is reachable (`GATEWAY_TEST_PG_URL`, `GATEWAY_TEST_REDIS_URL`) and are skipped otherwise. CI runs them against real servers and fails if they're missing (`GATEWAY_TEST_REQUIRE_SERVICES=1`).
 
 ## License
 

@@ -40,6 +40,7 @@ from sqlalchemy import Table, delete, insert, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from gateway.aio import wait_event
 from gateway.observability import get_logger
 from gateway.storage.schema import audit_journal, audit_log, pii_events
 
@@ -278,8 +279,7 @@ class IntentLog:
     async def _drain_loop(self) -> None:
         backoff = self._idle
         while True:
-            with contextlib.suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(self._wake.wait(), backoff)
+            await wait_event(self._wake, backoff)
             self._wake.clear()
             try:
                 await self._drain(self.instance, self._dir, live=True)

@@ -201,11 +201,13 @@ auth:
       client_id: dev-user
       description: "Development testing"
 
-  # Keyless inference (stock Ollama/OpenAI clients that send no key).
-  # Allowed by default, but unrestricted keyless access lets any client drop
-  # its key to bypass per-key limits. Disable it, or fence it in:
+  # Keyless inference (stock Ollama/OpenAI clients that send no key, e.g.
+  # LocalClaw). Off by default (D-042). To allow it, name the networks it may
+  # come from (default: this machine only) and fence it in, so clients can't
+  # drop their key to escape per-key limits:
   # anonymous:
   #   enabled: true
+  #   allowed_networks: ["192.168.1.40/32"]   # a client's address, or a subnet
   #   allowed_models: ["llama3.1:*"]
   #   allowed_endpoints: [gpu-node-1]
   #   rate_limit_rpm: 30   # shared by all keyless traffic

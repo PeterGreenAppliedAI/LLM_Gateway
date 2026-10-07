@@ -23,6 +23,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
+from gateway.aio import wait_event
 from gateway.observability import get_logger
 
 logger = get_logger(__name__)
@@ -464,8 +465,7 @@ class RedisConcurrency:
 
     async def _pump(self) -> None:
         while True:
-            with contextlib.suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(self._wake.wait(), self._poll)
+            await wait_event(self._wake, self._poll)
             self._wake.clear()
             for priority in PRIORITIES:
                 queue = self._waiters[priority]
