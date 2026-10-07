@@ -95,8 +95,11 @@ class TestDrain:
         await log.start()
         for i in range(600):
             await log.append("audit_log", [_audit_row(f"r{i}")])
-        await _until(lambda: _counted(engine, audit_log, 600))
-        await _until(lambda: _segment_count(log, 1))  # closed segments deleted
+        # ~30 segments, each fsynced, drained in its own commit and deleted: on a
+        # Windows CI disk that took longer than the default 5 s. This test is
+        # about order and completeness, not speed
+        await _until(lambda: _counted(engine, audit_log, 600), timeout=30)
+        await _until(lambda: _segment_count(log, 1), timeout=30)  # closed segments deleted
         async with engine.connect() as conn:
             ids = [
                 r[0]
