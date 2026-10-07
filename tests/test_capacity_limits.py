@@ -121,26 +121,26 @@ class TestBurstScaling:
         assert (burst, rpm) == (1, 3)
         assert hour >= rpm
 
-    def test_high_rpm_key_not_capped_by_global_burst(self):
+    async def test_high_rpm_key_not_capped_by_global_burst(self):
         """Regression: a 600 RPM key was refused after 10 requests in 10s."""
         limiter = self._limiter()
         for _ in range(100):
-            limiter.acquire("fast", rpm_override=600)
+            await limiter.acquire("fast", rpm_override=600)
         with pytest.raises(RateLimitExceeded) as exc:
-            limiter.acquire("fast", rpm_override=600)
+            await limiter.acquire("fast", rpm_override=600)
         assert exc.value.limit == 100
 
-    def test_default_key_still_capped(self):
+    async def test_default_key_still_capped(self):
         limiter = self._limiter()
         for _ in range(10):
-            limiter.acquire("normal")
+            await limiter.acquire("normal")
         with pytest.raises(RateLimitExceeded) as exc:
-            limiter.acquire("normal")
+            await limiter.acquire("normal")
         assert exc.value.limit == 10
 
-    def test_check_reports_scaled_limits(self):
+    async def test_check_reports_scaled_limits(self):
         limiter = self._limiter()
-        limiter.acquire("fast", rpm_override=600)
-        state = limiter.check("fast", rpm_override=600)
+        await limiter.acquire("fast", rpm_override=600)
+        state = await limiter.check("fast", rpm_override=600)
         assert state.burst_remaining == 99
         assert state.requests_remaining_hour == 9999

@@ -165,9 +165,22 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         if pii_scrubber is not None:
             await _load_saved_pii_scrub(app)
 
+    # Shared state (D-035): in-memory unless GATEWAY_REDIS_URL is set
+    from gateway.state import create_shared_state
+
+    redis_url = settings.redis_url.get_secret_value() if settings.redis_url else None
+    admission_cfg = app.state.config.admission if app.state.config else None
+    app.state.shared_state = create_shared_state(
+        redis_url,
+        prefix=settings.redis_prefix,
+        batch_max_share=admission_cfg.batch_max_share if admission_cfg else 1.0,
+    )
+
     # Initialize registry and discovery service if endpoints are configured
     if app.state.config and app.state.config.endpoints:
-        registry = ProviderRegistry(app.state.config)
+        registry = ProviderRegistry(
+            app.state.config, endpoint_slots=app.state.shared_state.endpoint_slots
+        )
         await registry.initialize()
         await registry.start_health_monitoring()
         app.state.registry = registry
@@ -267,6 +280,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     if hasattr(app.state, "registry"):
         await app.state.registry.close()
+
+    if getattr(app.state, "shared_state", None) is not None:
+        await app.state.shared_state.close()
 
     # Dispose async database engine
     if hasattr(app.state, "db_engine") and app.state.db_engine:

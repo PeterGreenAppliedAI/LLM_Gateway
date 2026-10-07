@@ -21,6 +21,7 @@ from gateway.models.internal import InternalRequest
 from gateway.policy.rate_limiter import RateLimitConfig, RateLimiter, RateLimitExceeded
 from gateway.policy.token_budget import TokenBudgetConfig, TokenBudgetExceeded, TokenBudgetTracker
 from gateway.policy.token_limiter import TokenLimitConfig, TokenLimiter, TokenLimitExceeded
+from gateway.state.ratelimit import RateWindowStore
 
 
 class PolicyViolation(Exception):
@@ -85,17 +86,21 @@ class PolicyEnforcer:
 
     Usage:
         enforcer = PolicyEnforcer(config)
-        enforcer.enforce(request, rate_limit_key="client_123")
+        await enforcer.enforce(request, rate_limit_key="client_123")
     """
 
-    def __init__(self, config: PolicyConfig | None = None):
+    def __init__(
+        self, config: PolicyConfig | None = None, rate_store: RateWindowStore | None = None
+    ):
         """Initialize policy enforcer.
 
         Args:
             config: Policy configuration. Uses defaults if not provided.
+            rate_store: Where rate-limit windows are counted (gateway.state);
+                defaults to this process's memory
         """
         self._config = config or PolicyConfig()
-        self._rate_limiter = RateLimiter(self._config.rate_limit)
+        self._rate_limiter = RateLimiter(self._config.rate_limit, rate_store)
         self._token_limiter = TokenLimiter(self._config.token_limit)
         self._token_budget = TokenBudgetTracker(self._config.token_budget)
 
@@ -109,7 +114,7 @@ class PolicyEnforcer:
         """Check if policy enforcement is enabled."""
         return self._config.enabled
 
-    def enforce(
+    async def enforce(
         self,
         request: InternalRequest,
         rate_limit_key: str | None = None,
@@ -142,7 +147,7 @@ class PolicyEnforcer:
 
         # 1. Check rate limits (with per-key override)
         try:
-            rate_state = self._rate_limiter.acquire(key, rpm_override=rate_limit_rpm)
+            rate_state = await self._rate_limiter.acquire(key, rpm_override=rate_limit_rpm)
         except RateLimitExceeded as e:
             raise PolicyViolation(
                 message=str(e),
@@ -232,7 +237,7 @@ class PolicyEnforcer:
             adjusted_max_tokens=adjusted,
         )
 
-    def check_rate_limit(self, key: str) -> PolicyCheckResult:
+    async def check_rate_limit(self, key: str) -> PolicyCheckResult:
         """Check rate limit only (without consuming).
 
         Args:
@@ -244,7 +249,7 @@ class PolicyEnforcer:
         if not self._config.enabled or not self._rate_limiter.enabled:
             return PolicyCheckResult(allowed=True)
 
-        state = self._rate_limiter.check(key)
+        state = await self._rate_limiter.check(key)
 
         return PolicyCheckResult(
             allowed=state.requests_remaining_minute > 0,
@@ -282,17 +287,17 @@ class PolicyEnforcer:
         """Get the default max_tokens value."""
         return self._token_limiter.default_max_tokens
 
-    def reset_rate_limit(self, key: str) -> None:
+    async def reset_rate_limit(self, key: str) -> None:
         """Reset rate limit for a key (admin operation).
 
         Args:
             key: Rate limit key to reset
         """
-        self._rate_limiter.reset(key)
+        await self._rate_limiter.reset(key)
 
-    def reset_all_rate_limits(self) -> None:
+    async def reset_all_rate_limits(self) -> None:
         """Reset all rate limits (admin operation)."""
-        self._rate_limiter.reset_all()
+        await self._rate_limiter.reset_all()
 
     def record_token_usage(self, key: str, model: str, tokens: int) -> None:
         """Record actual token usage after a response completes.

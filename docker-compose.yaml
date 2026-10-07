@@ -11,6 +11,9 @@ services:
       - GATEWAY_LOG_LEVEL=INFO
       - GATEWAY_CONFIG_PATH=/app/config/gateway.yaml
       - GATEWAY_PROVIDERS_CONFIG_PATH=/app/config/providers.yaml
+      # Optional shared state (D-035): set to redis://redis:6379/0 and start
+      # with `--profile ha` to share rate limits and slots across replicas
+      - GATEWAY_REDIS_URL=${GATEWAY_REDIS_URL:-}
     volumes:
       - ./config:/app/config:ro
     healthcheck:
@@ -38,6 +41,18 @@ services:
       - gateway-network
     depends_on:
       - gateway
+
+  # Optional: shared rate limits and concurrency slots for several gateway
+  # processes. Not started by default; nothing else depends on it.
+  #   GATEWAY_REDIS_URL=redis://redis:6379/0 docker compose --profile ha up -d
+  # No persistence needed: it only holds short-lived counts and leases.
+  redis:
+    image: redis:7-alpine
+    profiles: ["ha"]
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    restart: unless-stopped
+    networks:
+      - gateway-network
 
   prometheus:
     image: prom/prometheus:v2.47.0

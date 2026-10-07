@@ -18,7 +18,6 @@ from dataclasses import dataclass
 import httpx
 
 from gateway.config import MediaCapability, ResolutionConfig
-from gateway.dispatch.admission import Lease
 from gateway.dispatch.dispatcher import (
     MAX_FALLBACK_ATTEMPTS,
     Dispatcher,
@@ -38,6 +37,7 @@ from gateway.errors import (
 from gateway.models.internal import InternalRequest
 from gateway.observability import get_logger
 from gateway.providers.streaming import upstream_http_error
+from gateway.state.concurrency import Lease
 
 logger = get_logger(__name__)
 
@@ -69,7 +69,7 @@ class UpstreamMedia:
             await self.response.aclose()
         finally:
             if self.lease is not None:
-                self.lease.release()
+                await self.lease.release()
 
 
 class MediaDispatcher:
@@ -163,7 +163,7 @@ class MediaDispatcher:
 
         remaining = [
             name
-            for name in order_candidates(
+            for name in await order_candidates(
                 self._registry, self._resolution.strategy, candidates[:MAX_FALLBACK_ATTEMPTS]
             )
             if self._registry.get(name) is not None
@@ -177,10 +177,10 @@ class MediaDispatcher:
             try:
                 upstream = await self._attempt(name, model, build, attempted, errors)
             except BaseException:
-                lease.release()
+                await lease.release()
                 raise
             if upstream is None:
-                lease.release()
+                await lease.release()
                 continue
             upstream.lease = lease
             return upstream

@@ -213,7 +213,7 @@ async def chat_completions(
 
     # Check policies - raises domain errors on violation
     try:
-        enforcer.enforce(
+        await enforcer.enforce(
             internal_request,
             rate_limit_key=auth.client_id,
             allowed_models=auth.allowed_models,
@@ -757,7 +757,7 @@ async def embeddings(
 
     # Check policies - raises domain errors on violation
     try:
-        enforcer.enforce(
+        await enforcer.enforce(
             internal_request,
             rate_limit_key=auth.client_id,
             allowed_models=auth.allowed_models,

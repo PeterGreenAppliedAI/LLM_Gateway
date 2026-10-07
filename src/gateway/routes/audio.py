@@ -182,7 +182,7 @@ async def _prepare(
     internal = InternalRequest(task=task, model=model, client_id=auth.client_id)
     internal = internal.model_copy(update=await resolve_access_scope(request, auth, model))
     try:
-        enforcer.enforce(
+        await enforcer.enforce(
             internal,
             rate_limit_key=auth.client_id,
             allowed_models=auth.allowed_models,

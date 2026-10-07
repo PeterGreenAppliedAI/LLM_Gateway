@@ -197,7 +197,7 @@ is observe-only).
 
 ## D-010: Single gateway process; Redis later behind one interface
 
-- **Status:** Accepted, 2026-10-07 (phases 2–4 build the interface; Redis is a later phase)
+- **Status:** Accepted, 2026-10-07. **Amended by D-035:** the interface and an optional Redis backend now exist. In-memory stays the default.
 - **Problem:** Rate limits, budgets and (soon) in-flight slots live in one process's memory.
   Running two processes or replicas would give each its own copy.
 - **What didn't work:** *Adding Redis now:* rejected for this stage.
@@ -916,3 +916,91 @@ is observe-only).
     - a batch request behind two interactive ones waited 3.0 s and succeeded (an
       interactive request would have hit 503 at 0.5 s);
     - a bad priority header → 422.
+
+## D-035: Shared state: in-memory by default, Redis as an opt-in route
+
+- **Status:** Implemented, 2026-10-07. Amends D-010.
+- **Decision (Peter):** Redis is never required. Nobody should have to stand up another
+  service to use the gateway. But anyone who runs several gateway processes or replicas should
+  have a route to shared limits.
+- **What's shared:**
+  - rate-limit windows (burst, minute, hour per key);
+  - endpoint concurrency slots (D-032);
+  - per-key concurrency slots (D-034).
+- **What stays per process:**
+  - circuit breakers (D-031): each process learns within a few requests, and the health loop
+    runs per process anyway;
+  - token budgets: these belong in the database, not Redis (budget persistence phase).
+- **How it's configured:**
+  - **Unset `GATEWAY_REDIS_URL` (default):** in-memory, exactly as before. No new dependency:
+    `redis` is an optional extra (`pip install 'devmesh-gateway[redis]'`). The Docker image
+    includes it so `--profile ha` works without a rebuild.
+  - **Set it:** every process using that Redis (and the same `GATEWAY_REDIS_PREFIX`) shares
+    the counts, so `max_concurrent: 4` means 4 across all of them.
+  - **Compose:** `GATEWAY_REDIS_URL=redis://redis:6379/0 docker compose --profile ha up -d`.
+    Redis runs with no persistence: it only holds short-lived counts and leases.
+- **One interface, so callers don't care** (`gateway/state/`):
+  - `ConcurrencyBackend` and `RateWindowStore`, each with in-memory and Redis
+    implementations;
+  - `create_shared_state()` picks one at startup.
+  - **This required making the callers async now:** the rate limiter, `PolicyEnforcer.enforce`,
+    slot acquire and release, and least-loaded ordering. A Redis call is network I/O; a sync
+    interface would block the event loop or force a second rewrite later. About 100 call
+    sites changed, mostly tests, with no behavior change on the in-memory path.
+- **How the Redis backend works:**
+  - **Atomic Lua scripts.** Two processes can't both take the last slot or the last request
+    in a window. Times come from the Redis server's clock (`TIME`), so clock skew between
+    gateway hosts doesn't matter.
+  - **Crash-safe slots.** A slot is a sorted-set entry with an expiry (lease TTL 30 s). A
+    heartbeat renews the leases of live requests every 10 s, so long streams keep their slot.
+    If a gateway crashes, its slots free themselves within 30 s instead of being held forever.
+  - **Waiting across processes.** A release publishes on a channel, and waiters in every
+    process retry immediately. Polling every 0.5 s is the backstop for a missed message.
+    Order is exact within a process (interactive first, then arrival order); across
+    processes, the first to retry after a release wins. The batch share (D-034) still
+    applies across all processes.
+  - **Release finishes even during cancellation.** Releases often run while the client is
+    disconnecting. The Redis call runs as a shielded task, so it completes instead of
+    leaving the slot held until the TTL.
+- **If Redis is unreachable:** each process falls back to its own in-memory counts, so limits
+  stay enforced, per process, as if Redis weren't configured.
+  - One error is logged, and `/health` shows `shared_state: {backend: redis, status:
+    degraded}`.
+  - Redis is skipped for a 5 s cooldown, then retried. Socket timeouts are 0.5 s. So a dead
+    Redis costs at most one short timeout per cooldown, not one per request.
+  - *Alternatives considered:*
+    - *Fail closed (refuse traffic):* a cache outage would take inference down.
+    - *Fail open (no limits):* the GPUs lose their protection exactly when something is
+      already wrong.
+  - A misconfigured URL also lands in "degraded" rather than blocking startup, and it's
+    visible on `/health`.
+- **What didn't work:**
+  - *The first draft imported the circuit breaker into the state package.* That would have
+    been a circular import (`gateway.dispatch` imports the state package). The store health
+    tracker got its own small cooldown instead.
+  - *A regex converter for the async test changes* prefixed `await` onto list comprehensions
+    (`await [x.try_acquire() ...]`). It also made one nested helper `async` because it
+    shared a block with the calls. Both were caught by the first test run and fixed by hand.
+  - *The embedding queue* took a sync callable. It now accepts sync or async (the enforcer is
+    async), so other callers don't break.
+- **What works now:**
+  - `tests/test_shared_state_redis.py` (12 tests against a real Redis 7; skipped when none is
+    reachable, so CI without Redis stays green):
+    - two clients share one cap;
+    - a release in one process wakes a waiter in another in under 1 s, with polling set to
+      5 s (so the notification did it);
+    - the batch share holds across processes;
+    - a "crashed" process's slots expire;
+    - the heartbeat keeps a long request's slot past 2.5 TTLs;
+    - a release interrupted by cancellation still lands;
+    - shared rate windows, including scaled limits;
+    - fallback when Redis is unreachable, and recovery when it returns;
+    - two full dispatchers, 12 requests, engine peak exactly 2.
+  - All 759 existing tests pass on the in-memory default.
+  - **End-to-end run:** two real gateway processes behind one Redis and a fake engine with
+    `max_concurrent: 2`:
+    - 8 requests split across both → all 200, engine peak 2;
+    - a key with `max_concurrent: 1` hit on both gateways at once → 200 + 429;
+    - Redis killed → all requests still served under per-process limits, `/health`
+      degraded on both, one error line per process, no log spam;
+    - Redis restarted → both back to `ok`.

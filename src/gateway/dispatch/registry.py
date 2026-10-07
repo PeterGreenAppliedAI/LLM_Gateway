@@ -13,10 +13,10 @@ from datetime import datetime, timedelta, timezone
 
 from gateway.catalog.models import ModelCatalog
 from gateway.config import EndpointConfig, GatewayConfig, ProviderConfig
-from gateway.dispatch.admission import ConcurrencyBackend, InMemoryConcurrency
 from gateway.dispatch.circuit import CircuitBreaker, CircuitState
 from gateway.models.common import HealthStatus
 from gateway.providers import ProviderAdapter, create_adapter
+from gateway.state.concurrency import ConcurrencyBackend, InMemoryConcurrency
 
 
 class ProviderHealth:
@@ -67,18 +67,22 @@ class ProviderRegistry:
     - Model catalog integration
     """
 
-    def __init__(self, config: GatewayConfig):
+    def __init__(self, config: GatewayConfig, endpoint_slots: ConcurrencyBackend | None = None):
         """Initialize registry from gateway config.
 
         Args:
             config: Validated gateway configuration
+            endpoint_slots: Shared admission counts (gateway.state); defaults
+                to this process's own counts
         """
         self._config = config
         self._adapters: dict[str, ProviderAdapter] = {}
         self._health: dict[str, ProviderHealth] = {}
         self._breakers: dict[str, CircuitBreaker] = {}
         # In-process slot counts; a shared backend can replace it (D-010)
-        self._admission = InMemoryConcurrency(batch_max_share=config.admission.batch_max_share)
+        self._admission: ConcurrencyBackend = endpoint_slots or InMemoryConcurrency(
+            batch_max_share=config.admission.batch_max_share
+        )
         self._endpoint_configs: dict[str, EndpointConfig] = {}
         self._health_task: asyncio.Task | None = None
         self._shutdown = False

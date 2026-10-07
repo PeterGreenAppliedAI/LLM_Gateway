@@ -178,6 +178,19 @@ class Settings(BaseSettings):
     api_key_header: str = Field(default="X-API-Key", description="Header name for API key")
     require_api_key: bool = Field(default=False, description="Require API key for all requests")
 
+    # Shared state (D-035). Unset: rate limits and concurrency slots live in
+    # this process (nothing else to run). Set to share them across gateway
+    # processes/replicas, e.g. redis://:password@redis:6379/0. SecretStr
+    # because the URL may carry a password.
+    redis_url: SecretStr | None = Field(
+        default=None, description="Redis URL for shared rate limits and slots (optional)"
+    )
+    redis_prefix: str = Field(
+        default="devmesh",
+        pattern=r"^[a-zA-Z0-9_-]{1,32}$",
+        description="Key prefix, so several gateways can share one Redis",
+    )
+
     # CORS
     cors_origins: list[str] = Field(
         default_factory=lambda: ["*"],

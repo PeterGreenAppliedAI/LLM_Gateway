@@ -29,7 +29,6 @@ from gateway.config import (
     EnvironmentConfig,
     ResolutionConfig,
 )
-from gateway.dispatch.admission import Lease, Priority
 from gateway.dispatch.registry import ProviderRegistry
 from gateway.errors import (
     AllProvidersUnavailableError,
@@ -48,11 +47,14 @@ from gateway.models.internal import InternalRequest, InternalResponse, StreamChu
 from gateway.observability import get_logger
 from gateway.observability.metrics import get_metrics
 from gateway.providers import ProviderAdapter
+from gateway.state.concurrency import Lease, Priority
 
 logger = get_logger(__name__)
 
 
-def order_candidates(registry: ProviderRegistry, strategy: str, candidates: list[str]) -> list[str]:
+async def order_candidates(
+    registry: ProviderRegistry, strategy: str, candidates: list[str]
+) -> list[str]:
     """priority: as resolved. least_loaded: by in-flight share of max_concurrent.
 
     The sort is stable, so equally loaded endpoints keep priority order.
@@ -61,11 +63,11 @@ def order_candidates(registry: ProviderRegistry, strategy: str, candidates: list
     if strategy != "least_loaded":
         return candidates
     admission = registry.admission
+    in_flight = await admission.in_flight_counts(candidates)
 
     def load(name: str) -> float:
         capacity = admission.capacity(name)
-        in_flight = admission.in_flight(name)
-        return in_flight / capacity if capacity else float(in_flight)
+        return in_flight[name] / capacity if capacity else float(in_flight[name])
 
     return sorted(candidates, key=load)
 
@@ -448,7 +450,7 @@ class Dispatcher:
                     fallback_chain = [name for name in fallback_chain if name in with_model]
             # Security: Cap fallback attempts to prevent unbounded attempts
             candidates += fallback_chain[: MAX_FALLBACK_ATTEMPTS - 1]
-        candidates = self._order_candidates(candidates, pinned)
+        candidates = await self._order_candidates(candidates, pinned)
         remaining = list(candidates)
         deadline = admission_deadline(self._registry, request.priority)
 
@@ -465,7 +467,7 @@ class Dispatcher:
                     name, request, raise_on_error=pinned, error_sink=errors_seen
                 )
             finally:
-                lease.release()
+                await lease.release()
             attempted.append(name)
 
             if result is not None:
@@ -489,10 +491,10 @@ class Dispatcher:
     # Admission control (dispatch/admission.py, D-032)
     # ------------------------------------------------------------------
 
-    def _order_candidates(self, candidates: list[str], pinned: bool) -> list[str]:
+    async def _order_candidates(self, candidates: list[str], pinned: bool) -> list[str]:
         if pinned:
             return candidates
-        return order_candidates(self._registry, self._resolution_config.strategy, candidates)
+        return await order_candidates(self._registry, self._resolution_config.strategy, candidates)
 
     async def _try_provider(
         self,
@@ -734,7 +736,9 @@ class Dispatcher:
 
         remaining = [
             name
-            for name in self._order_candidates(providers_to_try[:MAX_FALLBACK_ATTEMPTS], pinned)
+            for name in await self._order_candidates(
+                providers_to_try[:MAX_FALLBACK_ATTEMPTS], pinned
+            )
             if self._registry.get(name) is not None
         ]
         deadline = admission_deadline(self._registry, request.priority)
@@ -747,10 +751,10 @@ class Dispatcher:
             try:
                 opened = await self._open_stream(try_name, request, pinned, attempted, errors_seen)
             except BaseException:
-                lease.release()
+                await lease.release()
                 raise
             if opened is None:
-                lease.release()
+                await lease.release()
                 continue
             first_chunk, stream_iter = opened
             return try_name, _chain(first_chunk, stream_iter, lease)
@@ -870,4 +874,4 @@ async def _chain(
             await _close_quietly(rest)
         finally:
             if lease is not None:
-                lease.release()
+                await lease.release()

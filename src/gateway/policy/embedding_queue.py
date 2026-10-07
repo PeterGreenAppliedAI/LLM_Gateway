@@ -19,8 +19,9 @@ lock — waiters acquire in arrival order.
 """
 
 import asyncio
+import inspect
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 
 from pydantic import BaseModel, Field
 
@@ -38,6 +39,13 @@ def _rate_limit_retry_after(exc: Exception) -> float | None:
     if isinstance(exc, PolicyViolation) and exc.policy_type == "rate_limit":
         return exc.retry_after or 1.0
     return None
+
+
+async def _call(acquire: Callable[[], Awaitable[object] | object]) -> None:
+    """Run the admission check; it may be sync or async (the policy enforcer is async)."""
+    result = acquire()
+    if inspect.isawaitable(result):
+        await result
 
 
 class EmbeddingQueueConfig(BaseModel):
@@ -63,7 +71,7 @@ class QueueSaturatedError(Exception):
 class EmbeddingQueue:
     """Paces embedding admissions at the rate limiter's drain rate.
 
-    `admit(acquire)` calls `acquire()` (which must raise
+    `admit(acquire)` awaits `acquire()` (which must raise
     RateLimitExceeded with a retry_after when the rate limit is hit) and,
     instead of propagating the rejection, sleeps and retries until it
     succeeds or the deadline passes. Non-rate-limit errors from
@@ -85,7 +93,7 @@ class EmbeddingQueue:
     def pending(self) -> int:
         return self._pending
 
-    async def admit(self, acquire: Callable[[], None]) -> None:
+    async def admit(self, acquire: Callable[[], Awaitable[object] | object]) -> None:
         """Admit a request, waiting for rate-limit headroom if needed.
 
         Raises:
@@ -93,7 +101,7 @@ class EmbeddingQueue:
             Exception: whatever non-rate-limit error `acquire` raises
         """
         if not self._config.enabled:
-            acquire()
+            await _call(acquire)
             return
 
         if self._pending >= self._config.max_pending:
@@ -109,7 +117,7 @@ class EmbeddingQueue:
             async with self._order_lock:
                 while True:
                     try:
-                        acquire()
+                        await _call(acquire)
                         waited = time.monotonic() - started
                         if waited > 0.5:
                             logger.info(

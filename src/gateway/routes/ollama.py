@@ -244,7 +244,7 @@ async def ollama_chat(
 
     # Check policies - raises domain errors on violation
     try:
-        enforcer.enforce(
+        await enforcer.enforce(
             internal_request,
             rate_limit_key=client_id,
             allowed_models=auth.allowed_models,
@@ -564,7 +564,7 @@ async def ollama_generate(
 
     # Check policies
     try:
-        enforcer.enforce(
+        await enforcer.enforce(
             internal_request,
             rate_limit_key=client_id,
             allowed_models=auth.allowed_models,

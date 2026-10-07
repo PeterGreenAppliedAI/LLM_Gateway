@@ -32,57 +32,57 @@ from gateway.storage.keys import KeyManager
 
 
 class TestBatchScheduling:
-    def test_batch_limited_to_share(self):
+    async def test_batch_limited_to_share(self):
         c = InMemoryConcurrency({"a": 4}, batch_max_share=0.75)
-        batch = [c.try_acquire("a", "batch") for _ in range(3)]
+        batch = [await c.try_acquire("a", "batch") for _ in range(3)]
         assert all(batch)
-        assert c.try_acquire("a", "batch") is None  # 4th slot is reserved
-        assert c.try_acquire("a", "interactive") is not None
+        assert await c.try_acquire("a", "batch") is None  # 4th slot is reserved
+        assert await c.try_acquire("a", "interactive") is not None
 
-    def test_single_slot_endpoint_still_serves_batch(self):
+    async def test_single_slot_endpoint_still_serves_batch(self):
         c = InMemoryConcurrency({"a": 1}, batch_max_share=0.75)
-        assert c.try_acquire("a", "batch") is not None
+        assert await c.try_acquire("a", "batch") is not None
 
-    def test_unlimited_endpoint_ignores_share(self):
+    async def test_unlimited_endpoint_ignores_share(self):
         c = InMemoryConcurrency({"a": None}, batch_max_share=0.5)
-        assert all(c.try_acquire("a", "batch") for _ in range(20))
+        assert all([await c.try_acquire("a", "batch") for _ in range(20)])
 
     @pytest.mark.asyncio
     async def test_interactive_waiter_served_before_older_batch_waiter(self):
         c = InMemoryConcurrency({"a": 1})
-        held = c.try_acquire("a")
+        held = await c.try_acquire("a")
         served: list[str] = []
 
         async def wait(priority):
             lease = await c.acquire_any(["a"], timeout=5, priority=priority)
             served.append(priority)
             await asyncio.sleep(0)
-            lease.release()
+            await lease.release()
 
         batch = asyncio.create_task(wait("batch"))
         await asyncio.sleep(0.01)
         interactive = asyncio.create_task(wait("interactive"))
         await asyncio.sleep(0.01)
-        held.release()
+        await held.release()
         await asyncio.gather(batch, interactive)
         assert served == ["interactive", "batch"]
 
     @pytest.mark.asyncio
     async def test_batch_waiter_not_handed_reserved_slot(self):
         c = InMemoryConcurrency({"a": 4}, batch_max_share=0.5)  # batch may hold 2
-        held = [c.try_acquire("a", "interactive") for _ in range(4)]
+        held = [await c.try_acquire("a", "interactive") for _ in range(4)]
         waiter = asyncio.create_task(c.acquire_any(["a"], timeout=5, priority="batch"))
         await asyncio.sleep(0.01)
-        held[0].release()
-        held[1].release()  # 2 left in flight: batch would make 3, over its share
+        await held[0].release()
+        await held[1].release()  # 2 left in flight: batch would make 3, over its share
         await asyncio.sleep(0.01)
         assert not waiter.done()
         assert c.in_flight("a") == 2
-        held[2].release()  # 1 left: batch may take a slot
+        await held[2].release()  # 1 left: batch may take a slot
         lease = await asyncio.wait_for(waiter, 1)
         assert c.in_flight("a") == 2
         for h in (lease, held[3]):
-            h.release()
+            await h.release()
         assert c.in_flight("a") == 0
 
 
@@ -119,7 +119,7 @@ class TestDispatcherPriority:
             )
             registry._adapters[name] = adapter
         dispatcher = Dispatcher(registry)
-        held = [registry.admission.try_acquire("a", "batch") for _ in range(2)]
+        held = [await registry.admission.try_acquire("a", "batch") for _ in range(2)]
 
         def request(priority):
             return InternalRequest(
@@ -135,7 +135,7 @@ class TestDispatcherPriority:
         assert registry.queue_wait_seconds("batch") == 30
         assert registry.queue_wait_seconds("interactive") == 1
         for lease in held:
-            lease.release()
+            await lease.release()
         await registry.close()
 
 

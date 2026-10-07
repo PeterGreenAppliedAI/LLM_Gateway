@@ -61,32 +61,32 @@ def sample_request() -> InternalRequest:
 class TestRateLimiter:
     """Tests for RateLimiter."""
 
-    def test_disabled_allows_all(self):
+    async def test_disabled_allows_all(self):
         """Disabled rate limiter allows all requests."""
         config = RateLimitConfig(enabled=False)
         limiter = RateLimiter(config)
 
         # Should never raise
         for _ in range(100):
-            state = limiter.acquire("test-key")
+            state = await limiter.acquire("test-key")
             assert state.requests_remaining_minute > 0
 
-    def test_burst_limit_enforced(self, rate_limit_config):
+    async def test_burst_limit_enforced(self, rate_limit_config):
         """Burst limit is enforced."""
         limiter = RateLimiter(rate_limit_config)
 
         # Make burst_limit requests
         for _ in range(rate_limit_config.burst_limit):
-            limiter.acquire("test-key")
+            await limiter.acquire("test-key")
 
         # Next should fail
         with pytest.raises(RateLimitExceeded) as exc_info:
-            limiter.acquire("test-key")
+            await limiter.acquire("test-key")
 
         assert exc_info.value.limit == rate_limit_config.burst_limit
         assert exc_info.value.retry_after > 0
 
-    def test_minute_limit_enforced(self, rate_limit_config):
+    async def test_minute_limit_enforced(self, rate_limit_config):
         """Per-minute limit is enforced."""
         # Use high burst to test minute limit
         config = RateLimitConfig(
@@ -98,65 +98,65 @@ class TestRateLimiter:
 
         # Make requests_per_minute requests
         for _ in range(config.requests_per_minute):
-            limiter.acquire("test-key")
+            await limiter.acquire("test-key")
 
         # Next should fail
         with pytest.raises(RateLimitExceeded) as exc_info:
-            limiter.acquire("test-key")
+            await limiter.acquire("test-key")
 
         assert "per minute" in str(exc_info.value)
 
-    def test_different_keys_independent(self, rate_limit_config):
+    async def test_different_keys_independent(self, rate_limit_config):
         """Different keys have independent rate limits."""
         limiter = RateLimiter(rate_limit_config)
 
         # Exhaust key1's burst limit
         for _ in range(rate_limit_config.burst_limit):
-            limiter.acquire("key1")
+            await limiter.acquire("key1")
 
         # key2 should still work
-        state = limiter.acquire("key2")
+        state = await limiter.acquire("key2")
         assert state.burst_remaining == rate_limit_config.burst_limit - 1
 
-    def test_check_does_not_consume(self, rate_limit_config):
+    async def test_check_does_not_consume(self, rate_limit_config):
         """Check method doesn't consume rate limit."""
         limiter = RateLimiter(rate_limit_config)
 
         # Check multiple times
         for _ in range(10):
-            state = limiter.check("test-key")
+            state = await limiter.check("test-key")
             assert state.requests_remaining_minute == rate_limit_config.requests_per_minute
 
-    def test_reset_clears_state(self, rate_limit_config):
+    async def test_reset_clears_state(self, rate_limit_config):
         """Reset clears rate limit state for a key."""
         limiter = RateLimiter(rate_limit_config)
 
         # Use up some requests
-        limiter.acquire("test-key")
-        limiter.acquire("test-key")
+        await limiter.acquire("test-key")
+        await limiter.acquire("test-key")
 
         # Reset
-        limiter.reset("test-key")
+        await limiter.reset("test-key")
 
         # Should be back to full
-        state = limiter.check("test-key")
+        state = await limiter.check("test-key")
         assert state.requests_remaining_minute == rate_limit_config.requests_per_minute
 
-    def test_retry_after_calculated(self, rate_limit_config):
+    async def test_retry_after_calculated(self, rate_limit_config):
         """Retry-after time is calculated correctly."""
         limiter = RateLimiter(rate_limit_config)
 
         # Exhaust burst
         for _ in range(rate_limit_config.burst_limit):
-            limiter.acquire("test-key")
+            await limiter.acquire("test-key")
 
         with pytest.raises(RateLimitExceeded) as exc_info:
-            limiter.acquire("test-key")
+            await limiter.acquire("test-key")
 
         # retry_after should be <= BURST_WINDOW
         assert 0 < exc_info.value.retry_after <= RateLimiter.BURST_WINDOW
 
-    def test_key_sanitization(self, rate_limit_config):
+    async def test_key_sanitization(self, rate_limit_config):
         """Security: Malicious keys are sanitized to prevent injection."""
         limiter = RateLimiter(rate_limit_config)
 
@@ -170,18 +170,18 @@ class TestRateLimiter:
 
         for key in malicious_keys:
             # Should not raise - keys are sanitized
-            state = limiter.acquire(key)
+            state = await limiter.acquire(key)
             assert state.burst_remaining >= 0
 
-    def test_sanitized_keys_are_consistent(self, rate_limit_config):
+    async def test_sanitized_keys_are_consistent(self, rate_limit_config):
         """Sanitized keys produce consistent hashes."""
         limiter = RateLimiter(rate_limit_config)
 
         # Same malicious key should map to same sanitized key
         malicious_key = "key\nX-Header: injection"
 
-        limiter.acquire(malicious_key)
-        state = limiter.check(malicious_key)
+        await limiter.acquire(malicious_key)
+        state = await limiter.check(malicious_key)
 
         # Should show one request consumed (consistent key mapping)
         assert state.burst_remaining == rate_limit_config.burst_limit - 1
@@ -269,15 +269,15 @@ class TestTokenLimiter:
 class TestPolicyEnforcer:
     """Tests for PolicyEnforcer."""
 
-    def test_disabled_allows_all(self, sample_request):
+    async def test_disabled_allows_all(self, sample_request):
         """Disabled enforcer allows all requests."""
         config = PolicyConfig(enabled=False)
         enforcer = PolicyEnforcer(config)
 
-        result = enforcer.enforce(sample_request)
+        result = await enforcer.enforce(sample_request)
         assert result.allowed is True
 
-    def test_enforces_rate_limit(self, sample_request):
+    async def test_enforces_rate_limit(self, sample_request):
         """Enforcer enforces rate limits."""
         config = PolicyConfig(
             enabled=True,
@@ -289,17 +289,17 @@ class TestPolicyEnforcer:
         enforcer = PolicyEnforcer(config)
 
         # First two should pass
-        enforcer.enforce(sample_request)
-        enforcer.enforce(sample_request)
+        await enforcer.enforce(sample_request)
+        await enforcer.enforce(sample_request)
 
         # Third should fail
         with pytest.raises(PolicyViolation) as exc_info:
-            enforcer.enforce(sample_request)
+            await enforcer.enforce(sample_request)
 
         assert exc_info.value.policy_type == "rate_limit"
         assert exc_info.value.code == "rate_limit_exceeded"
 
-    def test_enforces_token_limit(self, sample_request):
+    async def test_enforces_token_limit(self, sample_request):
         """Enforcer enforces token limits."""
         config = PolicyConfig(
             enabled=True,
@@ -312,12 +312,12 @@ class TestPolicyEnforcer:
 
         # Request has max_tokens=500 which exceeds 100
         with pytest.raises(PolicyViolation) as exc_info:
-            enforcer.enforce(sample_request)
+            await enforcer.enforce(sample_request)
 
         assert exc_info.value.policy_type == "token_limit"
         assert exc_info.value.code == "token_limit_exceeded"
 
-    def test_enforces_provider_task_policy_denied(self, sample_request):
+    async def test_enforces_provider_task_policy_denied(self, sample_request):
         """Enforcer blocks denied providers for tasks."""
         config = PolicyConfig(
             enabled=True,
@@ -331,12 +331,12 @@ class TestPolicyEnforcer:
         enforcer = PolicyEnforcer(config)
 
         with pytest.raises(PolicyViolation) as exc_info:
-            enforcer.enforce(sample_request, provider="blocked-provider")
+            await enforcer.enforce(sample_request, provider="blocked-provider")
 
         assert exc_info.value.policy_type == "provider_task"
         assert exc_info.value.code == "provider_denied_for_task"
 
-    def test_enforces_provider_task_policy_allowed_list(self, sample_request):
+    async def test_enforces_provider_task_policy_allowed_list(self, sample_request):
         """Enforcer blocks providers not in allowed list."""
         config = PolicyConfig(
             enabled=True,
@@ -350,16 +350,16 @@ class TestPolicyEnforcer:
         enforcer = PolicyEnforcer(config)
 
         # Allowed provider passes
-        result = enforcer.enforce(sample_request, provider="ollama")
+        result = await enforcer.enforce(sample_request, provider="ollama")
         assert result.allowed is True
 
         # Not in allowed list fails
         with pytest.raises(PolicyViolation) as exc_info:
-            enforcer.enforce(sample_request, provider="other-provider")
+            await enforcer.enforce(sample_request, provider="other-provider")
 
         assert exc_info.value.code == "provider_not_allowed_for_task"
 
-    def test_uses_client_id_for_rate_limit(self, sample_request):
+    async def test_uses_client_id_for_rate_limit(self, sample_request):
         """Uses client_id as rate limit key by default."""
         config = PolicyConfig(
             enabled=True,
@@ -368,18 +368,18 @@ class TestPolicyEnforcer:
         enforcer = PolicyEnforcer(config)
 
         # First request passes
-        enforcer.enforce(sample_request)
+        await enforcer.enforce(sample_request)
 
         # Second request from same client fails
         with pytest.raises(PolicyViolation):
-            enforcer.enforce(sample_request)
+            await enforcer.enforce(sample_request)
 
         # Different client passes
         different_client = sample_request.model_copy(update={"client_id": "other-client"})
-        result = enforcer.enforce(different_client)
+        result = await enforcer.enforce(different_client)
         assert result.allowed is True
 
-    def test_custom_rate_limit_key(self, sample_request):
+    async def test_custom_rate_limit_key(self, sample_request):
         """Custom rate limit key can be specified."""
         config = PolicyConfig(
             enabled=True,
@@ -388,14 +388,14 @@ class TestPolicyEnforcer:
         enforcer = PolicyEnforcer(config)
 
         # Use custom key
-        enforcer.enforce(sample_request, rate_limit_key="custom-key-1")
+        await enforcer.enforce(sample_request, rate_limit_key="custom-key-1")
 
         # Same custom key fails
         with pytest.raises(PolicyViolation):
-            enforcer.enforce(sample_request, rate_limit_key="custom-key-1")
+            await enforcer.enforce(sample_request, rate_limit_key="custom-key-1")
 
         # Different custom key passes
-        result = enforcer.enforce(sample_request, rate_limit_key="custom-key-2")
+        result = await enforcer.enforce(sample_request, rate_limit_key="custom-key-2")
         assert result.allowed is True
 
     def test_check_provider_allowed(self):
@@ -416,7 +416,7 @@ class TestPolicyEnforcer:
         # No policy for CHAT, so all allowed
         assert enforcer.check_provider_allowed(TaskType.CHAT, "anything") is True
 
-    def test_reset_rate_limit(self, sample_request):
+    async def test_reset_rate_limit(self, sample_request):
         """Admin can reset rate limits."""
         config = PolicyConfig(
             enabled=True,
@@ -425,19 +425,19 @@ class TestPolicyEnforcer:
         enforcer = PolicyEnforcer(config)
 
         # Exhaust rate limit
-        enforcer.enforce(sample_request)
+        await enforcer.enforce(sample_request)
 
         with pytest.raises(PolicyViolation):
-            enforcer.enforce(sample_request)
+            await enforcer.enforce(sample_request)
 
         # Reset
-        enforcer.reset_rate_limit("test-client")
+        await enforcer.reset_rate_limit("test-client")
 
         # Should work again
-        result = enforcer.enforce(sample_request)
+        result = await enforcer.enforce(sample_request)
         assert result.allowed is True
 
-    def test_result_includes_rate_limit_info(self, sample_request):
+    async def test_result_includes_rate_limit_info(self, sample_request):
         """Result includes rate limit information."""
         config = PolicyConfig(
             enabled=True,
@@ -448,13 +448,13 @@ class TestPolicyEnforcer:
         )
         enforcer = PolicyEnforcer(config)
 
-        result = enforcer.enforce(sample_request)
+        result = await enforcer.enforce(sample_request)
 
         assert result.rate_limit_remaining is not None
         assert result.rate_limit_remaining == 99  # One consumed
         assert result.rate_limit_reset is not None
 
-    def test_retry_after_on_rate_limit(self, sample_request):
+    async def test_retry_after_on_rate_limit(self, sample_request):
         """PolicyViolation includes retry_after for rate limits."""
         config = PolicyConfig(
             enabled=True,
@@ -462,10 +462,10 @@ class TestPolicyEnforcer:
         )
         enforcer = PolicyEnforcer(config)
 
-        enforcer.enforce(sample_request)
+        await enforcer.enforce(sample_request)
 
         with pytest.raises(PolicyViolation) as exc_info:
-            enforcer.enforce(sample_request)
+            await enforcer.enforce(sample_request)
 
         assert exc_info.value.retry_after is not None
         assert exc_info.value.retry_after > 0
@@ -479,7 +479,7 @@ class TestPolicyEnforcer:
 class TestPolicyIntegration:
     """Integration tests for policy system."""
 
-    def test_full_policy_flow(self):
+    async def test_full_policy_flow(self):
         """Test complete policy enforcement flow."""
         config = PolicyConfig(
             enabled=True,
@@ -510,16 +510,16 @@ class TestPolicyIntegration:
             max_tokens=1000,
         )
 
-        result = enforcer.enforce(request, provider="ollama")
+        result = await enforcer.enforce(request, provider="ollama")
         assert result.allowed is True
         assert result.rate_limit_remaining == 9
 
         # Second request still works
-        result = enforcer.enforce(request, provider="vllm")
+        result = await enforcer.enforce(request, provider="vllm")
         assert result.allowed is True
         assert result.rate_limit_remaining == 8
 
-    def test_anonymous_requests_share_rate_limit(self):
+    async def test_anonymous_requests_share_rate_limit(self):
         """Requests without client_id share 'anonymous' rate limit."""
         config = PolicyConfig(
             enabled=True,
@@ -533,9 +533,9 @@ class TestPolicyIntegration:
             # No client_id or user_id
         )
 
-        enforcer.enforce(request)
-        enforcer.enforce(request)
+        await enforcer.enforce(request)
+        await enforcer.enforce(request)
 
         # Third should fail - both counted against "anonymous"
         with pytest.raises(PolicyViolation):
-            enforcer.enforce(request)
+            await enforcer.enforce(request)

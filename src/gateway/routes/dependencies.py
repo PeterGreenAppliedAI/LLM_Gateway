@@ -25,7 +25,6 @@ from fastapi import Depends, Header, Request
 
 from gateway.config import EnvironmentConfig, GatewayConfig
 from gateway.dispatch import Dispatcher, ProviderRegistry
-from gateway.dispatch.admission import InMemoryConcurrency
 from gateway.errors import (
     AuthenticationError,
     ErrorCode,
@@ -40,6 +39,7 @@ from gateway.observability.logging import clear_request_context, set_request_con
 from gateway.policy import PolicyEnforcer, PolicyViolation
 from gateway.policy.token_budget import TokenBudgetTracker
 from gateway.security import AsyncSecurityAnalyzer, PIIScrubber, Sanitizer
+from gateway.state.concurrency import ConcurrencyBackend, InMemoryConcurrency
 from gateway.storage import AuditLogger
 
 logger = get_logger(__name__)
@@ -187,7 +187,10 @@ def get_enforcer(request: Request) -> PolicyEnforcer:
                 ),
                 token_budget=budget_config,
             )
-        enforcer = PolicyEnforcer(policy_config)
+        shared = getattr(request.app.state, "shared_state", None)
+        enforcer = PolicyEnforcer(
+            policy_config, rate_store=shared.rate_windows if shared is not None else None
+        )
         request.app.state.enforcer = enforcer
     return enforcer
 
@@ -551,7 +554,7 @@ async def get_inference_auth(
     if auth.max_concurrent is not None:
         slots = _key_slots(request)
         slots.set_capacity(auth.client_id, auth.max_concurrent)
-        lease = slots.try_acquire(auth.client_id)
+        lease = await slots.try_acquire(auth.client_id)
         if lease is None:
             raise RateLimitError(
                 message=(
@@ -566,11 +569,14 @@ async def get_inference_auth(
         yield auth
     finally:
         if lease is not None:
-            lease.release()
+            await lease.release()
 
 
-def _key_slots(request: Request) -> InMemoryConcurrency:
-    """Per-key in-flight counts (per process, like the rate limiter; D-010)."""
+def _key_slots(request: Request) -> ConcurrencyBackend:
+    """Per-key in-flight counts: shared state if configured (D-035), else this process's."""
+    shared = getattr(request.app.state, "shared_state", None)
+    if shared is not None:
+        return shared.key_slots
     slots = getattr(request.app.state, "key_slots", None)
     if slots is None:
         slots = InMemoryConcurrency()

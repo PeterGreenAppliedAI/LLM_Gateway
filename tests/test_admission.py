@@ -35,34 +35,34 @@ from gateway.models.internal import (
 
 
 class TestInMemoryConcurrency:
-    def test_unlimited_admits_and_counts(self):
+    async def test_unlimited_admits_and_counts(self):
         c = InMemoryConcurrency({"a": None})
-        leases = [c.try_acquire("a") for _ in range(50)]
+        leases = [await c.try_acquire("a") for _ in range(50)]
         assert all(leases)
         assert c.in_flight("a") == 50
         for lease in leases:
-            lease.release()
+            await lease.release()
         assert c.in_flight("a") == 0
 
-    def test_capacity_limits(self):
+    async def test_capacity_limits(self):
         c = InMemoryConcurrency({"a": 2})
-        first, second = c.try_acquire("a"), c.try_acquire("a")
+        first, second = await c.try_acquire("a"), await c.try_acquire("a")
         assert first and second
-        assert c.try_acquire("a") is None
-        first.release()
-        assert c.try_acquire("a") is not None
+        assert await c.try_acquire("a") is None
+        await first.release()
+        assert await c.try_acquire("a") is not None
 
-    def test_release_is_idempotent(self):
+    async def test_release_is_idempotent(self):
         c = InMemoryConcurrency({"a": 1})
-        lease = c.try_acquire("a")
-        lease.release()
-        lease.release()
+        lease = await c.try_acquire("a")
+        await lease.release()
+        await lease.release()
         assert c.in_flight("a") == 0
 
-    def test_dropped_lease_is_released(self):
+    async def test_dropped_lease_is_released(self):
         """A stream dropped without closing can't strand its slot."""
         c = InMemoryConcurrency({"a": 1})
-        lease = c.try_acquire("a")
+        lease = await c.try_acquire("a")
         del lease
         gc.collect()
         assert c.in_flight("a") == 0
@@ -70,19 +70,19 @@ class TestInMemoryConcurrency:
     @pytest.mark.asyncio
     async def test_waiters_served_in_arrival_order(self):
         c = InMemoryConcurrency({"a": 1})
-        held = c.try_acquire("a")
+        held = await c.try_acquire("a")
         order: list[int] = []
 
         async def wait(i: int):
             lease = await c.acquire_any(["a"], timeout=5)
             order.append(i)
             await asyncio.sleep(0)
-            lease.release()
+            await lease.release()
 
         tasks = [asyncio.create_task(wait(i)) for i in range(3)]
         await asyncio.sleep(0.01)
         assert c.waiting() == 3
-        held.release()
+        await held.release()
         await asyncio.gather(*tasks)
         assert order == [0, 1, 2]
         assert c.in_flight("a") == 0
@@ -90,47 +90,47 @@ class TestInMemoryConcurrency:
     @pytest.mark.asyncio
     async def test_newcomer_cannot_jump_the_queue(self):
         c = InMemoryConcurrency({"a": 1})
-        held = c.try_acquire("a")
+        held = await c.try_acquire("a")
         waiter = asyncio.create_task(c.acquire_any(["a"], timeout=5))
         await asyncio.sleep(0.01)
-        held.release()
+        await held.release()
         # The freed slot went to the waiter, not to whoever asks next
-        assert c.try_acquire("a") is None
+        assert await c.try_acquire("a") is None
         lease = await waiter
         assert lease.endpoint == "a"
-        lease.release()
+        await lease.release()
 
     @pytest.mark.asyncio
     async def test_waits_for_whichever_frees_first(self):
         c = InMemoryConcurrency({"a": 1, "b": 1})
-        held_a, held_b = c.try_acquire("a"), c.try_acquire("b")
+        held_a, held_b = await c.try_acquire("a"), await c.try_acquire("b")
         waiter = asyncio.create_task(c.acquire_any(["a", "b"], timeout=5))
         await asyncio.sleep(0.01)
-        held_b.release()
+        await held_b.release()
         lease = await waiter
         assert lease.endpoint == "b"
-        held_a.release()
-        lease.release()
+        await held_a.release()
+        await lease.release()
 
     @pytest.mark.asyncio
     async def test_timeout_returns_none_and_leaves_queue(self):
         c = InMemoryConcurrency({"a": 1})
-        held = c.try_acquire("a")
+        held = await c.try_acquire("a")
         assert await c.acquire_any(["a"], timeout=0.02) is None
         assert c.waiting() == 0
-        held.release()
+        await held.release()
         assert c.in_flight("a") == 0
 
     @pytest.mark.asyncio
     async def test_cancelled_waiter_does_not_leak(self):
         c = InMemoryConcurrency({"a": 1})
-        held = c.try_acquire("a")
+        held = await c.try_acquire("a")
         waiter = asyncio.create_task(c.acquire_any(["a"], timeout=5))
         await asyncio.sleep(0.01)
         waiter.cancel()
         with pytest.raises(asyncio.CancelledError):
             await waiter
-        held.release()
+        await held.release()
         assert c.in_flight("a") == 0
         assert c.waiting() == 0
 
@@ -196,11 +196,11 @@ class TestDispatcherAdmission:
     @pytest.mark.asyncio
     async def test_overflows_to_next_endpoint_when_full(self):
         registry, dispatcher = await _setup(_config())
-        held = registry.admission.try_acquire("primary")
+        held = await registry.admission.try_acquire("primary")
         result = await dispatcher.dispatch(_request())
         assert result.provider_used == "backup"
         assert result.was_fallback
-        held.release()
+        await held.release()
         assert registry.admission.in_flight("backup") == 0
         await registry.close()
 
@@ -215,26 +215,26 @@ class TestDispatcherAdmission:
     @pytest.mark.asyncio
     async def test_waits_when_all_full_then_proceeds(self):
         registry, dispatcher = await _setup(_config())
-        held = [registry.admission.try_acquire(n) for n in ("primary", "backup")]
+        held = [await registry.admission.try_acquire(n) for n in ("primary", "backup")]
         task = asyncio.create_task(dispatcher.dispatch(_request()))
         await asyncio.sleep(0.02)
         assert not task.done()
-        held[1].release()
+        await held[1].release()
         result = await task
         assert result.provider_used == "backup"
-        held[0].release()
+        await held[0].release()
         await registry.close()
 
     @pytest.mark.asyncio
     async def test_no_overflow_when_fallback_disabled(self):
         registry, dispatcher = await _setup(_config(wait=0.05))
-        held = registry.admission.try_acquire("primary")
+        held = await registry.admission.try_acquire("primary")
         with pytest.raises(CapacityExceededError) as exc:
             await dispatcher.dispatch(_request(fallback_allowed=False))
         assert exc.value.details["endpoints"] == ["primary"]
         assert exc.value.retry_after >= 1
         registry.get("backup").chat.assert_not_called()
-        held.release()
+        await held.release()
         await registry.close()
 
     @pytest.mark.asyncio
@@ -270,10 +270,10 @@ class TestDispatcherAdmission:
     async def test_least_loaded_prefers_idle_endpoint(self):
         config = _config(cap=4, resolution=ResolutionConfig(strategy="least_loaded"))
         registry, dispatcher = await _setup(config)
-        held = registry.admission.try_acquire("primary")
+        held = await registry.admission.try_acquire("primary")
         result = await dispatcher.dispatch(_request())
         assert result.provider_used == "backup"  # 0/4 beats 1/4
-        held.release()
+        await held.release()
         result = await dispatcher.dispatch(_request())
         assert result.provider_used == "primary"  # tie: priority order
         await registry.close()

@@ -13,7 +13,9 @@ COPY pyproject.toml .
 COPY src/ src/
 
 # Install the package
-RUN pip install --no-cache-dir -e .
+# The redis client is small and lets `--profile ha` work without a rebuild;
+# it's only used when GATEWAY_REDIS_URL is set (D-035)
+RUN pip install --no-cache-dir -e ".[redis]"
 
 # Copy configuration
 COPY config/ config/

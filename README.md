@@ -226,6 +226,8 @@ auth:
 | `GATEWAY_PII_SCRUB_ENABLED` | `false` | Replace PII with placeholders. Startup default only: admins can change scrubbing (on/off, all or selected routes) live from the dashboard's Security tab, and that saved setting overrides this |
 | `GATEWAY_ADMIN_API_KEY` | | Operator key for the dashboard, key management, budgets, and security labeling |
 | `GATEWAY_CORS_ORIGINS` | `["*"]` | Allowed CORS origins |
+| `GATEWAY_REDIS_URL` | | **Optional.** Share rate limits and concurrency slots across gateway processes or replicas (e.g. `redis://:password@host:6379/0`). Unset, everything stays in process memory and nothing else needs to run. If Redis becomes unreachable, each process falls back to its own limits and `/health` reports `shared_state.status: degraded` |
+| `GATEWAY_REDIS_PREFIX` | `devmesh` | Key prefix, so several gateways can share one Redis |
 
 ## Production Deployment
 
@@ -237,6 +239,7 @@ For evaluation, `./start-gateway.sh` is all you need. For production:
 - **Backups** — If using SQLite, back up `data/gateway.db`. If PostgreSQL, use `pg_dump` on your schedule.
 - **Log retention** — `GATEWAY_DB_RETENTION_DAYS=90` auto-deletes old audit records. Adjust based on compliance requirements.
 - **Docker Compose** — `docker compose up -d` starts the gateway, dashboard, Prometheus, and Grafana.
+- **More than one gateway process** — By default rate limits and `max_concurrent` slots are kept per process, so two processes would each allow the full limit. To share them, install the extra (`pip install 'devmesh-gateway[redis]'`; the Docker image already has it) and set `GATEWAY_REDIS_URL`. With Compose: `GATEWAY_REDIS_URL=redis://redis:6379/0 docker compose --profile ha up -d`. A single process needs none of this.
 
 ## Providers
 

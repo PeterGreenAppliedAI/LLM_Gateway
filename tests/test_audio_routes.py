@@ -216,12 +216,12 @@ class TestSpeech:
         admission = app.state.registry.admission
         admission.set_capacity("a", 1)
         admission.set_capacity("b", 1)
-        held = admission.try_acquire("a")
+        held = await admission.try_acquire("a")
         resp = TestClient(app).post("/v1/audio/speech", json=SPEECH)
         assert resp.status_code == 200
         assert _audit(app)["endpoint"] == "b"
         assert admission.in_flight("b") == 0  # released once the audio was relayed
-        held.release()
+        await held.release()
 
     @pytest.mark.asyncio
     async def test_input_over_limit_rejected(self, make_app):

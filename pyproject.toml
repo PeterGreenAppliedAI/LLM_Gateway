@@ -28,6 +28,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Shared rate limits and concurrency slots across gateway processes (D-035).
+# Only needed when GATEWAY_REDIS_URL is set.
+redis = ["redis>=5.0,<7"]
 dev = [
     "pytest>=9.0.0",
     "pytest-asyncio>=1.3.0",
