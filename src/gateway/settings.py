@@ -78,6 +78,16 @@ class DatabaseSettings(BaseSettings):
         "startup. Empty string disables spilling.",
     )
 
+    # API key cache (D-040)
+    key_cache_seconds: float = Field(
+        default=30.0,
+        ge=0,
+        le=3600,
+        description="Remember validated DB-backed keys this long (no DB query per request). "
+        "Revocation is immediate in the process that revoked; other processes follow within "
+        "this time. 0 disables the cache.",
+    )
+
     # Data retention
     retention_days: int = Field(
         default=90,

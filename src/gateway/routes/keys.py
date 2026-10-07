@@ -106,6 +106,8 @@ async def create_api_key(
         priority=body.priority,
     )
 
+    if (cache := getattr(request.app.state, "key_cache", None)) is not None:
+        cache.forget_plaintext(result["key"])
     return CreateKeyResponse(**result)
 
 
@@ -151,6 +153,8 @@ async def revoke_api_key(
         )
 
     revoked = await km.revoke_key(key_id)
+    if revoked and (cache := getattr(request.app.state, "key_cache", None)) is not None:
+        cache.invalidate_key(key_id)  # refused here from the next request (D-040)
 
     if not revoked:
         raise GatewayError(

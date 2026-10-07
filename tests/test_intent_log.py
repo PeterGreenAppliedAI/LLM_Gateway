@@ -1,6 +1,7 @@
 """Audit intent log: local log + background drain to the database (D-038)."""
 
 import asyncio
+import contextlib
 import os
 import time
 from datetime import datetime, timezone
@@ -60,10 +61,13 @@ async def _until(predicate, timeout: float = 5.0) -> None:
     raise AssertionError("condition not reached in time")
 
 
-def _crash(log: IntentLog) -> None:
+async def _crash(log: IntentLog) -> None:
     """Simulate kill -9: background tasks gone, files closed, nothing drained."""
     for task in log._tasks:
         task.cancel()
+    for task in log._tasks:  # a dead process runs nothing: wait until they're gone
+        with contextlib.suppress(BaseException):
+            await task
     log._file.close()
     log._file = None
     log._lock_file.close()  # the OS releases the lock when a process dies
@@ -120,7 +124,7 @@ class TestCrashRecovery:
             await crashed.append("pii_events", [_pii_row(f"r{i}")])
         # Let it write part of the log, then die mid-way
         await _until(lambda: _counted(engine, audit_log, 1, at_least=True))
-        _crash(crashed)
+        await _crash(crashed)
         partial = await _count(engine, pii_events)
         assert partial < 25 or await _count(engine, audit_log) <= 25
 
@@ -156,11 +160,35 @@ class TestCrashRecovery:
         await crashed.append("audit_log", [_audit_row("whole")])
         crashed._file.write(b'{"t": 1, "table": "audit_log", "rows": [{"request_')  # died mid-write
         crashed._file.flush()
-        _crash(crashed)
+        await _crash(crashed)
         survivor = IntentLog(root, engine)
         await survivor.start()
         assert await _count(engine, audit_log) == 1
         await survivor.close()
+
+
+class TestConcurrentDrainers:
+    @pytest.mark.asyncio
+    async def test_two_drainers_on_one_log_never_double_apply(self, engine, tmp_path):
+        """Exactly-once is enforced by the database (compare-and-set on the
+        position), not only by the lock file: even two drainers racing over
+        the same log apply each record once."""
+        root = tmp_path / "journal"
+        source = IntentLog(root, engine, batch_records=7, idle_interval=60)
+        await source.start()
+        source._wake.wait = _never
+        for i in range(60):
+            await source.append("pii_events", [_pii_row(f"r{i}")])  # no unique key
+        await _crash(source)
+
+        a, b = IntentLog(root, engine, batch_records=7), IntentLog(root, engine, batch_records=5)
+        instance_dir = root / source.instance
+        await asyncio.gather(
+            a._drain(source.instance, instance_dir, live=False),
+            b._drain(source.instance, instance_dir, live=False),
+            a._drain(source.instance, instance_dir, live=False),
+        )
+        assert await _count(engine, pii_events) == 60
 
 
 class TestDatabaseOutage:

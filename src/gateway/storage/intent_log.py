@@ -278,7 +278,9 @@ class IntentLog:
 
     async def _drain(self, instance: str, instance_dir: Path, live: bool) -> None:
         """Write everything in an instance's log after its committed position."""
-        position = await self._position(instance)
+        # stored: the position as the database holds it (each commit is a
+        # compare-and-set against it); position: where to read next
+        stored = position = await self._position(instance)
         while True:
             segments = _segments(instance_dir)
             if position is not None:
@@ -293,8 +295,15 @@ class IntentLog:
             if batch:
                 if live and oldest:
                     self._oldest_pending = oldest  # the oldest record not yet in the DB
-                await self._commit(instance, segment.name, next_offset, batch)
-                position = (segment.name, next_offset)
+                try:
+                    await self._commit(instance, stored, segment.name, next_offset, batch)
+                except PositionConflict:
+                    # Another drainer advanced this log first: nothing of ours was
+                    # applied. Re-read the stored position and carry on from it.
+                    logger.warning("Audit log position moved by another drainer", instance=instance)
+                    stored = position = await self._position(instance)
+                    continue
+                stored = position = (segment.name, next_offset)
                 if live:
                     self._drained += len(batch)
                     if self._drained >= self._appended:
@@ -331,8 +340,20 @@ class IntentLog:
                 records.append(record)
         return records, offset, oldest
 
-    async def _commit(self, instance: str, segment: str, offset: int, records: list[dict]) -> None:
-        """Insert a batch and advance the position in one transaction (exactly once)."""
+    async def _commit(
+        self,
+        instance: str,
+        expected: tuple[str, int] | None,
+        segment: str,
+        offset: int,
+        records: list[dict],
+    ) -> None:
+        """Insert a batch and advance the position in one transaction (exactly once).
+
+        The position update is a compare-and-set against `expected`: if any
+        other drainer has moved it, the whole transaction rolls back, so a
+        batch can never be applied twice, not even by two drainers at once.
+        """
         by_table: OrderedDict[str, list[dict]] = OrderedDict()
         for record in records:
             table = record.get("table")
@@ -358,7 +379,7 @@ class IntentLog:
                                 request_id=row.get("request_id"),
                                 error=str(e)[:200],
                             )
-            await _save_position(conn, instance, segment, offset)
+            await _save_position(conn, instance, expected, segment, offset)
 
     async def _position(self, instance: str) -> tuple[str, int] | None:
         async with self._engine.connect() as conn:
@@ -441,16 +462,35 @@ class IntentLog:
         }
 
 
-async def _save_position(conn, instance: str, segment: str, offset: int) -> None:
+class PositionConflict(Exception):
+    """The stored log position isn't the one this batch was read from."""
+
+
+async def _save_position(
+    conn, instance: str, expected: tuple[str, int] | None, segment: str, offset: int
+) -> None:
+    if expected is None:
+        try:
+            async with conn.begin_nested():
+                await conn.execute(
+                    audit_journal.insert().values(
+                        instance=instance, segment=segment, byte_offset=offset
+                    )
+                )
+        except IntegrityError as e:
+            raise PositionConflict() from e  # someone else wrote the first position
+        return
     updated = await conn.execute(
         audit_journal.update()
-        .where(audit_journal.c.instance == instance)
+        .where(
+            audit_journal.c.instance == instance,
+            audit_journal.c.segment == expected[0],
+            audit_journal.c.byte_offset == expected[1],
+        )
         .values(segment=segment, byte_offset=offset)
     )
-    if updated.rowcount == 0:
-        await conn.execute(
-            audit_journal.insert().values(instance=instance, segment=segment, byte_offset=offset)
-        )
+    if updated.rowcount != 1:
+        raise PositionConflict()
 
 
 def _record_failure(table: str, outcome: str, count: int) -> None:

@@ -158,20 +158,17 @@ class KeyManager:
                 logger.warning("API key revoke failed: not found", key_id=key_id)
             return revoked
 
-    async def get_key_by_hash(self, key_hash: str) -> dict | None:
-        """Look up an active key by its hash.
-
-        Returns key metadata if found and active, None otherwise.
-        """
+    async def lookup_by_hash(self, key_hash: str) -> dict | None:
+        """An active, unexpired key's metadata, without touching last_used_at."""
+        now = datetime.now(timezone.utc)
         async with self._engine.connect() as conn:
-            now = datetime.now(timezone.utc)
             row = (
                 await conn.execute(
                     select(
                         api_keys.c.id,
                         api_keys.c.client_id,
                         api_keys.c.environment,
-                        api_keys.c.is_active,
+                        api_keys.c.expires_at,
                         api_keys.c.allowed_endpoints,
                         api_keys.c.allowed_models,
                         api_keys.c.rate_limit_rpm,
@@ -187,29 +184,45 @@ class KeyManager:
                     )
                 )
             ).fetchone()
+        if row is None:
+            logger.debug("API key validation failed: key not found or expired")
+            return None
+        return {
+            "id": row.id,
+            "client_id": row.client_id,
+            "environment": row.environment,
+            "expires_at": row.expires_at,
+            "allowed_endpoints": row.allowed_endpoints,
+            "allowed_models": row.allowed_models,
+            "rate_limit_rpm": row.rate_limit_rpm,
+            "max_concurrent": row.max_concurrent,
+            "priority": row.priority or "interactive",
+        }
 
-            if row is None:
-                logger.debug("API key validation failed: key not found or expired")
-                return None
+    async def get_key_by_hash(self, key_hash: str) -> dict | None:
+        """Look up an active key by its hash and record the use (uncached path).
 
-            # Update last_used_at
-            await conn.execute(
-                update(api_keys)
-                .where(api_keys.c.id == row.id)
-                .values(last_used_at=datetime.now(timezone.utc))
-            )
-            await conn.commit()
+        Returns key metadata if found and active, None otherwise.
+        """
+        info = await self.lookup_by_hash(key_hash)
+        if info is not None:
+            await self.touch({info["id"]: datetime.now(timezone.utc)})
+        return info
 
-            return {
-                "id": row.id,
-                "client_id": row.client_id,
-                "environment": row.environment,
-                "allowed_endpoints": row.allowed_endpoints,
-                "allowed_models": row.allowed_models,
-                "rate_limit_rpm": row.rate_limit_rpm,
-                "max_concurrent": row.max_concurrent,
-                "priority": row.priority or "interactive",
-            }
+    async def touch(self, last_used: dict[int, datetime]) -> None:
+        """Set last_used_at for several keys in one transaction (never moves it back)."""
+        if not last_used:
+            return
+        async with self._engine.begin() as conn:
+            for key_id, used_at in last_used.items():
+                await conn.execute(
+                    update(api_keys)
+                    .where(
+                        api_keys.c.id == key_id,
+                        or_(api_keys.c.last_used_at.is_(None), api_keys.c.last_used_at < used_at),
+                    )
+                    .values(last_used_at=used_at)
+                )
 
     async def validate_plaintext_key(self, plaintext: str) -> dict | None:
         """Validate a plaintext API key by hashing and looking up.

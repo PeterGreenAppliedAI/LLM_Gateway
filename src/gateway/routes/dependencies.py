@@ -231,6 +231,7 @@ async def validate_api_key(
     api_key: str,
     config: GatewayConfig,
     db_engine=None,
+    key_cache=None,
 ) -> dict:
     """Validate API key and return auth details.
 
@@ -275,12 +276,14 @@ async def validate_api_key(
                 "priority": key_config.priority,
             }
 
-    # Source 2: DB-backed keys (async hash lookup)
+    # Source 2: DB-backed keys (hash lookup; cached when the app has a cache, D-040)
     if db_engine is not None:
-        from gateway.storage.keys import KeyManager
+        if key_cache is not None:
+            key_info = await key_cache.validate(api_key)
+        else:
+            from gateway.storage.keys import KeyManager
 
-        km = KeyManager(db_engine)
-        key_info = await km.validate_plaintext_key(api_key)
+            key_info = await KeyManager(db_engine).validate_plaintext_key(api_key)
         if key_info is not None:
             return {
                 "client_id": key_info["client_id"],
@@ -401,7 +404,9 @@ async def require_api_key(
         return ADMIN_CLIENT_ID
 
     db_engine = getattr(request.app.state, "db_engine", None)
-    key_info = await validate_api_key(api_key, config, db_engine)
+    key_info = await validate_api_key(
+        api_key, config, db_engine, getattr(request.app.state, "key_cache", None)
+    )
     return key_info["client_id"]
 
 
@@ -516,7 +521,9 @@ async def authenticate_with_environment(
 
     # Validate key if provided (pass db_engine for DB-backed key lookup)
     db_engine = getattr(request.app.state, "db_engine", None)
-    key_info = await validate_api_key(api_key, config, db_engine)
+    key_info = await validate_api_key(
+        api_key, config, db_engine, getattr(request.app.state, "key_cache", None)
+    )
     return AuthResult(
         client_id=key_info["client_id"],
         environment=key_info.get("environment"),

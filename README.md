@@ -221,6 +221,7 @@ auth:
 | `GATEWAY_DB_AUDIT_DURABILITY` | `auto` | How audit rows are written (D-038). `process`: to a local intent log and the response returns; a background task writes them to the DB, and nothing is lost on a gateway crash. `grouped`: the response also waits until the log is on disk (survives power loss; one shared disk flush per burst). `sync`: the response waits for the DB commit. `auto`: `process` on SQLite, `sync` on PostgreSQL |
 | `GATEWAY_DB_AUDIT_JOURNAL_PATH` | `data/audit-journal` | Intent log directory. Use local disk; keep it on a persistent volume in containers |
 | `GATEWAY_DB_AUDIT_JOURNAL_MAX_MB` | `1024` | Cap while the DB is unreachable; past it the oldest records are dropped (logged as critical) |
+| `GATEWAY_DB_KEY_CACHE_SECONDS` | `30` | How long a validated DB-backed API key is remembered (no DB query per request). Revoking a key is immediate in the gateway process that handled the revoke; other processes follow within this time. `0` disables |
 | `GATEWAY_DB_AUDIT_SPILL_PATH` | `data/audit-spill.jsonl` | Audit rows that can't reach the DB after retries are written here and replayed on startup; watch `gateway_audit_write_failures_total` |
 | `GATEWAY_GUARD_ENABLED` | `false` | Enable guard model shadow analysis |
 | `GATEWAY_GUARD_MODEL_NAME` | `ibm/granite3.2-guardian:5b` | Guard model name |

@@ -198,6 +198,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         batch_max_share=admission_cfg.batch_max_share if admission_cfg else 1.0,
     )
 
+    # Validated-key cache and batched last_used_at (D-040)
+    app.state.key_cache = None
+    if app.state.db_engine is not None and settings.db.key_cache_seconds > 0:
+        from gateway.storage.key_cache import KeyCache
+
+        app.state.key_cache = KeyCache(app.state.db_engine, ttl=settings.db.key_cache_seconds)
+        await app.state.key_cache.start()
+
     # Policy enforcer, built now (not on the first request) so token budgets
     # can load saved tiers and today's usage before traffic arrives (D-037)
     from gateway.routes.dependencies import build_enforcer
@@ -306,6 +314,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     if getattr(app.state, "budget_sync", None) is not None:
         await app.state.budget_sync.stop()  # writes the last batch of usage
+
+    if getattr(app.state, "key_cache", None) is not None:
+        await app.state.key_cache.stop()  # writes pending last_used_at
 
     if hasattr(app.state, "security_analyzer"):
         await app.state.security_analyzer.stop()

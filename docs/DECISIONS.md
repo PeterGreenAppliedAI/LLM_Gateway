@@ -1296,6 +1296,37 @@ worker" readiness item), not SQLite.
 - **PostgreSQL end-to-end:** `auto` chose direct writes; rows landed with correct UTC
   timestamps.
 
+### Correction (found while building D-040): exactly-once wasn't true on SQLite
+
+- **What was wrong:** the batch insert runs inside a savepoint, so one bad row can be skipped.
+  Python's `sqlite3` driver doesn't start a real transaction before a `SAVEPOINT`, so the
+  savepoint opened its own transaction and `RELEASE` **committed** it. On SQLite the rows
+  were committed *before* the position update, so "rows and position commit together" was
+  false.
+  - A crash, or a second drainer, between the two could insert a batch twice.
+  - PostgreSQL was unaffected.
+- **How it was found:** the `kill -9` test failed once in a full-suite run (30 PII rows
+  instead of 25). The cause was a test artifact: its simulated crash didn't wait for the
+  cancelled drainer to stop, so two drainers briefly ran. A new test races two drainers on
+  purpose. It failed every time on SQLite, never on PostgreSQL, and that pointed at the
+  driver.
+- **Fixes:**
+  1. **Real SQLite transactions** (`storage/engine.py`, SQLAlchemy's documented recipe): the
+     driver's own transaction handling is off, and SQLAlchemy emits `BEGIN` at the start of
+     every transaction. Savepoints nest properly. The WAL pragma moved into the connection
+     hook, because journal mode can't change inside a transaction. This applies to every
+     SQLite transaction in the gateway; the full suite passed three runs in a row.
+  2. **The position update is a compare-and-set:** it only succeeds if the stored position
+     is still the one the batch was read from, otherwise the whole transaction rolls back.
+     Exactly-once is now enforced by the database itself, not just by the lock file that
+     keeps a second drainer away.
+- **Tested since:**
+  - `test_two_drainers_on_one_log_never_double_apply`: three drainers racing over 60 PII
+    records leave exactly 60 rows, on both databases.
+  - End-to-end `kill -9` re-run after the fix: 206 acknowledged, 60 only in the log at the
+    kill, 206 rows after restart, 0 missing, 0 duplicates.
+  - Throughput at 50 concurrent unchanged (131 req/s, p99 0.81 s).
+
 ## D-039: Deployment tiers: Postgres is a scaling/security decision, not an install tax
 
 - **Status:** Proposed, 2026-10-07 (from Peter's discussion with a reviewer). Nothing built
@@ -1340,3 +1371,67 @@ worker" readiness item), not SQLite.
   - whether Server mode requires PostgreSQL, or SQLite tenants are allowed with a warning;
   - how the dashboard's admin role spans tenants;
   - whether audit gets its own database at Enterprise.
+
+## D-040: Cache validated API keys; batch last_used_at
+
+- **Status:** Implemented, 2026-10-07
+- **Problem:** every request with a database-backed key ran a SELECT plus an UPDATE of
+  `last_used_at` and a commit, on SQLite's single writer, *before* the request could start.
+  **Measured** (real gateway, SQLite, fake instant engine, cache off):
+  - one request: 28.7 ms median;
+  - 10 concurrent: p99 1.05 s;
+  - 50 concurrent: requests **failed** with 500 `sqlite3.OperationalError: database is
+    locked`. The UPDATEs queued past SQLite's lock timeout.
+- **Fix:**
+  - **Validated keys are cached for 30 s** (`GATEWAY_DB_KEY_CACHE_SECONDS`; 0 disables).
+    Repeat requests do no database work. A key's own `expires_at` is checked on every cache
+    hit, so expiry isn't delayed by the cache.
+  - **Unknown keys are remembered for 5 s**, so a client spraying random keys can't turn each
+    guess into a database query. Creating a key clears any "unknown" entry for it.
+  - **Size-bounded** (10,000 keys, least-recently-used out).
+  - **`last_used_at` is coalesced in memory** (latest time per key) and written in one
+    transaction every 30 s and on shutdown. The UPDATE never moves it backwards, so a late
+    flush from another process can't regress it. A failed flush keeps its times for the next
+    attempt.
+- **Why `last_used_at` doesn't go through the audit intent log (D-038):** it's an
+  informational timestamp, not a record of what happened. Every request is already in the
+  audit trail with its client. Losing up to 30 s of `last_used_at` freshness on a crash costs
+  nothing; making it durable would add log traffic for no benefit. It's also an update, and
+  the intent log carries only append-only facts.
+- **Revocation:**
+  - **Immediate** in the gateway process that handled `DELETE /api/keys/{id}`: it drops the
+    key from its cache before responding.
+  - **Other processes** stop accepting it within the cache lifetime (30 s by default). Set a
+    shorter lifetime if that's too long for a deployment, or 0 to disable caching.
+  - A cross-process invalidation broadcast (e.g. over the optional Redis) is possible later;
+    not built.
+- **Alternatives considered:**
+  - *Write `last_used_at` on a sample of requests:* still writes on the request path.
+  - *Drop `last_used_at`:* the dashboard shows it, and it's how operators find unused keys.
+  - *Cache without the negative entries:* leaves invalid-key spraying as a DB load vector.
+- **Measured after** (same setup, cache on):
+
+  | concurrency | cache off p50 / p99 / req/s | cache on p50 / p99 / req/s |
+  |---|---|---|
+  | 1 | 28.7 ms / 47.9 ms / 34 | 11.6 ms / 21.0 ms / 84 |
+  | 10 | 135 ms / 1,052 ms / 55 | 67.8 ms / 172 ms / 143 |
+  | 50 | **500 errors** (database is locked) | 374 ms / 938 ms / 121, no errors |
+
+- **What didn't work:** *my first end-to-end shutdown check reported `last_used_at` empty.*
+  The test was wrong, not the code: `cd … && … python … &` backgrounds the whole `&&` chain,
+  so `$!` was a wrapper shell, and the kill never reached the gateway. The gateway was still
+  running and never shut down. With the real process stopped, the shutdown flush wrote it.
+- **What works now:** `tests/test_key_cache.py` (13 tests, each on SQLite and PostgreSQL):
+  - one lookup for 50 validations;
+  - the cache lifetime;
+  - a key expiring while cached is refused;
+  - the size bound;
+  - revocation immediate in the same process, and followed within the lifetime by another;
+  - guesses don't each query the database;
+  - a newly created key is accepted despite an earlier miss;
+  - `last_used_at` coalesced, written on flush, never moved back, kept on a failed flush,
+    written on stop;
+  - the auth path uses the cache.
+
+  **End to end:** a cached key gave 200, 200, then 401 immediately after `DELETE
+  /api/keys/{id}`; `last_used_at` was written at clean shutdown.

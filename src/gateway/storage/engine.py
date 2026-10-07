@@ -7,7 +7,7 @@ Uses async SQLAlchemy for non-blocking database I/O.
 from pathlib import Path
 
 from pydantic import BaseModel, Field
-from sqlalchemy import text
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import NullPool, StaticPool
 
@@ -81,12 +81,6 @@ async def create_async_db_engine(
         async with engine.begin() as conn:
             await conn.run_sync(metadata.create_all)
 
-    # Enable WAL mode for file-based SQLite
-    if config.url.startswith("sqlite") and ":memory:" not in config.url:
-        async with engine.connect() as conn:
-            await conn.execute(text("PRAGMA journal_mode=WAL"))
-            await conn.commit()
-
     return engine
 
 
@@ -94,24 +88,45 @@ def _create_sqlite_engine(url: str, config: DatabaseConfig) -> AsyncEngine:
     """Create async SQLite engine."""
     # Extract path from original URL and ensure directory exists
     orig_url = config.url
-    if ":///" in orig_url and not orig_url.endswith(":memory:"):
+    file_based = ":///" in orig_url and not orig_url.endswith(":memory:")
+    if file_based:
         db_path = orig_url.split(":///", 1)[1]
         if db_path.startswith("./"):
             db_path = db_path[2:]
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-
-        return create_async_engine(
-            url,
-            poolclass=NullPool,
-            echo=config.echo,
-        )
+        engine = create_async_engine(url, poolclass=NullPool, echo=config.echo)
     else:
         # In-memory SQLite (for testing)
-        return create_async_engine(
-            url,
-            poolclass=StaticPool,
-            echo=config.echo,
-        )
+        engine = create_async_engine(url, poolclass=StaticPool, echo=config.echo)
+    _use_real_sqlite_transactions(engine, wal=file_based)
+    return engine
+
+
+def _use_real_sqlite_transactions(engine: AsyncEngine, wal: bool) -> None:
+    """Make SQLite transactions and savepoints behave as written (D-040).
+
+    Python's sqlite3 driver starts transactions on its own, only before a
+    data-changing statement, and not before SAVEPOINT. A SAVEPOINT then
+    opens its own transaction and its RELEASE commits it, so rows inserted
+    inside `begin_nested()` were committed early, outside the surrounding
+    transaction. The audit intent log relies on its rows and its position
+    committing together, and that was silently untrue on SQLite. SQLAlchemy's
+    documented fix: turn the driver's transaction handling off and emit
+    BEGIN ourselves at the start of every transaction.
+    """
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def _on_connect(dbapi_connection, _record):
+        dbapi_connection.isolation_level = None  # the driver stops issuing BEGIN
+        if wal:
+            # Before any BEGIN: journal mode can't change inside a transaction
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.close()
+
+    @event.listens_for(engine.sync_engine, "begin")
+    def _on_begin(conn):
+        conn.exec_driver_sql("BEGIN")
 
 
 def _create_postgresql_engine(url: str, config: DatabaseConfig) -> AsyncEngine:
