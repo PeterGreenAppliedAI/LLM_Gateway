@@ -42,9 +42,9 @@ from gateway.policy import PolicyEnforcer, PolicyViolation
 from gateway.routes.dependencies import (
     AuthResult,
     get_audit_logger,
-    get_auth,
     get_dispatcher,
     get_enforcer,
+    get_inference_auth,
     get_pii_scrubber,
     get_sanitizer,
     get_security_analyzer,
@@ -104,7 +104,7 @@ def _audit_response_body(response) -> dict:
 async def ollama_chat(
     request: Request,
     body: OllamaChatRequest,
-    auth: Annotated[AuthResult, Depends(get_auth)],
+    auth: Annotated[AuthResult, Depends(get_inference_auth)],
     dispatcher: Annotated[Dispatcher, Depends(get_dispatcher)],
     enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
     pii_scrubber: Annotated[PIIScrubber | None, Depends(get_pii_scrubber)],
@@ -450,7 +450,7 @@ async def _stream_ollama_chat(
 async def ollama_generate(
     request: Request,
     body: OllamaGenerateRequest,
-    auth: Annotated[AuthResult, Depends(get_auth)],
+    auth: Annotated[AuthResult, Depends(get_inference_auth)],
     dispatcher: Annotated[Dispatcher, Depends(get_dispatcher)],
     enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
     pii_scrubber: Annotated[PIIScrubber | None, Depends(get_pii_scrubber)],
@@ -894,7 +894,7 @@ async def _run_embeddings(
 async def ollama_embeddings(
     request: Request,
     body: OllamaEmbeddingsRequest,
-    auth: Annotated[AuthResult, Depends(get_auth)],
+    auth: Annotated[AuthResult, Depends(get_inference_auth)],
     dispatcher: Annotated[Dispatcher, Depends(get_dispatcher)],
     enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
     pii_scrubber: Annotated[PIIScrubber | None, Depends(get_pii_scrubber)],
@@ -925,7 +925,7 @@ async def ollama_embeddings(
 async def ollama_embed(
     request: Request,
     body: OllamaEmbedRequest,
-    auth: Annotated[AuthResult, Depends(get_auth)],
+    auth: Annotated[AuthResult, Depends(get_inference_auth)],
     dispatcher: Annotated[Dispatcher, Depends(get_dispatcher)],
     enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
     pii_scrubber: Annotated[PIIScrubber | None, Depends(get_pii_scrubber)],

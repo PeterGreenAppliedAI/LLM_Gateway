@@ -29,7 +29,7 @@ from gateway.config import (
     EnvironmentConfig,
     ResolutionConfig,
 )
-from gateway.dispatch.admission import Lease
+from gateway.dispatch.admission import Lease, Priority
 from gateway.dispatch.registry import ProviderRegistry
 from gateway.errors import (
     AllProvidersUnavailableError,
@@ -70,7 +70,12 @@ def order_candidates(registry: ProviderRegistry, strategy: str, candidates: list
     return sorted(candidates, key=load)
 
 
-async def admit(registry: ProviderRegistry, candidates: list[str], deadline: float) -> Lease:
+async def admit(
+    registry: ProviderRegistry,
+    candidates: list[str],
+    deadline: float,
+    priority: Priority = "interactive",
+) -> Lease:
     """A slot on the first candidate with room; when all are full, the first to free up.
 
     Shared by text and media dispatch.
@@ -81,19 +86,23 @@ async def admit(registry: ProviderRegistry, candidates: list[str], deadline: flo
     admission = registry.admission
     loop = asyncio.get_running_loop()
     started = loop.time()
-    lease = await admission.acquire_any(candidates, max(0.0, deadline - started))
+    lease = await admission.acquire_any(candidates, max(0.0, deadline - started), priority)
     waited = loop.time() - started
     metrics = get_metrics()
     if lease is None:
-        metrics.record_admission_rejected()
+        metrics.record_admission_rejected(priority)
         # It stayed full for the whole wait; suggest waiting about as long
-        retry_after = min(30, max(1, math.ceil(registry.max_queue_wait_seconds)))
+        retry_after = min(30, max(1, math.ceil(registry.queue_wait_seconds(priority))))
         raise CapacityExceededError(
             endpoints=candidates, waited_seconds=waited, retry_after=retry_after
         )
     if waited > 0.001:
-        metrics.observe_admission_wait(waited)
+        metrics.observe_admission_wait(waited, priority)
     return lease
+
+
+def admission_deadline(registry: ProviderRegistry, priority: Priority = "interactive") -> float:
+    return asyncio.get_running_loop().time() + registry.queue_wait_seconds(priority)
 
 
 # Maximum number of providers to attempt before failing
@@ -441,12 +450,12 @@ class Dispatcher:
             candidates += fallback_chain[: MAX_FALLBACK_ATTEMPTS - 1]
         candidates = self._order_candidates(candidates, pinned)
         remaining = list(candidates)
-        deadline = self._admission_deadline()
+        deadline = admission_deadline(self._registry, request.priority)
 
         while remaining:
             # Admission (D-032): the first candidate with a free slot; when
             # all are full, wait for whichever frees first
-            lease = await self._admit(remaining, deadline)
+            lease = await admit(self._registry, remaining, deadline, request.priority)
             name = lease.endpoint
             remaining.remove(name)
             try:
@@ -480,21 +489,10 @@ class Dispatcher:
     # Admission control (dispatch/admission.py, D-032)
     # ------------------------------------------------------------------
 
-    def _admission_deadline(self) -> float:
-        return asyncio.get_running_loop().time() + self._registry.max_queue_wait_seconds
-
     def _order_candidates(self, candidates: list[str], pinned: bool) -> list[str]:
         if pinned:
             return candidates
         return order_candidates(self._registry, self._resolution_config.strategy, candidates)
-
-    async def _admit(self, candidates: list[str], deadline: float) -> Lease:
-        """A slot on the first candidate with room, waiting until the deadline if none has.
-
-        Raises:
-            CapacityExceededError: Every candidate stayed full until the deadline.
-        """
-        return await admit(self._registry, candidates, deadline)
 
     async def _try_provider(
         self,
@@ -739,11 +737,11 @@ class Dispatcher:
             for name in self._order_candidates(providers_to_try[:MAX_FALLBACK_ATTEMPTS], pinned)
             if self._registry.get(name) is not None
         ]
-        deadline = self._admission_deadline()
+        deadline = admission_deadline(self._registry, request.priority)
 
         while remaining:
             # Admission (D-032); the slot is held until the stream closes
-            lease = await self._admit(remaining, deadline)
+            lease = await admit(self._registry, remaining, deadline, request.priority)
             try_name = lease.endpoint
             remaining.remove(try_name)
             try:

@@ -13,7 +13,7 @@ Design principles:
 import re
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from uuid import uuid4
 
 from pydantic import AfterValidator, BaseModel, Field
@@ -147,6 +147,9 @@ class InternalRequest(BaseModel):
     # with the environment's endpoints). None = unrestricted. The dispatcher
     # enforces it on every endpoint it tries, including fallbacks.
     allowed_endpoints: list[str] | None = Field(default=None, max_length=50)
+    # Scheduling class for endpoint admission (D-034): batch waits behind
+    # interactive and may use only part of an endpoint's slots
+    priority: Literal["interactive", "batch"] = "interactive"
 
     # Tool calling
     tools: list[dict[str, Any]] | None = None  # Tool definitions (OpenAI/Ollama format)

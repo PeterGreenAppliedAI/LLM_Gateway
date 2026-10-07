@@ -12,7 +12,7 @@ export function StatCard({ label, value, subtext }: { label: string; value: stri
 
 export function EndpointCard({ endpoint }: { endpoint: Endpoint }) {
   return (
-    <div className={`bg-gray-800 rounded-lg p-4 border ${endpoint.healthy ? 'border-green-600' : 'border-red-600'}`}>
+    <div className={`bg-gray-800 rounded-lg p-4 border text-left ${endpoint.healthy ? 'border-green-600' : 'border-red-600'}`}>
       <div className="flex items-center justify-between">
         <div className="font-semibold">{endpoint.name}</div>
         <div className="flex gap-1">

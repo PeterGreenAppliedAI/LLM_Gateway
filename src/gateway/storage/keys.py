@@ -48,6 +48,8 @@ class KeyManager:
         allowed_endpoints: list[str] | None = None,
         allowed_models: list[str] | None = None,
         rate_limit_rpm: int | None = None,
+        max_concurrent: int | None = None,
+        priority: str | None = None,
     ) -> dict:
         """Create a new API key.
 
@@ -72,6 +74,8 @@ class KeyManager:
                     allowed_endpoints=allowed_endpoints,
                     allowed_models=allowed_models,
                     rate_limit_rpm=rate_limit_rpm,
+                    max_concurrent=max_concurrent,
+                    priority=priority,
                     created_at=now,
                     is_active=True,
                 )
@@ -110,6 +114,8 @@ class KeyManager:
                         api_keys.c.allowed_endpoints,
                         api_keys.c.allowed_models,
                         api_keys.c.rate_limit_rpm,
+                        api_keys.c.max_concurrent,
+                        api_keys.c.priority,
                         api_keys.c.description,
                     ).order_by(api_keys.c.created_at.desc())
                 )
@@ -128,6 +134,8 @@ class KeyManager:
                 "allowed_endpoints": row.allowed_endpoints,
                 "allowed_models": row.allowed_models,
                 "rate_limit_rpm": row.rate_limit_rpm,
+                "max_concurrent": row.max_concurrent,
+                "priority": row.priority or "interactive",
                 "description": row.description,
             }
             for row in rows
@@ -167,6 +175,8 @@ class KeyManager:
                         api_keys.c.allowed_endpoints,
                         api_keys.c.allowed_models,
                         api_keys.c.rate_limit_rpm,
+                        api_keys.c.max_concurrent,
+                        api_keys.c.priority,
                     ).where(
                         api_keys.c.key_hash == key_hash,
                         api_keys.c.is_active == True,  # noqa: E712
@@ -197,6 +207,8 @@ class KeyManager:
                 "allowed_endpoints": row.allowed_endpoints,
                 "allowed_models": row.allowed_models,
                 "rate_limit_rpm": row.rate_limit_rpm,
+                "max_concurrent": row.max_concurrent,
+                "priority": row.priority or "interactive",
             }
 
     async def validate_plaintext_key(self, plaintext: str) -> dict | None:

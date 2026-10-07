@@ -14,9 +14,10 @@ Per Endpoints/Environments Architecture:
 
 import asyncio
 import contextlib
+import copy
 import re
 import secrets
-from collections.abc import Awaitable
+from collections.abc import AsyncIterator, Awaitable
 from typing import Annotated, TypeVar
 from uuid import uuid4
 
@@ -24,6 +25,7 @@ from fastapi import Depends, Header, Request
 
 from gateway.config import EnvironmentConfig, GatewayConfig
 from gateway.dispatch import Dispatcher, ProviderRegistry
+from gateway.dispatch.admission import InMemoryConcurrency
 from gateway.errors import (
     AuthenticationError,
     ErrorCode,
@@ -31,6 +33,7 @@ from gateway.errors import (
     InvalidApiKeyFormatError,
     PolicyError,
     RateLimitError,
+    ValidationError,
 )
 from gateway.observability import RequestContext, get_logger
 from gateway.observability.logging import clear_request_context, set_request_context
@@ -260,6 +263,8 @@ async def validate_api_key(
                 "client_id": key_config.client_id,
                 "environment": key_config.environment,
                 "target_endpoint": key_config.target_endpoint,
+                "max_concurrent": key_config.max_concurrent,
+                "priority": key_config.priority,
             }
 
     # Source 2: DB-backed keys (async hash lookup)
@@ -275,6 +280,8 @@ async def validate_api_key(
                 "allowed_models": key_info.get("allowed_models"),
                 "allowed_endpoints": key_info.get("allowed_endpoints"),
                 "rate_limit_rpm": key_info.get("rate_limit_rpm"),
+                "max_concurrent": key_info.get("max_concurrent"),
+                "priority": key_info.get("priority") or "interactive",
             }
 
     raise InvalidApiKeyError()
@@ -291,6 +298,8 @@ class AuthResult:
         allowed_models: list[str] | None = None,
         allowed_endpoints: list[str] | None = None,
         rate_limit_rpm: int | None = None,
+        max_concurrent: int | None = None,
+        priority: str = "interactive",
     ):
         self.client_id = client_id
         self.environment = environment
@@ -298,6 +307,8 @@ class AuthResult:
         self.allowed_models = allowed_models
         self.allowed_endpoints = allowed_endpoints
         self.rate_limit_rpm = rate_limit_rpm
+        self.max_concurrent = max_concurrent  # in-flight requests for this key (D-034)
+        self.priority = priority  # interactive | batch
 
 
 async def authenticate(
@@ -487,6 +498,7 @@ async def authenticate_with_environment(
             allowed_models=anonymous.allowed_models,
             allowed_endpoints=anonymous.allowed_endpoints,
             rate_limit_rpm=anonymous.rate_limit_rpm,
+            max_concurrent=anonymous.max_concurrent,
         )
 
     # The admin key can do anything a client key can (D-002), including
@@ -504,7 +516,66 @@ async def authenticate_with_environment(
         allowed_models=key_info.get("allowed_models"),
         allowed_endpoints=key_info.get("allowed_endpoints"),
         rate_limit_rpm=key_info.get("rate_limit_rpm"),
+        max_concurrent=key_info.get("max_concurrent"),
+        priority=key_info.get("priority") or "interactive",
     )
+
+
+PRIORITY_HEADER = "X-DevMesh-Priority"
+
+
+async def get_inference_auth(
+    request: Request,
+    authenticated: Annotated[AuthResult, Depends(get_auth)],
+    x_devmesh_priority: Annotated[str | None, Header(alias=PRIORITY_HEADER)] = None,
+) -> AsyncIterator[AuthResult]:
+    """Authenticate an inference request and hold one of its key's slots (D-034).
+
+    A key with `max_concurrent` gets 429 when that many of its requests are
+    already in flight. The slot is held until the response is fully sent
+    (FastAPI runs this teardown after streaming ends), so a long stream
+    counts for its whole duration.
+
+    `X-DevMesh-Priority: batch` lets a client mark its own request as
+    batch work. It can only lower priority: a batch key stays batch.
+    """
+    auth = copy.copy(authenticated)
+    if x_devmesh_priority is not None:
+        value = x_devmesh_priority.strip().lower()
+        if value not in ("interactive", "batch"):
+            raise ValidationError(message=f"{PRIORITY_HEADER} must be 'interactive' or 'batch'")
+        if value == "batch":
+            auth.priority = "batch"
+
+    lease = None
+    if auth.max_concurrent is not None:
+        slots = _key_slots(request)
+        slots.set_capacity(auth.client_id, auth.max_concurrent)
+        lease = slots.try_acquire(auth.client_id)
+        if lease is None:
+            raise RateLimitError(
+                message=(
+                    f"Too many concurrent requests for this API key "
+                    f"(max {auth.max_concurrent} in flight)"
+                ),
+                retry_after=1,
+                code=ErrorCode.CONCURRENCY_LIMIT_EXCEEDED,
+                details={"max_concurrent": auth.max_concurrent},
+            )
+    try:
+        yield auth
+    finally:
+        if lease is not None:
+            lease.release()
+
+
+def _key_slots(request: Request) -> InMemoryConcurrency:
+    """Per-key in-flight counts (per process, like the rate limiter; D-010)."""
+    slots = getattr(request.app.state, "key_slots", None)
+    if slots is None:
+        slots = InMemoryConcurrency()
+        request.app.state.key_slots = slots
+    return slots
 
 
 def resolve_environment(request: Request, auth: AuthResult) -> EnvironmentConfig | None:
@@ -560,7 +631,7 @@ async def resolve_access_scope(request: Request, auth: AuthResult, model: str | 
         model_approved_in_environment,
     )
 
-    updates: dict = {}
+    updates: dict = {"priority": auth.priority}
     if auth.target_endpoint:
         updates["preferred_provider"] = auth.target_endpoint
 

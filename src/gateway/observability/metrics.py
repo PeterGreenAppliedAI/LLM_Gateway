@@ -207,12 +207,14 @@ class MetricsCollector:
         self._admission_wait = Histogram(
             f"{prefix}_admission_wait_seconds",
             "Time requests waited for an endpoint slot (only requests that waited)",
+            ["priority"],
             buckets=(0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60),
             **reg_kwargs,
         )
         self._admission_rejected = Counter(
             f"{prefix}_admission_rejected_total",
             "Requests refused with 503 because every candidate endpoint stayed full",
+            ["priority"],
             **reg_kwargs,
         )
 
@@ -310,13 +312,13 @@ class MetricsCollector:
         if self._enabled:
             self._admission_queue_depth.set(waiting)
 
-    def observe_admission_wait(self, seconds: float) -> None:
+    def observe_admission_wait(self, seconds: float, priority: str = "interactive") -> None:
         if self._enabled:
-            self._admission_wait.observe(seconds)
+            self._admission_wait.labels(priority=self._sanitize_label(priority)).observe(seconds)
 
-    def record_admission_rejected(self) -> None:
+    def record_admission_rejected(self, priority: str = "interactive") -> None:
         if self._enabled:
-            self._admission_rejected.inc()
+            self._admission_rejected.labels(priority=self._sanitize_label(priority)).inc()
 
     def record_error(self, provider: str, error_type: str) -> None:
         """Record a provider error.

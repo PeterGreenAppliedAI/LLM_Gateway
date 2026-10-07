@@ -121,6 +121,8 @@ export interface ApiKeyInfo {
   allowed_endpoints: string[] | null
   allowed_models: string[] | null
   rate_limit_rpm: number | null
+  max_concurrent?: number | null
+  priority?: 'interactive' | 'batch'
   description: string | null
 }
 

@@ -12,7 +12,6 @@ dispatcher with the same rules as text (D-020):
   endpoint (D-012/D-013)
 """
 
-import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -23,6 +22,7 @@ from gateway.dispatch.admission import Lease
 from gateway.dispatch.dispatcher import (
     MAX_FALLBACK_ATTEMPTS,
     Dispatcher,
+    admission_deadline,
     admit,
     order_candidates,
 )
@@ -168,10 +168,10 @@ class MediaDispatcher:
             )
             if self._registry.get(name) is not None
         ]
-        deadline = asyncio.get_running_loop().time() + self._registry.max_queue_wait_seconds
+        deadline = admission_deadline(self._registry, request.priority)
         while remaining:
             # Admission (D-032): the slot is held until the body is relayed
-            lease = await admit(self._registry, remaining, deadline)
+            lease = await admit(self._registry, remaining, deadline, request.priority)
             name = lease.endpoint
             remaining.remove(name)
             try:

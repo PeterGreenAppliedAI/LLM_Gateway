@@ -11,6 +11,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
+from gateway.config import Priority
 from gateway.routes.dependencies import require_admin
 from gateway.storage import KeyManager
 
@@ -35,6 +36,8 @@ class CreateKeyRequest(BaseModel):
     allowed_endpoints: list[str] | None = None
     allowed_models: list[str] | None = None
     rate_limit_rpm: int | None = Field(default=None, ge=1)
+    max_concurrent: int | None = Field(default=None, ge=1, le=10000)
+    priority: Priority = "interactive"
 
 
 class CreateKeyResponse(BaseModel):
@@ -62,6 +65,8 @@ class KeyInfo(BaseModel):
     allowed_endpoints: list[str] | None = None
     allowed_models: list[str] | None = None
     rate_limit_rpm: int | None = None
+    max_concurrent: int | None = None
+    priority: str = "interactive"
     description: str | None = None
 
 
@@ -97,6 +102,8 @@ async def create_api_key(
         allowed_endpoints=body.allowed_endpoints,
         allowed_models=body.allowed_models,
         rate_limit_rpm=body.rate_limit_rpm,
+        max_concurrent=body.max_concurrent,
+        priority=body.priority,
     )
 
     return CreateKeyResponse(**result)

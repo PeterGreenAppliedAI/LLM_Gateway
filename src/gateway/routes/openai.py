@@ -45,9 +45,9 @@ from gateway.policy import PolicyEnforcer, PolicyViolation
 from gateway.routes.dependencies import (
     AuthResult,
     get_audit_logger,
-    get_auth,
     get_dispatcher,
     get_enforcer,
+    get_inference_auth,
     get_pii_scrubber,
     get_sanitizer,
     get_security_analyzer,
@@ -125,7 +125,7 @@ def _record_choice_metrics(results: list[DispatchResult], ctx, task: str) -> Non
 async def chat_completions(
     request: Request,
     body: OpenAIChatRequest,
-    auth: Annotated[AuthResult, Depends(get_auth)],
+    auth: Annotated[AuthResult, Depends(get_inference_auth)],
     dispatcher: Annotated[Dispatcher, Depends(get_dispatcher)],
     enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
     pii_scrubber: Annotated[PIIScrubber | None, Depends(get_pii_scrubber)],
@@ -377,7 +377,7 @@ async def _stream_chat_response(
 async def completions(
     request: Request,
     body: OpenAICompletionRequest,
-    auth: Annotated[AuthResult, Depends(get_auth)],
+    auth: Annotated[AuthResult, Depends(get_inference_auth)],
     dispatcher: Annotated[Dispatcher, Depends(get_dispatcher)],
     enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
     pii_scrubber: Annotated[PIIScrubber | None, Depends(get_pii_scrubber)],
@@ -637,7 +637,7 @@ async def _stream_completion_response(
 async def embeddings(
     request: Request,
     body: OpenAIEmbeddingRequest,
-    auth: Annotated[AuthResult, Depends(get_auth)],
+    auth: Annotated[AuthResult, Depends(get_inference_auth)],
     dispatcher: Annotated[Dispatcher, Depends(get_dispatcher)],
     enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],

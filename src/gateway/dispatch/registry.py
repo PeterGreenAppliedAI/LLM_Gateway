@@ -78,7 +78,7 @@ class ProviderRegistry:
         self._health: dict[str, ProviderHealth] = {}
         self._breakers: dict[str, CircuitBreaker] = {}
         # In-process slot counts; a shared backend can replace it (D-010)
-        self._admission = InMemoryConcurrency()
+        self._admission = InMemoryConcurrency(batch_max_share=config.admission.batch_max_share)
         self._endpoint_configs: dict[str, EndpointConfig] = {}
         self._health_task: asyncio.Task | None = None
         self._shutdown = False
@@ -93,8 +93,10 @@ class ProviderRegistry:
         """Per-endpoint concurrency slots (dispatch/admission.py)."""
         return self._admission
 
-    @property
-    def max_queue_wait_seconds(self) -> float:
+    def queue_wait_seconds(self, priority: str = "interactive") -> float:
+        """How long a request may wait for an endpoint slot."""
+        if priority == "batch":
+            return self._config.admission.batch_max_queue_wait_seconds
         return self._config.admission.max_queue_wait_seconds
 
     @property

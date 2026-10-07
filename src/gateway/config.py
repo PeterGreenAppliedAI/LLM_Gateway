@@ -119,14 +119,24 @@ class CircuitBreakerConfig(BaseModel):
     cooldown_seconds: float = Field(default=15.0, gt=0, le=3600)
 
 
+# Scheduling class (D-034). interactive: someone is waiting on the answer.
+# batch: throughput work that can wait (evals, backfills, bulk embeddings).
+Priority = Literal["interactive", "batch"]
+
+
 class AdmissionConfig(BaseModel):
-    """Per-endpoint concurrency limits (dispatch/admission.py, D-032).
+    """Per-endpoint concurrency limits (dispatch/admission.py, D-032, D-034).
 
     When every candidate endpoint is at `max_concurrent`, a request waits up
     to `max_queue_wait_seconds` for a slot, then gets 503 + Retry-After.
+    Batch requests wait longer, are served after waiting interactive ones,
+    and may hold at most `batch_max_share` of an endpoint's slots, so a
+    batch job can't leave interactive traffic queued behind it.
     """
 
     max_queue_wait_seconds: float = Field(default=5.0, ge=0, le=300)
+    batch_max_queue_wait_seconds: float = Field(default=60.0, ge=0, le=3600)
+    batch_max_share: float = Field(default=0.75, gt=0, le=1)
 
 
 class MediaTokenEquivalents(BaseModel):
@@ -242,6 +252,9 @@ class ApiKeyConfig(BaseModel):
     target_endpoint: SafeIdentifier | None = (
         None  # Force all requests from this key to a specific endpoint
     )
+    # Requests this key may have in flight at once; more get 429 (D-034)
+    max_concurrent: int | None = Field(default=None, ge=1, le=10000)
+    priority: Priority = "interactive"
 
 
 class AnonymousAccessConfig(BaseModel):
@@ -263,10 +276,18 @@ class AnonymousAccessConfig(BaseModel):
     rate_limit_rpm: int | None = Field(
         default=None, gt=0, description="Requests per minute for all keyless traffic combined"
     )
+    max_concurrent: int | None = Field(
+        default=None, ge=1, le=10000, description="In-flight requests, all keyless traffic combined"
+    )
 
     @property
     def unrestricted(self) -> bool:
-        return not (self.allowed_models or self.allowed_endpoints or self.rate_limit_rpm)
+        return not (
+            self.allowed_models
+            or self.allowed_endpoints
+            or self.rate_limit_rpm
+            or self.max_concurrent
+        )
 
 
 class AuthConfig(BaseModel):

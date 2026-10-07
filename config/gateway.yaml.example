@@ -35,6 +35,12 @@ circuit_breaker:
 # to the next endpoint with room, or wait here for a free slot, then 503.
 admission:
   max_queue_wait_seconds: 5.0
+  # Batch requests (D-034: keys with priority: batch, or the header
+  # X-DevMesh-Priority: batch) queue longer, are served after waiting
+  # interactive requests, and may hold at most this share of an endpoint's
+  # slots, leaving the rest for interactive traffic.
+  batch_max_queue_wait_seconds: 60.0
+  batch_max_share: 0.75
 
 embedding_queue:
   enabled: true
@@ -175,6 +181,8 @@ auth:
       client_id: my-app
       description: "My application"
       # target_endpoint: gpu-node-2  # Optional: route all traffic to this endpoint
+      # max_concurrent: 4    # Optional: requests in flight at once; more get 429
+      # priority: batch      # Optional: interactive (default) or batch (D-034)
 
     # Example: General development key
     - key: "${GATEWAY_KEY_DEV}"
@@ -189,3 +197,4 @@ auth:
   #   allowed_models: ["llama3.1:*"]
   #   allowed_endpoints: [gpu-node-1]
   #   rate_limit_rpm: 30   # shared by all keyless traffic
+  #   max_concurrent: 4    # in flight at once, all keyless traffic combined

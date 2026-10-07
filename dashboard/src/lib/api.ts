@@ -84,7 +84,14 @@ export async function fetchApiKeys(): Promise<{ keys: ApiKeyInfo[]; total: numbe
   return res.json()
 }
 
-export async function createApiKey(body: { name: string; client_id: string; description?: string }): Promise<{ key: string; key_id: number; prefix: string }> {
+export async function createApiKey(body: {
+  name: string
+  client_id: string
+  description?: string
+  rate_limit_rpm?: number
+  max_concurrent?: number
+  priority?: 'interactive' | 'batch'
+}): Promise<{ key: string; key_id: number; prefix: string }> {
   const res = await apiFetch(`${API_BASE}/api/keys`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

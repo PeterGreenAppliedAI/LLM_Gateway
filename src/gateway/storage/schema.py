@@ -169,6 +169,8 @@ api_keys = Table(
     Column("is_active", Boolean, default=True),
     # Permissions and limits
     Column("rate_limit_rpm", Integer, nullable=True),  # Requests per minute
+    Column("max_concurrent", Integer, nullable=True),  # In-flight requests (D-034)
+    Column("priority", String(16), nullable=True),  # interactive | batch (null = interactive)
     Column("allowed_models", JSON, nullable=True),  # ["ollama/*", "openai/gpt-4"]
     Column("allowed_endpoints", JSON, nullable=True),  # ["gpunode-ollama"]
     # Metadata

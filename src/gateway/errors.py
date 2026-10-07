@@ -30,6 +30,7 @@ class ErrorCode(str, Enum):
     # Rate Limiting
     RATE_LIMIT_EXCEEDED = "rate_limit_exceeded"
     BURST_LIMIT_EXCEEDED = "burst_limit_exceeded"
+    CONCURRENCY_LIMIT_EXCEEDED = "concurrency_limit_exceeded"
 
     # Token Limits
     TOKEN_LIMIT_EXCEEDED = "token_limit_exceeded"

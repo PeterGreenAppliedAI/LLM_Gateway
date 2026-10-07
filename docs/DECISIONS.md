@@ -836,3 +836,83 @@ is observe-only).
   - 10 pool timeouts fail over without opening the circuit;
   - burst and hourly scaling, including the 600 RPM regression;
   - `check()` reporting the scaled limits.
+
+## D-034: Per-key concurrency limits and the batch priority class
+
+- **Status:** Implemented, 2026-10-07
+- **Problem:** Endpoint admission (D-032) protects the GPUs, but not one client from another.
+  An eval script firing 50 parallel requests filled every slot. Interactive users then queued
+  behind it or got 503s, and nothing marked the script's work as able to wait. Per-key RPM
+  doesn't help: 50 requests in one second is within 600 RPM.
+- **Decision, part 1: per-key `max_concurrent`** (config keys, DB keys and keyless traffic):
+  - **More than that many requests in flight → 429 `concurrency_limit_exceeded`**, with
+    `Retry-After: 1`. It is refused immediately, not queued: the client is over *its own*
+    allowance, so 429 is right, and it's what OpenAI does for concurrency.
+  - **Counted per request, not per upstream call.** A fan-out (`n`=4) is one request for the
+    key and takes four endpoint slots. The fan-out's own cap (8) bounds how much of an
+    endpoint one request can occupy.
+  - **Held for the whole response.** The slot lives in a FastAPI yield dependency
+    (`get_inference_auth`). Since FastAPI 0.118 (the project requires 0.124+), its teardown
+    runs *after* the response body is sent, so a stream holds its slot until it ends or the
+    client leaves. This was checked empirically before relying on it.
+  - **Only inference routes take a slot.** Listing routes (`/v1/audio/voices`,
+    `/api/tags`) don't.
+- **Decision, part 2: priority class `interactive` | `batch`:**
+  - **Set on the key** (`priority: batch`). A client can also downgrade a single request with
+    `X-DevMesh-Priority: batch`. The header can only lower priority: a batch key can't claim
+    interactive. Unknown values → 422.
+  - **Batch is served after interactive.** A freed endpoint slot goes to the oldest waiting
+    interactive request first, then the oldest batch request.
+  - **Batch has a capacity reserve against it:** `admission.batch_max_share`, default 0.75.
+    Batch may hold at most that share of an endpoint's slots (at least 1). Ordering alone
+    isn't enough: a batch job already holding *every* slot with long generations can't be
+    preempted, so interactive requests would still wait minutes. The reserve keeps
+    `1 − share` of each endpoint for interactive traffic.
+  - **Batch waits longer for a slot:** `admission.batch_max_queue_wait_seconds`, default
+    60 s vs 5 s. Batch callers want completion, not low latency, so a 503 after 5 s just
+    makes them retry.
+- **Alternatives considered:**
+  - *Separate endpoint pools for batch:* wastes GPUs when there's no batch traffic.
+  - *Strict priority without a reserve:* the starvation case above.
+  - *Weighted fair queuing per key:* fairer among many tenants, but more machinery than a
+    home-lab or small-team gateway needs. Revisit with the shared-state backend.
+- **Per process**, like the rate limiter (the D-010 shared backend covers both).
+- **Dashboard:** the Create Key form has *Requests / minute*, *Max concurrent* and an
+  *Interactive / Batch* toggle with a one-line explanation. The keys table has a *Limits*
+  column (e.g. "600 rpm · 1 concurrent · batch"). DB migration `d8e2f3a91b57` adds
+  `api_keys.max_concurrent` and `api_keys.priority`.
+- **Metrics:** `*_admission_wait_seconds` and `*_admission_rejected_total` now carry a
+  `priority` label.
+- **What didn't work:**
+  - *My first stream-holding test* used httpx's ASGI transport, which buffers the whole
+    response, so it deadlocked waiting for a body the test was holding open. The test now
+    drives the ASGI app directly.
+  - *A batch-share test asserted the wrong threshold.* "At most 2 of 4" means batch may
+    start only while *fewer than 2* are in flight. The code was right; the test's arithmetic
+    wasn't.
+  - *The new key form inherited Vite's centered `#root` text*, the same issue as the PII
+    card. Fixed with `text-left` on the form and the endpoint card.
+- **What works now:**
+  - `tests/test_key_limits.py` (15 tests):
+    - the batch share;
+    - interactive served before older batch waiters;
+    - no handoff into the reserve;
+    - batch overflows past a full share and waits longer;
+    - 429 then recovery;
+    - a stream holding its slot to the end;
+    - keys counted separately;
+    - header downgrade-only and validation;
+    - priority reaching dispatch;
+    - DB keys storing both fields.
+  - Alembic upgrade and downgrade on a fresh SQLite DB.
+  - **End-to-end run** (real gateway + SQLite + dashboard + a 1.5 s fake engine with
+    `max_concurrent: 2`):
+    - a key created in the dashboard with 600 rpm / 1 concurrent / batch shows those limits
+      in the table;
+    - two parallel requests on it → 200 + 429;
+    - five parallel admin requests → 2 × 200, 3 × 503 `capacity_exceeded` with Retry-After;
+      the engine saw a peak concurrency of exactly 2, and the endpoint card read "2/2 busy"
+      mid-burst;
+    - a batch request behind two interactive ones waited 3.0 s and succeeded (an
+      interactive request would have hit 503 at 0.5 s);
+    - a bad priority header → 422.

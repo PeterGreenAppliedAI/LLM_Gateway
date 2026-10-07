@@ -38,6 +38,7 @@ from gateway.routes.dependencies import (
     get_auth,
     get_config,
     get_enforcer,
+    get_inference_auth,
     get_pii_scrubber,
     get_registry,
     resolve_access_scope,
@@ -245,7 +246,7 @@ def _response_headers(upstream: UpstreamMedia) -> dict[str, str]:
 async def create_speech(
     request: Request,
     body: SpeechRequest,
-    auth: Annotated[AuthResult, Depends(get_auth)],
+    auth: Annotated[AuthResult, Depends(get_inference_auth)],
     dispatcher: Annotated[MediaDispatcher, Depends(get_media_dispatcher)],
     enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
@@ -596,7 +597,7 @@ async def _speech_to_text(
 @router.post("/transcriptions")
 async def create_transcription(
     request: Request,
-    auth: Annotated[AuthResult, Depends(get_auth)],
+    auth: Annotated[AuthResult, Depends(get_inference_auth)],
     dispatcher: Annotated[MediaDispatcher, Depends(get_media_dispatcher)],
     enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
@@ -618,7 +619,7 @@ async def create_transcription(
 @router.post("/translations")
 async def create_translation(
     request: Request,
-    auth: Annotated[AuthResult, Depends(get_auth)],
+    auth: Annotated[AuthResult, Depends(get_inference_auth)],
     dispatcher: Annotated[MediaDispatcher, Depends(get_media_dispatcher)],
     enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
