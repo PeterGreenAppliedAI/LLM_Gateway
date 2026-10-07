@@ -242,7 +242,7 @@ For evaluation, `./start-gateway.sh` is all you need. For production:
 - **Reverse proxy** — Put nginx or Caddy in front for TLS termination. The gateway runs HTTP on port 8001.
 - **Backups** — If using SQLite, back up `data/gateway.db`. If PostgreSQL, use `pg_dump` on your schedule.
 - **Log retention** — `GATEWAY_DB_RETENTION_DAYS=90` auto-deletes old audit records. Adjust based on compliance requirements.
-- **Docker Compose** — `docker compose up -d` starts the gateway, dashboard, Prometheus, and Grafana.
+- **Docker Compose** — `GATEWAY_ADMIN_API_KEY=<operator key> docker compose up -d` starts the gateway, dashboard, Prometheus, and Grafana. Put your `gateway.yaml` (with `auth.enabled: true`) in `./config`. The database and audit log live in the `gateway-data` volume, so they survive upgrades and container replacement; back up that volume. Open the dashboard at `http://<host>:5174`: it proxies the API itself, so it works from any machine.
 - **More than one gateway process** — By default rate limits and `max_concurrent` slots are kept per process, so two processes would each allow the full limit. To share them, install the extra (`pip install 'devmesh-gateway[redis]'`; the Docker image already has it) and set `GATEWAY_REDIS_URL`. With Compose: `GATEWAY_REDIS_URL=redis://redis:6379/0 docker compose --profile ha up -d`. A single process needs none of this.
 
 ## Providers

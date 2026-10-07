@@ -11,13 +11,19 @@ services:
       - GATEWAY_LOG_LEVEL=INFO
       - GATEWAY_CONFIG_PATH=/app/config/gateway.yaml
       - GATEWAY_PROVIDERS_CONFIG_PATH=/app/config/providers.yaml
+      # Operator credential for the dashboard and management APIs (D-042).
+      # Required: behind the dashboard's proxy nothing counts as local.
+      - GATEWAY_ADMIN_API_KEY=${GATEWAY_ADMIN_API_KEY:?Set GATEWAY_ADMIN_API_KEY (operator key for the dashboard)}
       # Optional shared state (D-035): set to redis://redis:6379/0 and start
       # with `--profile ha` to share rate limits and slots across replicas
       - GATEWAY_REDIS_URL=${GATEWAY_REDIS_URL:-}
     volumes:
       - ./config:/app/config:ro
+      # Database, audit intent log, budgets, keys (D-044): survives
+      # container replacement and upgrades
+      - gateway-data:/app/data
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -30,12 +36,13 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.dashboard
+      # Same-origin API: nginx in the image proxies /api, /v1, /health and
+      # /metrics to the gateway, so the dashboard works from any browser
+      # (a Docker-internal URL like http://gateway:8000 never resolved there)
       args:
-        VITE_API_URL: http://gateway:8000
+        VITE_API_URL: ""
     ports:
       - "5174:5174"
-    environment:
-      - VITE_API_URL=http://gateway:8000
     restart: unless-stopped
     networks:
       - gateway-network
@@ -89,5 +96,6 @@ networks:
     driver: bridge
 
 volumes:
+  gateway-data:
   prometheus-data:
   grafana-data:

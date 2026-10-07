@@ -1,7 +1,9 @@
 import type { Stats, Request, RequestDetail, Catalog, HealthResponse, SecurityAlert, SecurityStats, SecurityResult, ApiKeyInfo, BudgetConfig, BudgetUsage, SecurityScan, LabelStats, PIIStats, PIIEvent, PIIConfig, MediaEndpoint } from '../types'
 
 // API base URL - gateway server
-export const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8001'
+// Unset: the dev server talks to a local gateway. Empty string: same origin
+// (the Docker image proxies the API behind the dashboard, D-044).
+export const API_BASE = (import.meta.env.VITE_API_URL ?? 'http://localhost:8001').replace(/\/$/, '')
 
 // Gateway API key: entered in the header, kept in localStorage, sent on every request
 const API_KEY_STORAGE = 'gateway_api_key'
