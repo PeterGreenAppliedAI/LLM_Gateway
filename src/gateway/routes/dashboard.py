@@ -15,16 +15,19 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
+from gateway.observability import get_logger
 from gateway.policy import PolicyEnforcer
 from gateway.routes.dependencies import (
     get_audit_logger,
     get_config,
     get_enforcer,
-    require_api_key,
+    require_admin,
 )
+from gateway.security.pii_config import PIIScrubUpdate
 from gateway.storage import AuditLogger
 
 router = APIRouter(tags=["dashboard"])
+logger = get_logger(__name__)
 
 
 # =============================================================================
@@ -54,7 +57,7 @@ class StatsResponse(BaseModel):
 @router.get("/api/stats", response_model=StatsResponse)
 async def get_stats(
     request: Request,
-    _client_id: Annotated[str, Depends(require_api_key)],
+    _client_id: Annotated[str, Depends(require_admin)],
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
     hours: int = 24,
     filter_client: str | None = None,
@@ -113,7 +116,7 @@ class RequestsListResponse(BaseModel):
 @router.get("/api/requests", response_model=RequestsListResponse)
 async def list_requests(
     request: Request,
-    _client_id: Annotated[str, Depends(require_api_key)],
+    _client_id: Annotated[str, Depends(require_admin)],
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
     limit: int = 50,
     offset: int = 0,
@@ -200,7 +203,7 @@ class RequestDetailResponse(BaseModel):
 async def get_request_detail(
     request: Request,
     request_id: str,
-    _client_id: Annotated[str, Depends(require_api_key)],
+    _client_id: Annotated[str, Depends(require_admin)],
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
 ) -> RequestDetailResponse:
     """Get detailed information about a specific request."""
@@ -277,7 +280,7 @@ class ModelsUsageResponse(BaseModel):
 @router.get("/api/models/usage", response_model=ModelsUsageResponse)
 async def get_models_usage(
     request: Request,
-    client_id: Annotated[str, Depends(require_api_key)],
+    client_id: Annotated[str, Depends(require_admin)],
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
     hours: int = 24,
 ) -> ModelsUsageResponse:
@@ -314,7 +317,7 @@ class EndpointsUsageResponse(BaseModel):
 @router.get("/api/endpoints/usage", response_model=EndpointsUsageResponse)
 async def get_endpoints_usage(
     request: Request,
-    client_id: Annotated[str, Depends(require_api_key)],
+    client_id: Annotated[str, Depends(require_admin)],
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
     hours: int = 24,
 ) -> EndpointsUsageResponse:
@@ -350,7 +353,7 @@ class DailyUsageResponse(BaseModel):
 @router.get("/api/usage/daily", response_model=DailyUsageResponse)
 async def get_daily_usage(
     request: Request,
-    client_id: Annotated[str, Depends(require_api_key)],
+    client_id: Annotated[str, Depends(require_admin)],
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
     days: int = 30,
     filter_client: str | None = None,
@@ -370,7 +373,7 @@ async def get_daily_usage(
 @router.post("/api/usage/aggregate")
 async def trigger_aggregation(
     request: Request,
-    client_id: Annotated[str, Depends(require_api_key)],
+    client_id: Annotated[str, Depends(require_admin)],
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
     date: str | None = None,
 ) -> dict[str, Any]:
@@ -403,7 +406,7 @@ async def trigger_aggregation(
 @router.get("/api/budget/config")
 async def budget_config(
     request: Request,
-    _client_id: Annotated[str, Depends(require_api_key)],
+    _client_id: Annotated[str, Depends(require_admin)],
     enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
 ) -> dict:
     """Get token budget configuration, including tier assignments and unclassified models."""
@@ -450,7 +453,7 @@ async def budget_config(
 @router.get("/api/budget/usage")
 async def budget_usage(
     request: Request,
-    _client_id: Annotated[str, Depends(require_api_key)],
+    _client_id: Annotated[str, Depends(require_admin)],
     enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
     key: str | None = None,
 ) -> dict:
@@ -476,9 +479,9 @@ async def budget_usage(
             ],
         }
 
-    # Return all tracked keys
+    # Every key with usage today (this process and, via the database, others)
     keys = []
-    for k, usage in tracker._usage.items():
+    for k in tracker.keys_today():
         state = tracker.get_budget_state(k)
         keys.append(
             {
@@ -487,7 +490,7 @@ async def budget_usage(
                 "tokens_used": state.tokens_used,
                 "tokens_remaining": state.tokens_remaining,
                 "tier_usage": state.tier_usage,
-                "request_count": usage.request_count,
+                "request_count": state.request_count,
                 "resets_at": state.resets_at,
             }
         )
@@ -510,15 +513,24 @@ class TierCreateRequest(BaseModel):
     )
 
 
+async def _save_budget_catalog(request: Request, admin_id: str) -> None:
+    """Persist tiers/assignments so the change survives restarts (D-037)."""
+    sync = getattr(request.app.state, "budget_sync", None)
+    if sync is not None:
+        await sync.save_catalog(admin_id)
+
+
 @router.post("/api/budget/tiers")
 async def create_tier(
+    request: Request,
     body: TierCreateRequest,
-    _client_id: Annotated[str, Depends(require_api_key)],
+    _client_id: Annotated[str, Depends(require_admin)],
     enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
 ) -> dict:
     """Create or update a cost tier at runtime (no restart needed)."""
     tracker = enforcer.token_budget
     is_new = tracker.add_tier(body.name, body.cost_multiplier, body.daily_limit)
+    await _save_budget_catalog(request, _client_id)
 
     return {
         "status": "success",
@@ -531,13 +543,16 @@ async def create_tier(
 
 @router.delete("/api/budget/tiers/{tier_name}")
 async def delete_tier(
+    request: Request,
     tier_name: str,
-    _client_id: Annotated[str, Depends(require_api_key)],
+    _client_id: Annotated[str, Depends(require_admin)],
     enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
 ) -> dict:
     """Remove a cost tier. Fails if models are still assigned to it."""
     tracker = enforcer.token_budget
     removed = tracker.remove_tier(tier_name)
+    if removed:
+        await _save_budget_catalog(request, _client_id)
 
     if not removed:
         if tier_name not in tracker.tiers:
@@ -561,12 +576,14 @@ class ModelAssignmentRequest(BaseModel):
 async def assign_model_tier(
     request: Request,
     body: ModelAssignmentRequest,
-    _client_id: Annotated[str, Depends(require_api_key)],
+    _client_id: Annotated[str, Depends(require_admin)],
     enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
 ) -> dict:
     """Assign a model to a cost tier at runtime (no restart needed)."""
     tracker = enforcer.token_budget
     success = tracker.assign_model(body.model, body.tier)
+    if success:
+        await _save_budget_catalog(request, _client_id)
 
     if not success:
         available = list(tracker.tiers.keys())
@@ -585,13 +602,16 @@ async def assign_model_tier(
 
 @router.delete("/api/budget/assignments/{model_name:path}")
 async def unassign_model_tier(
+    request: Request,
     model_name: str,
-    _client_id: Annotated[str, Depends(require_api_key)],
+    _client_id: Annotated[str, Depends(require_admin)],
     enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
 ) -> dict:
     """Remove a model's tier assignment (reverts to default cost multiplier)."""
     tracker = enforcer.token_budget
     existed = tracker.unassign_model(model_name)
+    if existed:
+        await _save_budget_catalog(request, _client_id)
 
     return {
         "status": "success" if existed else "not_found",
@@ -607,7 +627,7 @@ async def unassign_model_tier(
 
 @router.get("/api/pii/stats")
 async def pii_stats(
-    _client_id: Annotated[str, Depends(require_api_key)],
+    _client_id: Annotated[str, Depends(require_admin)],
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
     hours: int = 24,
 ) -> dict:
@@ -619,9 +639,109 @@ async def pii_stats(
     return {"enabled": True, **stats}
 
 
+def _pii_config_view(request: Request) -> dict:
+    """Current scrubbing policy as the dashboard shows it."""
+    from gateway.security.pii_config import PII_SCAN_ROUTES
+
+    detection_enabled = getattr(request.app.state, "pii_scrubber", None) is not None
+    config = getattr(request.app.state, "pii_settings", None)
+    return {
+        "detection_enabled": detection_enabled,
+        "scrub_enabled": bool(config and config.scrub_enabled),
+        "scrub_routes": list(config.scrub_routes) if config else [],
+        "available_routes": list(PII_SCAN_ROUTES),
+        "source": getattr(config, "source", "environment"),
+        "updated_at": config.updated_at.isoformat()
+        if getattr(config, "updated_at", None)
+        else None,
+        "updated_by": getattr(config, "updated_by", None),
+        "persisted": getattr(request.app.state, "runtime_settings", None) is not None,
+    }
+
+
+@router.get("/api/pii/config")
+async def get_pii_config(
+    request: Request,
+    _client_id: Annotated[str, Depends(require_admin)],
+) -> dict:
+    """PII scrubbing policy in effect. scrub_routes empty = all routes."""
+    return _pii_config_view(request)
+
+
+@router.put("/api/pii/config")
+async def update_pii_config(
+    request: Request,
+    body: PIIScrubUpdate,
+    admin_id: Annotated[str, Depends(require_admin)],
+) -> dict:
+    """Change PII scrubbing at runtime (admin only).
+
+    Takes effect on the next request and is saved, so it survives restarts
+    and overrides the GATEWAY_PII_SCRUB_* environment defaults. Detection
+    itself stays an environment setting.
+    """
+    from gateway.errors import ValidationError
+    from gateway.security.pii_config import SETTING_KEY, PIIScrubConfig
+
+    if getattr(request.app.state, "pii_scrubber", None) is None:
+        raise ValidationError(
+            message="PII detection is disabled (GATEWAY_PII_ENABLED=false); scrubbing needs "
+            "detection, which is set by environment variable, not the dashboard"
+        )
+    update = body
+    previous = request.app.state.pii_settings
+    store = getattr(request.app.state, "runtime_settings", None)
+    updated_at = None
+    if store is not None:
+        # Save first: if this fails, the running policy stays unchanged
+        updated_at = await store.set(SETTING_KEY, update.model_dump(), updated_by=admin_id)
+
+    request.app.state.pii_settings = PIIScrubConfig(
+        scrub_enabled=update.scrub_enabled,
+        scrub_routes=update.scrub_routes,
+        source="dashboard",
+        updated_at=updated_at,
+        updated_by=admin_id,
+    )
+    logger.warning(
+        "PII scrubbing policy changed",
+        changed_by=admin_id,
+        scrub_enabled_before=previous.scrub_enabled,
+        scrub_enabled=update.scrub_enabled,
+        scrub_routes_before=list(previous.scrub_routes) or ["all"],
+        scrub_routes=update.scrub_routes or ["all"],
+        persisted=store is not None,
+    )
+    return _pii_config_view(request)
+
+
+@router.get("/api/media/catalog")
+async def media_catalog(
+    request: Request,
+    _client_id: Annotated[str, Depends(require_admin)],
+) -> dict:
+    """Voice/media endpoints with their discovered models, voices, profile
+    and setting ranges: everything the dashboard's media controls need."""
+    catalog = getattr(request.app.state, "media_catalog", None)
+    return {"endpoints": catalog.snapshot() if catalog else []}
+
+
+@router.post("/api/media/catalog/refresh")
+async def refresh_media_catalog(
+    request: Request,
+    _client_id: Annotated[str, Depends(require_admin)],
+) -> dict:
+    """Re-discover voices and models now instead of waiting for the next poll."""
+    catalog = getattr(request.app.state, "media_catalog", None)
+    if catalog is None:
+        return {"endpoints": []}
+    await catalog.refresh()
+    return {"endpoints": catalog.snapshot()}
+
+
 @router.get("/api/pii/events")
 async def pii_events(
-    _auth_client_id: Annotated[str, Depends(require_api_key)],
+    _auth_client_id: Annotated[str, Depends(require_admin)],
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
     limit: int = 50,
     pii_type: str | None = None,

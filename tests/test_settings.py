@@ -83,3 +83,9 @@ class TestSettings:
 
         assert settings.config_path == "/custom/config.yaml"
         assert settings.providers_config_path == "/custom/providers.yaml"
+
+
+def test_retention_zero_means_keep(monkeypatch):
+    """The documented "0 = no cleanup" used to fail validation (ge=1)."""
+    monkeypatch.setenv("GATEWAY_DB_RETENTION_DAYS", "0")
+    assert Settings().db.retention_days == 0

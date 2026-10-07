@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 
 from gateway.routes.dependencies import (
     get_security_analyzer,
-    require_api_key,
+    require_admin,
 )
 from gateway.security import AsyncSecurityAnalyzer
 from gateway.storage.security_store import SecurityScanStore
@@ -44,7 +44,7 @@ class SecurityAlertsResponse(BaseModel):
 @router.get("/api/security/alerts", response_model=SecurityAlertsResponse)
 async def get_security_alerts(
     request: Request,
-    _client_id: Annotated[str, Depends(require_api_key)],
+    _client_id: Annotated[str, Depends(require_admin)],
     security_analyzer: Annotated[AsyncSecurityAnalyzer | None, Depends(get_security_analyzer)],
     limit: int = 100,
 ) -> SecurityAlertsResponse:
@@ -88,7 +88,7 @@ class SecurityStatsResponse(BaseModel):
 @router.get("/api/security/stats", response_model=SecurityStatsResponse)
 async def get_security_stats(
     request: Request,
-    _client_id: Annotated[str, Depends(require_api_key)],
+    _client_id: Annotated[str, Depends(require_admin)],
     security_analyzer: Annotated[AsyncSecurityAnalyzer | None, Depends(get_security_analyzer)],
 ) -> SecurityStatsResponse:
     """Get security analyzer statistics."""
@@ -109,7 +109,7 @@ async def get_security_stats(
 @router.delete("/api/security/alerts")
 async def clear_security_alerts(
     request: Request,
-    client_id: Annotated[str, Depends(require_api_key)],
+    client_id: Annotated[str, Depends(require_admin)],
     security_analyzer: Annotated[AsyncSecurityAnalyzer | None, Depends(get_security_analyzer)],
 ) -> dict[str, Any]:
     """Clear all security alerts from memory."""
@@ -152,7 +152,7 @@ class SecurityResultsResponse(BaseModel):
 @router.get("/api/security/results", response_model=SecurityResultsResponse)
 async def get_security_results(
     request: Request,
-    _client_id: Annotated[str, Depends(require_api_key)],
+    _client_id: Annotated[str, Depends(require_admin)],
     security_analyzer: Annotated[AsyncSecurityAnalyzer | None, Depends(get_security_analyzer)],
     limit: int = 50,
     guard_only: bool = False,
@@ -265,7 +265,7 @@ class ScansListResponse(BaseModel):
 @router.get("/api/security/scans", response_model=ScansListResponse)
 async def list_security_scans(
     request: Request,
-    _client_id: Annotated[str, Depends(require_api_key)],
+    _client_id: Annotated[str, Depends(require_admin)],
     limit: int = 50,
     offset: int = 0,
     label: str | None = None,
@@ -335,7 +335,7 @@ async def label_security_scan(
     request: Request,
     request_id: str,
     body: LabelRequest,
-    client_id: Annotated[str, Depends(require_api_key)],
+    client_id: Annotated[str, Depends(require_admin)],
 ) -> dict[str, Any]:
     """Apply a human label to a security scan for training data."""
     scan_store = _get_scan_store(request)
@@ -377,7 +377,7 @@ class BulkLabelRequest(BaseModel):
 async def bulk_label_scans(
     request: Request,
     body: BulkLabelRequest,
-    client_id: Annotated[str, Depends(require_api_key)],
+    client_id: Annotated[str, Depends(require_admin)],
 ) -> dict[str, Any]:
     """Bulk label multiple security scans."""
     scan_store = _get_scan_store(request)
@@ -413,7 +413,7 @@ async def bulk_label_scans(
 @router.get("/api/security/scans/stats")
 async def get_scan_label_stats(
     request: Request,
-    _client_id: Annotated[str, Depends(require_api_key)],
+    _client_id: Annotated[str, Depends(require_admin)],
 ) -> dict[str, Any]:
     """Get labeling progress statistics."""
     scan_store = _get_scan_store(request)
@@ -426,7 +426,7 @@ async def get_scan_label_stats(
 @router.get("/api/security/training-data")
 async def export_training_data(
     request: Request,
-    _client_id: Annotated[str, Depends(require_api_key)],
+    _client_id: Annotated[str, Depends(require_admin)],
     format: str = "llama_guard",
     labeled_only: bool = True,
     limit: int = 10000,

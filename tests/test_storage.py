@@ -160,14 +160,6 @@ class TestAuditLogger:
     """Tests for AuditLogger class."""
 
     @pytest.fixture
-    async def db_engine(self):
-        """Create in-memory database for testing."""
-        config = DatabaseConfig(url="sqlite:///:memory:", create_tables=True)
-        engine = await create_async_db_engine(config)
-        yield engine
-        await engine.dispose()
-
-    @pytest.fixture
     def audit_logger(self, db_engine):
         """Create AuditLogger instance."""
         return AuditLogger(
@@ -328,17 +320,29 @@ class TestAuditLogger:
         assert row.request_body is None
         assert row.response_body is None
 
+    @pytest.mark.asyncio
+    async def test_bodies_redacted_before_storage(self, audit_logger):
+        """Flag-only PII mode must still never persist raw PII."""
+        from gateway.security.pii import PIIScrubber
+
+        audit_logger.body_redactor = PIIScrubber().redact
+        await audit_logger.log_request(
+            request_id="req-pii",
+            client_id="app",
+            task="chat",
+            model="phi4:14b",
+            endpoint="gpu-1",
+            status="success",
+            request_body={"messages": [{"role": "user", "content": "SSN 123-45-6789"}]},
+            response_body={"content": "Got it: 123-45-6789"},
+        )
+        stored = await audit_logger.get_request_by_id("req-pii")
+        assert stored["request_body"] == {"messages": [{"role": "user", "content": "SSN [SSN]"}]}
+        assert stored["response_body"] == {"content": "Got it: [SSN]"}
+
 
 class TestAuditLoggerQueries:
     """Tests for AuditLogger query methods."""
-
-    @pytest.fixture
-    async def db_engine(self):
-        """Create in-memory database for testing."""
-        config = DatabaseConfig(url="sqlite:///:memory:", create_tables=True)
-        engine = await create_async_db_engine(config)
-        yield engine
-        await engine.dispose()
 
     @pytest.fixture
     def audit_logger(self, db_engine):
@@ -424,14 +428,6 @@ class TestAuditLoggerQueries:
 
 class TestAuditLoggerStats:
     """Tests for AuditLogger stats methods."""
-
-    @pytest.fixture
-    async def db_engine(self):
-        """Create in-memory database for testing."""
-        config = DatabaseConfig(url="sqlite:///:memory:", create_tables=True)
-        engine = await create_async_db_engine(config)
-        yield engine
-        await engine.dispose()
 
     @pytest.fixture
     def audit_logger(self, db_engine):

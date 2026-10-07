@@ -30,6 +30,7 @@ class ErrorCode(str, Enum):
     # Rate Limiting
     RATE_LIMIT_EXCEEDED = "rate_limit_exceeded"
     BURST_LIMIT_EXCEEDED = "burst_limit_exceeded"
+    CONCURRENCY_LIMIT_EXCEEDED = "concurrency_limit_exceeded"
 
     # Token Limits
     TOKEN_LIMIT_EXCEEDED = "token_limit_exceeded"
@@ -40,6 +41,9 @@ class ErrorCode(str, Enum):
     PROVIDER_NOT_ALLOWED = "provider_not_allowed"
     MODEL_NOT_ALLOWED = "model_not_allowed"
     ENDPOINT_NOT_ALLOWED = "endpoint_not_allowed"
+    ENVIRONMENT_NOT_ALLOWED = "environment_not_allowed"
+    NETWORK_NOT_ALLOWED = "network_not_allowed"
+    ADMIN_KEY_REQUIRED = "admin_key_required"
     TOKEN_BUDGET_EXCEEDED = "token_budget_exceeded"
 
     # Dispatch & Routing
@@ -47,6 +51,7 @@ class ErrorCode(str, Enum):
     PROVIDER_NOT_FOUND = "provider_not_found"
     PROVIDER_UNAVAILABLE = "provider_unavailable"
     ALL_PROVIDERS_UNAVAILABLE = "all_providers_unavailable"
+    CAPACITY_EXCEEDED = "capacity_exceeded"
     DISPATCH_ERROR = "dispatch_error"
     AMBIGUOUS_MODEL = "ambiguous_model"
     MODEL_NOT_FOUND = "model_not_found"
@@ -337,6 +342,21 @@ class AllProvidersUnavailableError(DispatchError):
         )
 
 
+class CapacityExceededError(DispatchError):
+    """Every candidate endpoint stayed at max_concurrent for the whole queue wait."""
+
+    def __init__(self, endpoints: list[str], waited_seconds: float, retry_after: float):
+        super().__init__(
+            message=(
+                f"All endpoints for this request are at capacity "
+                f"({', '.join(endpoints)}); waited {waited_seconds:.1f}s"
+            ),
+            code=ErrorCode.CAPACITY_EXCEEDED,
+            details={"endpoints": endpoints, "waited_seconds": round(waited_seconds, 2)},
+            retry_after=retry_after,
+        )
+
+
 class AmbiguousModelError(DispatchError):
     """Model is available on multiple endpoints with no default configured."""
 
@@ -392,6 +412,18 @@ class ValidationError(GatewayError):
             code=ErrorCode.VALIDATION_ERROR,
             category=ErrorCategory.VALIDATION,
             details=details,
+        )
+
+
+class PayloadTooLargeError(GatewayError):
+    """Upload exceeds the gateway's size limit (HTTP 413)."""
+
+    def __init__(self, message: str):
+        super().__init__(
+            message=message,
+            code=ErrorCode.VALIDATION_ERROR,
+            category=ErrorCategory.VALIDATION,
+            http_status=413,
         )
 
 

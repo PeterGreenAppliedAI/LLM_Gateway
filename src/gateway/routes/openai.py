@@ -26,8 +26,8 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 
-from gateway.dispatch import Dispatcher
-from gateway.errors import DispatchError, StreamError
+from gateway.dispatch import Dispatcher, DispatchResult
+from gateway.errors import StreamError
 from gateway.models.common import TaskType
 from gateway.models.openai import (
     OpenAIChatRequest,
@@ -35,26 +35,36 @@ from gateway.models.openai import (
     OpenAIChatStreamResponse,
     OpenAICompletionRequest,
     OpenAICompletionResponse,
+    OpenAICompletionStreamResponse,
     OpenAIEmbeddingRequest,
     OpenAIEmbeddingResponse,
 )
 from gateway.observability import get_logger, get_metrics
 from gateway.observability.logging import clear_request_context
 from gateway.policy import PolicyEnforcer, PolicyViolation
+from gateway.routes.content_parts import (
+    check_content_parts,
+    redact_media,
+    sanitize_content,
+    text_only,
+)
 from gateway.routes.dependencies import (
     AuthResult,
     get_audit_logger,
-    get_auth,
     get_dispatcher,
     get_enforcer,
+    get_inference_auth,
     get_pii_scrubber,
     get_sanitizer,
     get_security_analyzer,
+    resolve_access_scope,
     run_unless_disconnected,
     setup_request_context,
     should_scrub_pii,
     translate_policy_violation,
 )
+from gateway.routes.fanout import check_choice_count, dispatch_choices
+from gateway.routes.stream_recorder import StreamRecorder
 from gateway.security import AsyncSecurityAnalyzer, PIIScrubber, Sanitizer
 from gateway.storage import AuditLogger
 
@@ -73,6 +83,45 @@ def _audit_response_body(response) -> dict:
     return body
 
 
+def _audit_choices_body(results: list[DispatchResult]) -> dict:
+    """Audit output for one or more choices (one row per client request)."""
+    if len(results) == 1:
+        return _audit_response_body(results[0].response)
+    return {
+        "choices": [
+            {**_audit_response_body(r.response), "endpoint": r.provider_used} for r in results
+        ]
+    }
+
+
+def _summed_usage(results: list[DispatchResult]) -> tuple[int, int]:
+    """(prompt_tokens, completion_tokens) across all choices."""
+    return (
+        sum(r.response.usage.prompt_tokens or 0 for r in results),
+        sum(r.response.usage.completion_tokens or 0 for r in results),
+    )
+
+
+def _endpoints_used(results: list[DispatchResult]) -> str:
+    """Endpoint column for the audit row; choices may land on different endpoints."""
+    return ",".join(dict.fromkeys(r.provider_used for r in results))[:64]
+
+
+def _record_choice_metrics(results: list[DispatchResult], ctx, task: str) -> None:
+    """One metrics sample per upstream generation, so per-endpoint metrics stay true."""
+    for r in results:
+        metrics.record_request(
+            provider=r.provider_used,
+            model=r.response.model,
+            task=task,
+            status="success",
+            latency_ms=(ctx.total_latency_ms if len(results) == 1 else r.response.latency_ms) or 0,
+            prompt_tokens=r.response.usage.prompt_tokens,
+            completion_tokens=r.response.usage.completion_tokens,
+            tokens_per_second=ctx.tokens_per_second if len(results) == 1 else None,
+        )
+
+
 # =============================================================================
 # Chat Completions
 # =============================================================================
@@ -82,7 +131,7 @@ def _audit_response_body(response) -> dict:
 async def chat_completions(
     request: Request,
     body: OpenAIChatRequest,
-    auth: Annotated[AuthResult, Depends(get_auth)],
+    auth: Annotated[AuthResult, Depends(get_inference_auth)],
     dispatcher: Annotated[Dispatcher, Depends(get_dispatcher)],
     enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
     pii_scrubber: Annotated[PIIScrubber | None, Depends(get_pii_scrubber)],
@@ -107,15 +156,16 @@ async def chat_completions(
         task="chat",
     )
 
-    # Security: Sanitize message content (removes invisible Unicode chars)
+    # Security: Sanitize message content (removes invisible Unicode chars).
+    # Content-part messages keep their structure: text parts are sanitized in
+    # place and inline images pass through (D-011). Flattening them to a
+    # string here used to drop every image silently.
     sanitized_messages = []
     for msg in body.messages:
-        text = msg.content_as_str()
-        if text:
-            result = sanitizer.sanitize(text)
-            sanitized_messages.append({"role": msg.role, "content": result.sanitized})
-        else:
-            sanitized_messages.append({"role": msg.role, "content": ""})
+        check_content_parts(msg.content)
+        sanitized_messages.append(
+            {"role": msg.role, "content": sanitize_content(sanitizer, msg.content)}
+        )
 
     # PII detection (always flags) + optional scrubbing (per-route)
     if pii_scrubber:
@@ -149,7 +199,7 @@ async def chat_completions(
             request_id=ctx.request_id,
             client_id=client_id,
             model=body.model,
-            messages=sanitized_messages,
+            messages=text_only(sanitized_messages),
             source_ip=request.client.host if request.client else None,
         )
 
@@ -161,21 +211,19 @@ async def chat_completions(
 
     # Convert to internal format
     internal_request = body.to_internal(client_id=client_id, task=TaskType.CHAT)
+    # One ID end to end: the response's id and the audit row share it, so a
+    # client's chatcmpl-/cmpl- id finds its request in the audit trail
+    internal_request.request_id = ctx.request_id
+    check_choice_count(body.n, stream=body.stream)
 
-    # Force non-streaming when tools are present (streaming tool call format
-    # requires complex delta fragmentation; non-streaming works with OpenAI SDK)
-    if body.tools and body.stream:
-        internal_request = internal_request.model_copy(update={"stream": False})
-
-    # Apply per-client target endpoint if configured
-    if auth.target_endpoint:
-        internal_request = internal_request.model_copy(
-            update={"preferred_provider": auth.target_endpoint}
-        )
+    # Apply per-key and per-environment routing restrictions
+    internal_request = internal_request.model_copy(
+        update=await resolve_access_scope(request, auth, internal_request.model)
+    )
 
     # Check policies - raises domain errors on violation
     try:
-        enforcer.enforce(
+        await enforcer.enforce(
             internal_request,
             rate_limit_key=auth.client_id,
             allowed_models=auth.allowed_models,
@@ -185,48 +233,49 @@ async def chat_completions(
     except PolicyViolation as e:
         translate_policy_violation(e)
 
-    # Handle streaming (skip for tool calls - return non-streaming JSON instead)
-    if body.stream and not body.tools:
+    # Handle streaming (tool calls stream too, as complete calls per delta)
+    if body.stream:
         return await _stream_chat_response(
-            dispatcher, internal_request, body.model, ctx, audit_logger
+            request,
+            dispatcher,
+            internal_request,
+            body.model,
+            ctx,
+            audit_logger,
+            enforcer=enforcer,
+            request_body={
+                "messages": [
+                    redact_media(m.model_dump(exclude_none=True))
+                    for m in internal_request.messages or []
+                ],
+                "response_format": body.response_format,
+                "tool_names": [t.get("function", {}).get("name") for t in (body.tools or [])],
+            },
         )
 
-    # Non-streaming: dispatch and wait
-    # DispatchError propagates to exception handler
+    # Non-streaming: one upstream generation per requested choice (n),
+    # run concurrently. DispatchError propagates to exception handler.
     with metrics.track_request("dispatch"):
-        result = await run_unless_disconnected(request, dispatcher.dispatch(internal_request))
+        results = await dispatch_choices(request, dispatcher, [internal_request] * body.n)
 
-    # Record metrics
-    ctx.record_complete(
-        prompt_tokens=result.response.usage.prompt_tokens,
-        completion_tokens=result.response.usage.completion_tokens,
-    )
-    metrics.record_request(
-        provider=result.provider_used,
-        model=result.response.model,
-        task="chat",
-        status="success",
-        latency_ms=ctx.total_latency_ms or 0,
-        prompt_tokens=result.response.usage.prompt_tokens,
-        completion_tokens=result.response.usage.completion_tokens,
-        tokens_per_second=ctx.tokens_per_second,
-    )
+    prompt_tokens, completion_tokens = _summed_usage(results)
+    ctx.record_complete(prompt_tokens=prompt_tokens, completion_tokens=completion_tokens)
+    _record_choice_metrics(results, ctx, "chat")
 
     # Record token usage for daily budget tracking
-    total_tokens = (result.response.usage.prompt_tokens or 0) + (
-        result.response.usage.completion_tokens or 0
-    )
-    if total_tokens > 0:
-        enforcer.record_token_usage(client_id, result.response.model, total_tokens)
+    if prompt_tokens + completion_tokens > 0:
+        enforcer.record_token_usage(
+            client_id, results[0].response.model, prompt_tokens + completion_tokens
+        )
 
-    # Audit log the request
+    # Audit log the request (one row, however many choices)
     if audit_logger:
         await audit_logger.log_request(
             request_id=ctx.request_id,
             client_id=client_id,
             task="chat",
-            model=result.response.model,
-            endpoint=result.provider_used,
+            model=results[0].response.model,
+            endpoint=_endpoints_used(results),
             status="success",
             user_id=body.user,
             stream=False,
@@ -234,161 +283,90 @@ async def chat_completions(
             temperature=body.temperature,
             latency_ms=ctx.total_latency_ms,
             tokens_per_second=ctx.tokens_per_second,
-            prompt_tokens=result.response.usage.prompt_tokens,
-            completion_tokens=result.response.usage.completion_tokens,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
             request_body={
                 "messages": [
-                    m.model_dump(exclude_none=True) for m in internal_request.messages or []
+                    redact_media(m.model_dump(exclude_none=True))
+                    for m in internal_request.messages or []
                 ],
                 "response_format": body.response_format,
                 "tool_names": [t.get("function", {}).get("name") for t in (body.tools or [])],
+                "n": body.n,
             },
-            response_body=_audit_response_body(result.response),
+            response_body=_audit_choices_body(results),
         )
 
     # Convert to OpenAI format
-    openai_response = OpenAIChatResponse.from_internal(result.response)
-
-    # If client requested streaming + tools, wrap the complete response in SSE
-    # so the OpenAI SDK's stream parser is satisfied
-    if body.stream and body.tools:
-        # Rewrite to streaming chunk format: object → chunk, message → delta
-        d = openai_response.model_dump()
-        d["object"] = "chat.completion.chunk"
-        for choice in d.get("choices", []):
-            if "message" in choice:
-                choice["delta"] = choice.pop("message")
-        response_json = json.dumps(d)
-        sse_body = f"data: {response_json}\n\ndata: [DONE]\n\n"
-        return StreamingResponse(
-            iter([sse_body.encode()]),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no",
-            },
-        )
-
-    return openai_response
+    return OpenAIChatResponse.from_internal_many([r.response for r in results])
 
 
 async def _stream_chat_response(
+    request: Request,
     dispatcher: Dispatcher,
     internal_request,
     model: str,
     ctx,
     audit_logger: AuditLogger | None,
+    enforcer: PolicyEnforcer | None = None,
+    request_body: dict | None = None,
 ) -> StreamingResponse:
     """Create streaming response for chat completions.
 
-    Note: Streaming errors are sent as SSE error events rather than
-    raising exceptions, since the HTTP response has already started.
+    The endpoint is chosen and its first chunk received before the response
+    starts, so failures up to that point raise and return a real HTTP error.
+    Failures after the first byte are sent as an SSE error event.
     """
+    recorder = StreamRecorder(
+        ctx=ctx,
+        internal_request=internal_request,
+        model=model,
+        task="chat",
+        audit_logger=audit_logger,
+        enforcer=enforcer,
+        request_body=request_body,
+    )
+    stream = await recorder.start(request, dispatcher)
 
     async def generate() -> AsyncGenerator[bytes, None]:
-        provider_name = None
-        final_prompt_tokens = 0
-        final_completion_tokens = 0
-        full_content = ""
-
+        tool_calls_sent = 0
         try:
-            provider_name, stream = await dispatcher.dispatch_stream(internal_request)
-
-            first_chunk = True
             async for chunk in stream:
-                if first_chunk:
-                    ctx.record_first_token()
-                    first_chunk = False
-                full_content += chunk.delta or ""
+                recorder.observe(chunk)
 
-                # Convert to OpenAI streaming format
-                response = OpenAIChatStreamResponse.from_chunk(chunk, model)
+                if recorder.is_error(chunk):
+                    # Mid-stream provider failure: OpenAI's own wire format
+                    # for this is an error object in a data frame
+                    error = StreamError(message=chunk.error or "Stream interrupted")
+                    yield f"data: {json.dumps(error.to_dict())}\n\n".encode()
+                    await recorder.finish_error_chunk(chunk)
+                    break
+
+                finish_reason = None
+                if chunk.finish_reason and (chunk.tool_calls or tool_calls_sent):
+                    # Ollama reports "stop" after tool calls; OpenAI clients
+                    # key off "tool_calls" to run them
+                    finish_reason = "tool_calls"
+                response = OpenAIChatStreamResponse.from_chunk(
+                    chunk, model, tool_call_start=tool_calls_sent, finish_reason=finish_reason
+                )
+                tool_calls_sent += len(chunk.tool_calls or [])
                 yield f"data: {response.model_dump_json()}\n\n".encode()
 
-                # If this is the final chunk, record completion
                 if chunk.finish_reason:
-                    final_prompt_tokens = chunk.usage.prompt_tokens if chunk.usage else 0
-                    final_completion_tokens = chunk.usage.completion_tokens if chunk.usage else 0
-                    ctx.record_complete(
-                        prompt_tokens=final_prompt_tokens,
-                        completion_tokens=final_completion_tokens,
-                    )
-                    metrics.record_request(
-                        provider=provider_name,
-                        model=model,
-                        task="chat",
-                        status="success",
-                        latency_ms=ctx.total_latency_ms or 0,
-                        time_to_first_token_ms=ctx.time_to_first_token_ms,
-                        tokens_per_second=ctx.tokens_per_second,
-                    )
-
-                    # Audit log for streaming
-                    if audit_logger and provider_name:
-                        await audit_logger.log_request(
-                            request_id=ctx.request_id,
-                            client_id=internal_request.client_id,
-                            task="chat",
-                            model=model,
-                            endpoint=provider_name,
-                            status="success",
-                            user_id=internal_request.user_id,
-                            stream=True,
-                            max_tokens=internal_request.max_tokens,
-                            temperature=internal_request.temperature,
-                            latency_ms=ctx.total_latency_ms,
-                            time_to_first_token_ms=ctx.time_to_first_token_ms,
-                            tokens_per_second=ctx.tokens_per_second,
-                            prompt_tokens=final_prompt_tokens,
-                            completion_tokens=final_completion_tokens,
-                            response_body={"content": full_content},
-                        )
+                    await recorder.finish()
 
             # Send [DONE] marker
             yield b"data: [DONE]\n\n"
 
-        except DispatchError as e:
-            # For streaming, send error as SSE event
-            ctx.record_error(e.code.value, str(e))
-            error_response = e.to_dict()
-            yield f"data: {json.dumps(error_response)}\n\n".encode()
-
-            # Audit log error
-            if audit_logger:
-                await audit_logger.log_request(
-                    request_id=ctx.request_id,
-                    client_id=internal_request.client_id,
-                    task="chat",
-                    model=model,
-                    endpoint=provider_name or "unknown",
-                    status="error",
-                    stream=True,
-                    error_code=e.code.value,
-                    error_message=str(e),
-                )
-
         except Exception as e:
             # Wrap unexpected errors
-            ctx.record_error("stream_error", str(e))
             logger.exception("Error in chat stream")
             stream_error = StreamError(message="Stream interrupted")
             yield f"data: {json.dumps(stream_error.to_dict())}\n\n".encode()
-
-            # Audit log error
-            if audit_logger:
-                await audit_logger.log_request(
-                    request_id=ctx.request_id,
-                    client_id=internal_request.client_id,
-                    task="chat",
-                    model=model,
-                    endpoint=provider_name or "unknown",
-                    status="error",
-                    stream=True,
-                    error_code="stream_error",
-                    error_message=str(e),
-                )
+            await recorder.finish(status="error", error_code="stream_error", error_message=str(e))
         finally:
+            await recorder.finish_disconnected(stream)
             clear_request_context()
 
     return StreamingResponse(
@@ -411,7 +389,7 @@ async def _stream_chat_response(
 async def completions(
     request: Request,
     body: OpenAICompletionRequest,
-    auth: Annotated[AuthResult, Depends(get_auth)],
+    auth: Annotated[AuthResult, Depends(get_inference_auth)],
     dispatcher: Annotated[Dispatcher, Depends(get_dispatcher)],
     enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
     pii_scrubber: Annotated[PIIScrubber | None, Depends(get_pii_scrubber)],
@@ -432,6 +410,10 @@ async def completions(
         model=body.model,
         task="completion",
     )
+
+    # One choice per prompt per n. Validate first: to_internal reads prompt[0]
+    prompt_count = 1 if isinstance(body.prompt, str) else len(body.prompt)
+    check_choice_count(prompt_count * body.n, stream=body.stream)
 
     # Security: Sanitize prompt content
     sanitized_prompt = body.prompt
@@ -464,7 +446,7 @@ async def completions(
                         pii_results=[pii_result],
                         was_scrubbed=scrub,
                     )
-                if scrub and pii_result.scrubbed_text:
+                if scrub and pii_result.scrubbed_text is not None:
                     sanitized_prompt = pii_result.scrubbed_text
         elif isinstance(sanitized_prompt, list):
             all_pii_results = []
@@ -479,7 +461,7 @@ async def completions(
                         pii_count=pii_result.detection_count,
                         scrubbed=scrub,
                     )
-                    if scrub and pii_result.scrubbed_text:
+                    if scrub and pii_result.scrubbed_text is not None:
                         sanitized_prompt[idx] = pii_result.scrubbed_text
             if all_pii_results and audit_logger:
                 await audit_logger.log_pii_events(
@@ -507,12 +489,14 @@ async def completions(
 
     # Convert to internal format
     internal_request = body.to_internal(client_id=client_id, task=TaskType.COMPLETION)
+    # One ID end to end: the response's id and the audit row share it, so a
+    # client's chatcmpl-/cmpl- id finds its request in the audit trail
+    internal_request.request_id = ctx.request_id
 
-    # Apply per-client target endpoint if configured
-    if auth.target_endpoint:
-        internal_request = internal_request.model_copy(
-            update={"preferred_provider": auth.target_endpoint}
-        )
+    # Apply per-key and per-environment routing restrictions
+    internal_request = internal_request.model_copy(
+        update=await resolve_access_scope(request, auth, internal_request.model)
+    )
 
     # Queue-and-drain instead of 429: embedding bursts wait for rate-limit
     # headroom (bounded); other policy violations still fail immediately
@@ -536,41 +520,50 @@ async def completions(
     except PolicyViolation as e:
         translate_policy_violation(e)
 
-    # Dispatch request - DispatchError propagates to exception handler
-    with metrics.track_request("dispatch"):
-        result = await run_unless_disconnected(request, dispatcher.dispatch(internal_request))
+    # The sanitized/scrubbed prompts are what the model gets (body.prompt is
+    # the raw client input; before 0ec8d7b it was sent as-is)
+    prompts = [sanitized_prompt] if isinstance(sanitized_prompt, str) else list(sanitized_prompt)
 
-    # Record metrics
-    ctx.record_complete(
-        prompt_tokens=result.response.usage.prompt_tokens,
-        completion_tokens=result.response.usage.completion_tokens,
-    )
-    metrics.record_request(
-        provider=result.provider_used,
-        model=result.response.model,
-        task="completion",
-        status="success",
-        latency_ms=ctx.total_latency_ms or 0,
-        prompt_tokens=result.response.usage.prompt_tokens,
-        completion_tokens=result.response.usage.completion_tokens,
-        tokens_per_second=ctx.tokens_per_second,
-    )
+    if body.stream:
+        return await _stream_completion_response(
+            request,
+            dispatcher,
+            internal_request.model_copy(update={"prompt": prompts[0], "stream": True}),
+            body.model,
+            ctx,
+            audit_logger,
+            enforcer=enforcer,
+            request_body={"prompt": prompts[0]},
+        )
+
+    # One upstream generation per prompt per n, run concurrently and returned
+    # in OpenAI order (prompt-major). Before, extra prompts were dropped.
+    choice_requests = [
+        internal_request.model_copy(update={"prompt": prompt})
+        for prompt in prompts
+        for _ in range(body.n)
+    ]
+    with metrics.track_request("dispatch"):
+        results = await dispatch_choices(request, dispatcher, choice_requests)
+
+    prompt_tokens, completion_tokens = _summed_usage(results)
+    ctx.record_complete(prompt_tokens=prompt_tokens, completion_tokens=completion_tokens)
+    _record_choice_metrics(results, ctx, "completion")
 
     # Record token usage for daily budget tracking
-    total_tokens = (result.response.usage.prompt_tokens or 0) + (
-        result.response.usage.completion_tokens or 0
-    )
-    if total_tokens > 0:
-        enforcer.record_token_usage(client_id, result.response.model, total_tokens)
+    if prompt_tokens + completion_tokens > 0:
+        enforcer.record_token_usage(
+            client_id, results[0].response.model, prompt_tokens + completion_tokens
+        )
 
-    # Audit log the request
+    # Audit log the request (one row, however many choices)
     if audit_logger:
         await audit_logger.log_request(
             request_id=ctx.request_id,
             client_id=client_id,
             task="completion",
-            model=result.response.model,
-            endpoint=result.provider_used,
+            model=results[0].response.model,
+            endpoint=_endpoints_used(results),
             status="success",
             user_id=body.user,
             stream=False,
@@ -578,13 +571,76 @@ async def completions(
             temperature=body.temperature,
             latency_ms=ctx.total_latency_ms,
             tokens_per_second=ctx.tokens_per_second,
-            prompt_tokens=result.response.usage.prompt_tokens,
-            completion_tokens=result.response.usage.completion_tokens,
-            request_body={"prompt": internal_request.prompt},
-            response_body=_audit_response_body(result.response),
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            request_body={"prompt": prompts if len(prompts) > 1 else prompts[0], "n": body.n},
+            response_body=_audit_choices_body(results),
         )
 
-    return OpenAICompletionResponse.from_internal(result.response)
+    return OpenAICompletionResponse.from_internal_many([r.response for r in results])
+
+
+async def _stream_completion_response(
+    request: Request,
+    dispatcher: Dispatcher,
+    internal_request,
+    model: str,
+    ctx,
+    audit_logger: AuditLogger | None,
+    enforcer: PolicyEnforcer | None = None,
+    request_body: dict | None = None,
+) -> StreamingResponse:
+    """Stream a text completion as OpenAI text_completion SSE frames.
+
+    Same contract as chat streaming: endpoint chosen and first chunk
+    received before headers (real HTTP errors), errors after that sent
+    in-band, outcome recorded once by StreamRecorder.
+    """
+    recorder = StreamRecorder(
+        ctx=ctx,
+        internal_request=internal_request,
+        model=model,
+        task="completion",
+        audit_logger=audit_logger,
+        enforcer=enforcer,
+        request_body=request_body,
+    )
+    stream = await recorder.start(request, dispatcher)
+
+    async def generate() -> AsyncGenerator[bytes, None]:
+        try:
+            async for chunk in stream:
+                recorder.observe(chunk)
+                if recorder.is_error(chunk):
+                    error = StreamError(message=chunk.error or "Stream interrupted")
+                    yield f"data: {json.dumps(error.to_dict())}\n\n".encode()
+                    await recorder.finish_error_chunk(chunk)
+                    break
+                response = OpenAICompletionStreamResponse.from_chunk(chunk, model)
+                yield f"data: {response.model_dump_json()}\n\n".encode()
+                if chunk.finish_reason:
+                    await recorder.finish()
+
+            yield b"data: [DONE]\n\n"
+
+        except Exception as e:
+            logger.exception("Error in completion stream")
+            stream_error = StreamError(message="Stream interrupted")
+            yield f"data: {json.dumps(stream_error.to_dict())}\n\n".encode()
+            await recorder.finish(status="error", error_code="stream_error", error_message=str(e))
+        finally:
+            await recorder.finish_disconnected(stream)
+            clear_request_context()
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 # =============================================================================
@@ -596,7 +652,7 @@ async def completions(
 async def embeddings(
     request: Request,
     body: OpenAIEmbeddingRequest,
-    auth: Annotated[AuthResult, Depends(get_auth)],
+    auth: Annotated[AuthResult, Depends(get_inference_auth)],
     dispatcher: Annotated[Dispatcher, Depends(get_dispatcher)],
     enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
     audit_logger: Annotated[AuditLogger | None, Depends(get_audit_logger)],
@@ -650,7 +706,7 @@ async def embeddings(
                         pii_results=[pii_result],
                         was_scrubbed=scrub,
                     )
-            if scrub:
+            if scrub and pii_result.scrubbed_text is not None:
                 sanitized_input = pii_result.scrubbed_text
         elif isinstance(sanitized_input, list):
             total_pii = 0
@@ -663,7 +719,8 @@ async def embeddings(
                     total_pii += pii_result.detection_count
                     if pii_result.has_pii:
                         all_pii_results.append(pii_result)
-                    scrubbed_list.append(pii_result.scrubbed_text if scrub else item)
+                    scrubbed = scrub and pii_result.scrubbed_text is not None
+                    scrubbed_list.append(pii_result.scrubbed_text if scrubbed else item)
                 else:
                     scrubbed_list.append(item)
             if total_pii:
@@ -706,18 +763,23 @@ async def embeddings(
             source_ip=request.client.host if request.client else None,
         )
 
-    # Convert to internal format
+    # Convert to internal format from the sanitized/scrubbed input. Building it
+    # from body.input sent the raw text upstream while logging "scrubbed"
+    # (found by external review; tests/test_wire.py checks what the engine gets)
+    body = body.model_copy(update={"input": sanitized_input})
     internal_request = body.to_internal(client_id=client_id)
+    # One ID end to end: the response's id and the audit row share it, so a
+    # client's chatcmpl-/cmpl- id finds its request in the audit trail
+    internal_request.request_id = ctx.request_id
 
-    # Apply per-client target endpoint if configured
-    if auth.target_endpoint:
-        internal_request = internal_request.model_copy(
-            update={"preferred_provider": auth.target_endpoint}
-        )
+    # Apply per-key and per-environment routing restrictions
+    internal_request = internal_request.model_copy(
+        update=await resolve_access_scope(request, auth, internal_request.model)
+    )
 
     # Check policies - raises domain errors on violation
     try:
-        enforcer.enforce(
+        await enforcer.enforce(
             internal_request,
             rate_limit_key=auth.client_id,
             allowed_models=auth.allowed_models,

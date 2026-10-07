@@ -3,10 +3,10 @@
 import os
 import re
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import yaml
-from pydantic import AfterValidator, BaseModel, Field, model_validator
+from pydantic import AfterValidator, BaseModel, Field, field_validator, model_validator
 
 from gateway.models.common import ProviderType
 
@@ -81,6 +81,12 @@ class ProviderConfig(BaseModel):
     # Separate connect timeout so a dead upstream fails in seconds instead
     # of holding the connection for the full read timeout
     connect_timeout: float = Field(default=3.0, gt=0, le=30.0)
+    # Longest gap allowed between streamed chunks once the first one has
+    # arrived. The first chunk may take the full `timeout` (cold model load).
+    stream_idle_timeout: float = Field(default=60.0, gt=0, le=3600.0)
+    # Most requests this gateway sends the endpoint at once (D-032); more
+    # overflow to the next endpoint or wait. None = unlimited.
+    max_concurrent: int | None = Field(default=None, ge=1, le=10000)
     max_retries: int = Field(
         default=3, ge=0, le=10
     )  # TODO: Not yet used in dispatcher - reserved for retry+backoff implementation
@@ -100,6 +106,59 @@ class ProviderConfig(BaseModel):
 # =============================================================================
 
 
+MediaCapability = Literal["tts", "stt", "image", "video"]
+
+# Endpoint types whose adapters speak OpenAI's media routes
+MEDIA_CAPABLE_TYPES = frozenset({ProviderType.OPENAI, ProviderType.VLLM})
+
+
+class CircuitBreakerConfig(BaseModel):
+    """Per-endpoint circuit breaker (dispatch/circuit.py)."""
+
+    failure_threshold: int = Field(default=5, ge=1, le=100)
+    cooldown_seconds: float = Field(default=15.0, gt=0, le=3600)
+
+
+# Scheduling class (D-034). interactive: someone is waiting on the answer.
+# batch: throughput work that can wait (evals, backfills, bulk embeddings).
+Priority = Literal["interactive", "batch"]
+
+
+class AdmissionConfig(BaseModel):
+    """Per-endpoint concurrency limits (dispatch/admission.py, D-032, D-034).
+
+    When every candidate endpoint is at `max_concurrent`, a request waits up
+    to `max_queue_wait_seconds` for a slot, then gets 503 + Retry-After.
+    Batch requests wait longer, are served after waiting interactive ones,
+    and may hold at most `batch_max_share` of an endpoint's slots, so a
+    batch job can't leave interactive traffic queued behind it.
+    """
+
+    max_queue_wait_seconds: float = Field(default=5.0, ge=0, le=300)
+    batch_max_queue_wait_seconds: float = Field(default=60.0, ge=0, le=3600)
+    batch_max_share: float = Field(default=0.75, gt=0, le=1)
+
+
+class MediaTokenEquivalents(BaseModel):
+    """Token-equivalents per native media unit, for budgets (D-021).
+
+    Budgets are token-based; media is metered in its own units and converted
+    here, then the model's tier multiplier applies as for any model.
+    Defaults are rough parity with text, meant to be tuned per deployment.
+    """
+
+    tts_character: float = Field(default=0.25, ge=0)  # ~4 characters per token
+    stt_audio_second: float = Field(default=10.0, ge=0)
+
+
+class MediaConfig(BaseModel):
+    """Limits and metering for voice/image/video routes."""
+
+    max_upload_mb: float = Field(default=25.0, gt=0, le=1024)
+    max_tts_characters: int = Field(default=4096, gt=0, le=1_000_000)
+    token_equivalents: MediaTokenEquivalents = Field(default_factory=MediaTokenEquivalents)
+
+
 class EndpointConfig(BaseModel):
     """Configuration for a single endpoint (physical runtime).
 
@@ -113,9 +172,49 @@ class EndpointConfig(BaseModel):
     enabled: bool = True
     timeout: float = Field(default=30.0, gt=0, le=3600.0)
     connect_timeout: float = Field(default=3.0, gt=0, le=30.0)
+    # Longest gap allowed between streamed chunks once the first one has
+    # arrived. The first chunk may take the full `timeout` (cold model load).
+    stream_idle_timeout: float = Field(default=60.0, gt=0, le=3600.0)
+    # Most requests this gateway sends the endpoint at once (D-032); more
+    # overflow to the next endpoint or wait. None = unlimited.
+    max_concurrent: int | None = Field(default=None, ge=1, le=10000)
     max_retries: int = Field(default=3, ge=0, le=10)
     labels: dict[str, str] = Field(default_factory=dict)  # cold_flexible, prod_eligible, etc.
-    api_key_env: str | None = None  # Environment variable name for API key
+    # Upstream credentials (D-036): a literal key or ${ENV_VAR}, or the name
+    # of an env var; sent as Authorization: Bearer. Plus any extra headers.
+    api_key: str | None = None
+    api_key_env: str | None = None
+    headers: dict[str, str] = Field(default_factory=dict)
+    # Whether this endpoint's models are chat/completion/embedding models
+    # for catalog routing (D-036). None = auto: yes, unless it declares media
+    # capabilities (a Kokoro or Whisper server's models aren't chat models).
+    # Set true for mixed servers (LocalAI, OpenAI) that serve both.
+    serves_text: bool | None = None
+    # Media tasks this endpoint serves (D-020). Chat/completions/embeddings
+    # need no declaration; media routes only use endpoints that declare it.
+    capabilities: list[MediaCapability] = Field(default_factory=list, max_length=4)
+    # Engine profile (config/profiles/<name>.yaml) describing voices, languages
+    # and setting ranges for this engine family (D-020). Optional.
+    profile: SafeIdentifier | None = None
+    # Voices for engines that don't list their own (admin-declared, D-020)
+    voices: list[str] = Field(default_factory=list, max_length=1000)
+
+    @property
+    def text_models(self) -> bool:
+        """Whether discovered models join the text catalog (see serves_text)."""
+        return self.serves_text if self.serves_text is not None else not self.capabilities
+
+    @model_validator(mode="after")
+    def _media_needs_openai_contract(self) -> "EndpointConfig":
+        # Media routes speak OpenAI's audio/image/video API (D-020); other
+        # endpoint types would accept the declaration and then fail every call
+        if self.capabilities and self.type not in MEDIA_CAPABLE_TYPES:
+            raise ValueError(
+                f"Endpoint '{self.name}': capabilities {self.capabilities} need type "
+                f"{sorted(t.value for t in MEDIA_CAPABLE_TYPES)} (OpenAI-compatible media API), "
+                f"not '{self.type.value}'"
+            )
+        return self
 
 
 class EnvironmentConfig(BaseModel):
@@ -151,6 +250,10 @@ class ResolutionConfig(BaseModel):
     ambiguous_behavior: str = Field(
         default="error", pattern="^(error|first_priority)$"
     )  # error or first_priority
+    # priority: the resolved endpoint first, overflowing in order when it is
+    # at max_concurrent. least_loaded: candidates ordered by in-flight share
+    # of max_concurrent (D-032).
+    strategy: Literal["priority", "least_loaded"] = "priority"
 
 
 class ApiKeyConfig(BaseModel):
@@ -163,6 +266,56 @@ class ApiKeyConfig(BaseModel):
     target_endpoint: SafeIdentifier | None = (
         None  # Force all requests from this key to a specific endpoint
     )
+    # Requests this key may have in flight at once; more get 429 (D-034)
+    max_concurrent: int | None = Field(default=None, ge=1, le=10000)
+    priority: Priority = "interactive"
+
+
+class AnonymousAccessConfig(BaseModel):
+    """Policy for keyless requests (D-042).
+
+    With auth enabled, keyless inference is off unless enabled here, and
+    then only from allowed_networks. With auth disabled (solo mode),
+    allowed_networks is where the gateway accepts requests from at all.
+    Restrict what keyless traffic may reach with the fields below; otherwise
+    a client can drop its key to escape that key's allowlists and limits.
+    """
+
+    enabled: bool = Field(default=False, description="Allow keyless inference requests")
+    allowed_networks: list[str] = Field(
+        default_factory=lambda: ["127.0.0.0/8", "::1/128"],
+        max_length=100,
+        description="Where keyless requests may come from (CIDR). Default: this machine.",
+    )
+    allowed_models: list[str] | None = Field(
+        default=None, max_length=500, description="Glob patterns keyless requests may use"
+    )
+    allowed_endpoints: list[SafeIdentifier] | None = Field(
+        default=None, max_length=50, description="Endpoints keyless requests may reach"
+    )
+    rate_limit_rpm: int | None = Field(
+        default=None, gt=0, description="Requests per minute for all keyless traffic combined"
+    )
+    max_concurrent: int | None = Field(
+        default=None, ge=1, le=10000, description="In-flight requests, all keyless traffic combined"
+    )
+
+    @field_validator("allowed_networks")
+    @classmethod
+    def _valid_networks(cls, value: list[str]) -> list[str]:
+        from gateway.security.access import parse_networks
+
+        parse_networks(value)  # raises on a malformed entry
+        return value
+
+    @property
+    def unrestricted(self) -> bool:
+        return not (
+            self.allowed_models
+            or self.allowed_endpoints
+            or self.rate_limit_rpm
+            or self.max_concurrent
+        )
 
 
 class AuthConfig(BaseModel):
@@ -170,11 +323,14 @@ class AuthConfig(BaseModel):
 
     enabled: bool = Field(default=False, description="Enable API key authentication")
     api_keys: list[ApiKeyConfig] = Field(default_factory=list, max_length=1000)
+    anonymous: AnonymousAccessConfig = Field(default_factory=AnonymousAccessConfig)
 
 
 class RateLimitConfig(BaseModel):
     """Rate limiting configuration."""
 
+    # Off for trusted single-user labs and load testing; on by default
+    enabled: bool = True
     requests_per_minute_global: int = Field(default=1000, gt=0)
     requests_per_minute_per_user: int = Field(default=100, gt=0)
     requests_per_hour_per_user: int = Field(
@@ -258,6 +414,9 @@ class GatewayConfig(BaseModel):
 
     # Embedding admission queue
     embedding_queue: EmbeddingQueueYamlConfig = Field(default_factory=EmbeddingQueueYamlConfig)
+    media: MediaConfig = Field(default_factory=MediaConfig)
+    circuit_breaker: CircuitBreakerConfig = Field(default_factory=CircuitBreakerConfig)
+    admission: AdmissionConfig = Field(default_factory=AdmissionConfig)
 
     # New endpoints architecture
     endpoints: list[EndpointConfig] = Field(default_factory=list, max_length=50)
@@ -282,6 +441,7 @@ class GatewayConfig(BaseModel):
                     enabled=ep.enabled,
                     timeout=ep.timeout,
                     connect_timeout=ep.connect_timeout,
+                    stream_idle_timeout=ep.stream_idle_timeout,
                     max_retries=ep.max_retries,
                 )
                 for ep in self.endpoints
@@ -298,7 +458,14 @@ class GatewayConfig(BaseModel):
                     enabled=p.enabled,
                     timeout=p.timeout,
                     connect_timeout=p.connect_timeout,
+                    stream_idle_timeout=p.stream_idle_timeout,
                     max_retries=p.max_retries,
+                    max_concurrent=p.max_concurrent,
+                    # Credentials too: dropping them broke every keyed
+                    # cloud provider in the legacy format (D-036)
+                    api_key=p.api_key,
+                    api_key_env=p.api_key_env,
+                    headers=p.headers,
                 )
                 for p in self.providers
             ]

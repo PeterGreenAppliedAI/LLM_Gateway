@@ -11,9 +11,9 @@ Design principles:
 """
 
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from uuid import uuid4
 
 from pydantic import AfterValidator, BaseModel, Field
@@ -117,7 +117,7 @@ class InternalRequest(BaseModel):
     request_id: str = Field(default_factory=lambda: str(uuid4()), max_length=64)
     client_id: SafeId = Field(default="default")
     user_id: SafeId = Field(default="anonymous")
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     # Task specification
     task: TaskType
@@ -143,6 +143,13 @@ class InternalRequest(BaseModel):
     preferred_provider: str | None = Field(default=None, max_length=64)
     fallback_allowed: bool = True
     environment: str | None = Field(default=None, max_length=64)  # dev, prod, etc.
+    # Endpoints this request may be served by (API key allowlist intersected
+    # with the environment's endpoints). None = unrestricted. The dispatcher
+    # enforces it on every endpoint it tries, including fallbacks.
+    allowed_endpoints: list[str] | None = Field(default=None, max_length=50)
+    # Scheduling class for endpoint admission (D-034): batch waits behind
+    # interactive and may use only part of an endpoint's slots
+    priority: Literal["interactive", "batch"] = "interactive"
 
     # Tool calling
     tools: list[dict[str, Any]] | None = None  # Tool definitions (OpenAI/Ollama format)
@@ -196,7 +203,7 @@ class InternalResponse(BaseModel):
     # Tracking (echoed from request)
     request_id: str
     task: TaskType
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     # Provider info
     provider: str
@@ -248,3 +255,8 @@ class StreamChunk(BaseModel):
     tool_calls: list[ToolCall] | None = None  # Tool calls arriving mid-stream
     finish_reason: FinishReason | None = None
     usage: UsageStats | None = None  # Only in final chunk
+    # Set on finish_reason=ERROR chunks: why the stream failed, and a code
+    # (timeout, connection_error, http_404, ...) the dispatcher uses to
+    # decide whether another endpoint could succeed
+    error: str | None = Field(default=None, max_length=1000)
+    error_code: str | None = Field(default=None, max_length=64)

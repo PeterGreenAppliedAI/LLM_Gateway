@@ -6,6 +6,7 @@ Per PRD Section 6: Ollama is a required local runtime with full support.
 """
 
 import asyncio
+import json
 import time
 from collections.abc import AsyncIterator
 from typing import Any
@@ -34,6 +35,12 @@ from gateway.models.internal import (
     ToolCall,
 )
 from gateway.providers.base import ProviderAdapter
+from gateway.providers.streaming import (
+    classify_exception,
+    error_chunk,
+    iter_lines_with_timeouts,
+    upstream_http_error,
+)
 
 
 class OllamaAdapter(ProviderAdapter):
@@ -59,7 +66,8 @@ class OllamaAdapter(ProviderAdapter):
             if self._client is None or self._client.is_closed:
                 self._client = httpx.AsyncClient(
                     base_url=self.base_url,
-                    timeout=httpx.Timeout(self.timeout, connect=self.connect_timeout),
+                    timeout=self.http_timeout(),
+                    limits=self.http_limits(),
                 )
             return self._client
 
@@ -208,7 +216,7 @@ class OllamaAdapter(ProviderAdapter):
             return self._parse_chat_response(request, data, latency_ms)
 
         except httpx.TimeoutException as e:
-            return self._error_response(request, f"Timeout: {e}", "timeout")
+            return self._timeout_response(request, e)
         except httpx.HTTPStatusError as e:
             error_body = e.response.text[:500]
             logger.warning(
@@ -251,7 +259,7 @@ class OllamaAdapter(ProviderAdapter):
             return self._parse_generate_response(request, data, latency_ms)
 
         except httpx.TimeoutException as e:
-            return self._error_response(request, f"Timeout: {e}", "timeout")
+            return self._timeout_response(request, e)
         except httpx.HTTPStatusError as e:
             return self._error_response(
                 request,
@@ -298,7 +306,7 @@ class OllamaAdapter(ProviderAdapter):
             )
 
         except httpx.TimeoutException as e:
-            return self._error_response(request, f"Timeout: {e}", "timeout")
+            return self._timeout_response(request, e)
         except httpx.HTTPStatusError as e:
             return self._error_response(
                 request,
@@ -313,9 +321,6 @@ class OllamaAdapter(ProviderAdapter):
     # =========================================================================
     # Streaming
     # =========================================================================
-
-    # Per-chunk timeout: if no chunk arrives within this window, the stream is dead
-    STREAM_CHUNK_TIMEOUT = 120.0  # seconds between chunks
 
     async def chat_stream(self, request: InternalRequest) -> AsyncIterator[StreamChunk]:
         """Stream chat completion via Ollama /api/chat with stream=true."""
@@ -354,14 +359,23 @@ class OllamaAdapter(ProviderAdapter):
                     )
 
             async with client.stream("POST", "/api/chat", json=ollama_request) as response:
-                response.raise_for_status()
+                if response.status_code >= 400:
+                    code, message = await upstream_http_error(response)
+                    yield error_chunk(request, code, message)
+                    return
                 index = 0
-                async for line in self._iter_lines_with_timeout(response):
+                lines = iter_lines_with_timeouts(response, self.timeout, self.stream_idle_timeout)
+                async for line in lines:
                     if not line:
                         continue
-                    import json
-
                     chunk_data = json.loads(line)
+
+                    if chunk_data.get("error"):
+                        # Ollama reports mid-stream failures as an error line
+                        yield error_chunk(
+                            request, "upstream_error", str(chunk_data["error"])[:500], index
+                        )
+                        return
 
                     message = chunk_data.get("message", {})
                     content = message.get("content", "")
@@ -401,40 +415,61 @@ class OllamaAdapter(ProviderAdapter):
                     )
                     index += 1
 
-        except asyncio.TimeoutError:
-            yield StreamChunk(
-                request_id=request.request_id,
-                index=0,
-                delta="",
-                finish_reason=FinishReason.ERROR,
-            )
-        except Exception:
-            yield StreamChunk(
-                request_id=request.request_id,
-                index=0,
-                delta="",
-                finish_reason=FinishReason.ERROR,
-            )
+        except Exception as e:
+            yield error_chunk(request, *classify_exception(e))
 
-    async def _iter_lines_with_timeout(self, response: httpx.Response) -> AsyncIterator[str]:
-        """Iterate response lines with a per-chunk timeout.
+    async def generate_stream(self, request: InternalRequest) -> AsyncIterator[StreamChunk]:
+        """Stream a completion via Ollama /api/generate with stream=true.
 
-        If no data arrives within STREAM_CHUNK_TIMEOUT seconds,
-        raises asyncio.TimeoutError to prevent hanging connections.
+        Same endpoint and fields (system, template, context, ...) as the
+        non-streaming generate(); streams used to go through /api/chat.
         """
-        aiter = response.aiter_lines().__aiter__()
-        while True:
-            try:
-                line = await asyncio.wait_for(
-                    aiter.__anext__(),
-                    # At least as patient as the endpoint's configured
-                    # timeout: cold-loading a large model can stall the
-                    # first chunk far beyond the 120s floor
-                    timeout=max(self.STREAM_CHUNK_TIMEOUT, self.timeout),
-                )
-                yield line
-            except StopAsyncIteration:
-                break
+        try:
+            client = await self._get_client()
+            ollama_request = self._build_generate_request(request)
+            ollama_request["stream"] = True
+
+            async with client.stream("POST", "/api/generate", json=ollama_request) as response:
+                if response.status_code >= 400:
+                    code, message = await upstream_http_error(response)
+                    yield error_chunk(request, code, message)
+                    return
+                index = 0
+                lines = iter_lines_with_timeouts(response, self.timeout, self.stream_idle_timeout)
+                async for line in lines:
+                    if not line:
+                        continue
+                    data = json.loads(line)
+                    if data.get("error"):
+                        yield error_chunk(
+                            request, "upstream_error", str(data["error"])[:500], index
+                        )
+                        return
+
+                    finish_reason = None
+                    usage = None
+                    if data.get("done"):
+                        finish_reason = (
+                            FinishReason.LENGTH
+                            if data.get("done_reason") == "length"
+                            else FinishReason.STOP
+                        )
+                        usage = UsageStats.from_counts(
+                            prompt=data.get("prompt_eval_count", 0),
+                            completion=data.get("eval_count", 0),
+                        )
+                    yield StreamChunk(
+                        request_id=request.request_id,
+                        index=index,
+                        delta=data.get("response", ""),
+                        thinking=data.get("thinking") or None,
+                        finish_reason=finish_reason,
+                        usage=usage,
+                    )
+                    index += 1
+
+        except Exception as e:
+            yield error_chunk(request, *classify_exception(e))
 
     # =========================================================================
     # Provider Metadata

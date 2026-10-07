@@ -8,7 +8,7 @@ import asyncio
 from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 
 # Import conditionally to avoid circular imports
@@ -68,7 +68,7 @@ class AnalysisRequest:
     task: str | None = None
     response_content: str | None = None
     source_ip: str | None = None
-    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    timestamp: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 
 @dataclass
@@ -80,7 +80,7 @@ class AnalysisResult:
     injection_scan: DetectionResult | None
     guard_scan: GuardResult | None = None
     alerts: list[SecurityAlert] = field(default_factory=list)
-    analyzed_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    analyzed_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
     def to_dict(self) -> dict:
         return {
@@ -248,7 +248,7 @@ class AsyncSecurityAnalyzer:
                 # Wait for next request with timeout
                 try:
                     request = await asyncio.wait_for(self._queue.get(), timeout=1.0)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     continue
 
                 # Analyze the request
@@ -308,7 +308,7 @@ class AsyncSecurityAnalyzer:
         if sanitization.modified:
             alerts.append(
                 SecurityAlert(
-                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    timestamp=datetime.now(UTC).isoformat(),
                     request_id=request.request_id,
                     client_id=request.client_id,
                     severity=AlertSeverity.WARNING,
@@ -328,7 +328,7 @@ class AsyncSecurityAnalyzer:
         if injection_scan.threat_level == ThreatLevel.CRITICAL:
             alerts.append(
                 SecurityAlert(
-                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    timestamp=datetime.now(UTC).isoformat(),
                     request_id=request.request_id,
                     client_id=request.client_id,
                     severity=AlertSeverity.CRITICAL,
@@ -340,7 +340,7 @@ class AsyncSecurityAnalyzer:
         elif injection_scan.threat_level == ThreatLevel.HIGH:
             alerts.append(
                 SecurityAlert(
-                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    timestamp=datetime.now(UTC).isoformat(),
                     request_id=request.request_id,
                     client_id=request.client_id,
                     severity=AlertSeverity.WARNING,
@@ -352,7 +352,7 @@ class AsyncSecurityAnalyzer:
         elif injection_scan.threat_level == ThreatLevel.MEDIUM:
             alerts.append(
                 SecurityAlert(
-                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    timestamp=datetime.now(UTC).isoformat(),
                     request_id=request.request_id,
                     client_id=request.client_id,
                     severity=AlertSeverity.INFO,

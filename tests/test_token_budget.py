@@ -211,7 +211,7 @@ class TestDisabled:
 class TestCleanup:
     def test_cleanup_stale_keys(self, tracker):
         tracker.record_usage("key1", "llama3.1:8b", 1000)
-        tracker._usage["key1"].date = "2020-01-01"
+        tracker._pending["2020-01-01"] = tracker._pending.pop(tracker._today())
         removed = tracker.cleanup_stale_keys()
         assert removed == 1
-        assert "key1" not in tracker._usage
+        assert tracker.keys_today() == []

@@ -9,6 +9,7 @@ References:
 - https://platform.openai.com/docs/api-reference/embeddings
 """
 
+import json as _json
 import time
 from typing import Any, Literal
 from uuid import uuid4
@@ -28,6 +29,11 @@ from gateway.models.internal import (
 # =============================================================================
 # Chat Completion Models (POST /v1/chat/completions)
 # =============================================================================
+
+
+# Most choices one request may ask for (len(prompts) x n). Each choice is a
+# separate upstream generation, fanned out by the route.
+MAX_CHOICES = 64
 
 
 class OpenAIToolCallFunction(BaseModel):
@@ -88,6 +94,8 @@ class OpenAIChatRequest(BaseModel):
     stop: str | list[str] | None = None
     stream: bool = False
     user: str | None = None
+    # Completions to generate (fanned out as separate upstream requests)
+    n: int = Field(default=1, ge=1, le=MAX_CHOICES)
     # Tool calling
     tools: list[dict[str, Any]] | None = None
     tool_choice: str | dict[str, Any] | None = None
@@ -225,12 +233,30 @@ class OpenAIChatResponse(BaseModel):
             ),
         )
 
+    @classmethod
+    def from_internal_many(cls, responses: list[InternalResponse]):
+        """One response with a choice per internal response, in order.
+
+        Usage is summed: every choice was a separate generation, so the
+        prompt was processed once per choice.
+        """
+        parts = [cls.from_internal(r) for r in responses]
+        choices = [part.choices[0].model_copy(update={"index": i}) for i, part in enumerate(parts)]
+        usage = OpenAIChatUsage(
+            prompt_tokens=sum(p.usage.prompt_tokens for p in parts),
+            completion_tokens=sum(p.usage.completion_tokens for p in parts),
+            total_tokens=sum(p.usage.total_tokens for p in parts),
+        )
+        return parts[0].model_copy(update={"choices": choices, "usage": usage})
+
 
 class OpenAIChatStreamDelta(BaseModel):
     """Delta content in streaming chat response."""
 
     role: str | None = None
     content: str | None = None
+    # [{"index", "id", "type", "function": {"name", "arguments": <JSON string>}}]
+    tool_calls: list[dict[str, Any]] | None = None
 
 
 class OpenAIChatStreamChoice(BaseModel):
@@ -251,18 +277,51 @@ class OpenAIChatStreamResponse(BaseModel):
     choices: list[OpenAIChatStreamChoice]
 
     @classmethod
-    def from_chunk(cls, chunk: StreamChunk, model: str) -> "OpenAIChatStreamResponse":
-        """Create from internal stream chunk."""
+    def from_chunk(
+        cls,
+        chunk: StreamChunk,
+        model: str,
+        tool_call_start: int = 0,
+        finish_reason: str | None = None,
+    ) -> "OpenAIChatStreamResponse":
+        """Create from internal stream chunk.
+
+        Args:
+            tool_call_start: Index of this chunk's first tool call within the
+                whole response (tool call indexes run across chunks).
+            finish_reason: Override the mapped finish reason (e.g. "tool_calls"
+                when Ollama reports "stop" after emitting tool calls).
+        """
+        tool_calls = None
+        if chunk.tool_calls:
+            tool_calls = []
+            for offset, tc in enumerate(chunk.tool_calls):
+                position = tool_call_start + offset
+                arguments = tc.function.get("arguments", {})
+                tool_calls.append(
+                    {
+                        "index": position,
+                        "id": tc.id or f"call_{position}",
+                        "type": "function",
+                        "function": {
+                            "name": tc.function.get("name", ""),
+                            "arguments": arguments
+                            if isinstance(arguments, str)
+                            else _json.dumps(arguments),
+                        },
+                    }
+                )
+        if finish_reason is None and chunk.finish_reason:
+            finish_reason = _map_finish_reason(chunk.finish_reason)
         return cls(
             id=f"chatcmpl-{chunk.request_id[:24]}",
             model=model,
             choices=[
                 OpenAIChatStreamChoice(
-                    index=chunk.index,
-                    delta=OpenAIChatStreamDelta(content=chunk.delta),
-                    finish_reason=_map_finish_reason(chunk.finish_reason)
-                    if chunk.finish_reason
-                    else None,
+                    # Choice index, not chunk sequence: there is one choice
+                    index=0,
+                    delta=OpenAIChatStreamDelta(content=chunk.delta, tool_calls=tool_calls),
+                    finish_reason=finish_reason,
                 )
             ],
         )
@@ -285,6 +344,8 @@ class OpenAICompletionRequest(BaseModel):
     stop: str | list[str] | None = None
     stream: bool = False
     user: str | None = None
+    # Completions per prompt (fanned out as separate upstream requests)
+    n: int = Field(default=1, ge=1, le=MAX_CHOICES)
     echo: bool = False
     suffix: str | None = None
 
@@ -323,6 +384,32 @@ class OpenAICompletionChoice(BaseModel):
     finish_reason: str | None = None
 
 
+class OpenAICompletionStreamResponse(BaseModel):
+    """OpenAI-compatible streaming completion chunk (text_completion)."""
+
+    id: str
+    object: Literal["text_completion"] = "text_completion"
+    created: int = Field(default_factory=lambda: int(time.time()))
+    model: str
+    choices: list[OpenAICompletionChoice]
+
+    @classmethod
+    def from_chunk(cls, chunk: StreamChunk, model: str) -> "OpenAICompletionStreamResponse":
+        return cls(
+            id=f"cmpl-{chunk.request_id[:24]}",
+            model=model,
+            choices=[
+                OpenAICompletionChoice(
+                    index=0,
+                    text=chunk.delta or "",
+                    finish_reason=_map_finish_reason(chunk.finish_reason)
+                    if chunk.finish_reason
+                    else None,
+                )
+            ],
+        )
+
+
 class OpenAICompletionResponse(BaseModel):
     """OpenAI-compatible completion response."""
 
@@ -352,6 +439,22 @@ class OpenAICompletionResponse(BaseModel):
                 total_tokens=response.usage.total_tokens,
             ),
         )
+
+    @classmethod
+    def from_internal_many(cls, responses: list[InternalResponse]):
+        """One response with a choice per internal response, in order.
+
+        Usage is summed: every choice was a separate generation, so the
+        prompt was processed once per choice.
+        """
+        parts = [cls.from_internal(r) for r in responses]
+        choices = [part.choices[0].model_copy(update={"index": i}) for i, part in enumerate(parts)]
+        usage = OpenAIChatUsage(
+            prompt_tokens=sum(p.usage.prompt_tokens for p in parts),
+            completion_tokens=sum(p.usage.completion_tokens for p in parts),
+            total_tokens=sum(p.usage.total_tokens for p in parts),
+        )
+        return parts[0].model_copy(update={"choices": choices, "usage": usage})
 
 
 # =============================================================================

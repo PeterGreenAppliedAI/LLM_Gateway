@@ -17,9 +17,11 @@ Per API Error Handling Architecture:
 - Errors propagate to exception handler middleware
 """
 
+import asyncio
 import fnmatch
+import math
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Collection
 from dataclasses import dataclass, field
 
 from gateway.config import (
@@ -31,18 +33,78 @@ from gateway.dispatch.registry import ProviderRegistry
 from gateway.errors import (
     AllProvidersUnavailableError,
     AmbiguousModelError,
+    CapacityExceededError,
     EndpointNotFoundError,
+    ErrorCode,
     GatewayError,
     NoProviderError,
+    PolicyError,
     ProviderError,
     ProviderUnavailableError,
 )
-from gateway.models.common import HealthStatus
+from gateway.models.common import FinishReason, TaskType
 from gateway.models.internal import InternalRequest, InternalResponse, StreamChunk
 from gateway.observability import get_logger
+from gateway.observability.metrics import get_metrics
 from gateway.providers import ProviderAdapter
+from gateway.state.concurrency import Lease, Priority
 
 logger = get_logger(__name__)
+
+
+async def order_candidates(
+    registry: ProviderRegistry, strategy: str, candidates: list[str]
+) -> list[str]:
+    """priority: as resolved. least_loaded: by in-flight share of max_concurrent.
+
+    The sort is stable, so equally loaded endpoints keep priority order.
+    An endpoint without max_concurrent counts its raw in-flight number.
+    """
+    if strategy != "least_loaded":
+        return candidates
+    admission = registry.admission
+    in_flight = await admission.in_flight_counts(candidates)
+
+    def load(name: str) -> float:
+        capacity = admission.capacity(name)
+        return in_flight[name] / capacity if capacity else float(in_flight[name])
+
+    return sorted(candidates, key=load)
+
+
+async def admit(
+    registry: ProviderRegistry,
+    candidates: list[str],
+    deadline: float,
+    priority: Priority = "interactive",
+) -> Lease:
+    """A slot on the first candidate with room; when all are full, the first to free up.
+
+    Shared by text and media dispatch.
+
+    Raises:
+        CapacityExceededError: Every candidate stayed full until the deadline.
+    """
+    admission = registry.admission
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    lease = await admission.acquire_any(candidates, max(0.0, deadline - started), priority)
+    waited = loop.time() - started
+    metrics = get_metrics()
+    if lease is None:
+        metrics.record_admission_rejected(priority)
+        # It stayed full for the whole wait; suggest waiting about as long
+        retry_after = min(30, max(1, math.ceil(registry.queue_wait_seconds(priority))))
+        raise CapacityExceededError(
+            endpoints=candidates, waited_seconds=waited, retry_after=retry_after
+        )
+    if waited > 0.001:
+        metrics.observe_admission_wait(waited, priority)
+    return lease
+
+
+def admission_deadline(registry: ProviderRegistry, priority: Priority = "interactive") -> float:
+    return asyncio.get_running_loop().time() + registry.queue_wait_seconds(priority)
 
 
 # Maximum number of providers to attempt before failing
@@ -100,40 +162,34 @@ class Dispatcher:
         self._registry = registry
         self._resolution_config = resolution_config or ResolutionConfig()
 
-    def parse_provider_from_model(self, model: str | None) -> tuple[str | None, str | None]:
-        """Parse provider and model from model string.
+    @classmethod
+    def parse_provider_from_model(
+        cls, model: str | None, endpoints: Collection[str]
+    ) -> tuple[str | None, str | None]:
+        """Split an "endpoint/model" pin, if the prefix names a configured endpoint.
 
-        Supports formats:
-        - "provider/model" → ("provider", "model")
-        - "model" → (None, "model")
-        - None → (None, None)
+        - "gpu-node/llama3.1:8b" with endpoint gpu-node → ("gpu-node", "llama3.1:8b")
+        - "meta-llama/Llama-3.1-8B-Instruct" → (None, the whole string)
+        - "model" → (None, "model"); None → (None, None)
 
-        Args:
-            model: Model string from request
-
-        Returns:
-            Tuple of (provider_name, model_name)
-
-        Security:
-            Validates provider name against SafeIdentifier pattern to prevent
-            log injection and metric label injection attacks.
+        Only a configured endpoint name makes a pin: Hugging Face model IDs
+        ("Qwen/Qwen2.5-7B", "Systran/faster-whisper-small") and Ollama
+        namespaced models ("user/model") contain a slash too, and used to be
+        misread as pins to an endpoint that doesn't exist.
         """
         if not model:
             return None, None
 
-        match = self.MODEL_PROVIDER_PATTERN.match(model)
+        match = cls.MODEL_PROVIDER_PATTERN.match(model)
         if match:
-            provider_hint = match.group(1)
-            model_name = match.group(2)
-
-            # Security: Validate provider name from user input
-            if not SAFE_IDENTIFIER_PATTERN.match(provider_hint):
-                # Invalid provider name - treat as unprefixed model
-                return None, model
-
-            return provider_hint, model_name
-
+            provider_hint, model_name = match.group(1), match.group(2)
+            # SAFE_IDENTIFIER check keeps user input out of logs/metric labels
+            if SAFE_IDENTIFIER_PATTERN.match(provider_hint) and provider_hint in endpoints:
+                return provider_hint, model_name
         return None, model
+
+    def split_pin(self, model: str | None) -> tuple[str | None, str | None]:
+        return self.parse_provider_from_model(model, self._registry.list_providers())
 
     def resolve_provider(self, request: InternalRequest) -> tuple[str, str]:
         """Resolve which provider and model to use for a request.
@@ -153,7 +209,7 @@ class Dispatcher:
             DispatchError: If no provider can be resolved
         """
         # Try to parse from model string
-        provider_hint, model_name = self.parse_provider_from_model(request.model)
+        provider_hint, model_name = self.split_pin(request.model)
 
         # Use explicit hint if found
         if provider_hint:
@@ -168,16 +224,38 @@ class Dispatcher:
         # request lands on the default endpoint and 404s for models that
         # only exist elsewhere.
         if request.model:
-            candidates = self._registry.get_endpoints_with_model(request.model)
+            candidates = self._permitted(
+                request, self._registry.get_endpoints_with_model(request.model)
+            )
             if candidates:
                 return self.resolve_endpoint(request, available_endpoints=candidates)
 
-        # Fall back to default (catalog empty or model not yet discovered)
+        # Fall back to default (catalog empty or model not yet discovered),
+        # or the first permitted endpoint when the default is off-limits
         default = self._registry.get_default_provider()
+        if default and not self._permitted(request, [default]):
+            permitted = self._permitted(request, self._registry.list_providers())
+            if permitted:
+                default = permitted[0]
         if default:
             return default, request.model
 
         raise NoProviderError()
+
+    @staticmethod
+    def _permitted(request: InternalRequest, endpoints: list[str]) -> list[str]:
+        """Endpoints the request may be served by, order preserved."""
+        if request.allowed_endpoints is None:
+            return list(endpoints)
+        return [name for name in endpoints if name in request.allowed_endpoints]
+
+    def _require_permitted(self, request: InternalRequest, endpoint: str) -> None:
+        """Refuse an endpoint outside the request's allowed set."""
+        if not self._permitted(request, [endpoint]):
+            raise PolicyError(
+                message=f"Endpoint '{endpoint}' is not allowed for this API key or environment",
+                code=ErrorCode.ENDPOINT_NOT_ALLOWED,
+            )
 
     def resolve_endpoint(
         self,
@@ -210,7 +288,7 @@ class Dispatcher:
             NoProviderError: If no endpoint can be resolved
         """
         # Step 1: Check for explicit endpoint/model syntax
-        endpoint_hint, model_name = self.parse_provider_from_model(request.model)
+        endpoint_hint, model_name = self.split_pin(request.model)
 
         if endpoint_hint:
             # Validate the endpoint exists
@@ -342,9 +420,10 @@ class Dispatcher:
         # there and ONLY there. Falling back elsewhere violates the pin and
         # masks the pinned endpoint's real error behind an unrelated one
         # (e.g. a 500 "model failed to load" hidden by a fallback's 404).
-        pinned = self.parse_provider_from_model(request.model)[0] is not None
+        pinned = self.split_pin(request.model)[0] is not None
 
         provider_name, model_name = self.resolve_provider(request)
+        self._require_permitted(request, provider_name)
         attempted: list[str] = []
 
         # Update request with resolved model (strip provider prefix)
@@ -355,53 +434,67 @@ class Dispatcher:
         # WHY (the generic message hides upstream 500 bodies and timeouts)
         errors_seen: list[str] = []
 
-        # Try primary provider. When pinned, error responses raise with the
-        # provider's actual error instead of silently returning None.
-        result = await self._try_provider(
-            provider_name, request, raise_on_error=pinned, error_sink=errors_seen
-        )
-        attempted.append(provider_name)
-
-        if result is not None:
-            return DispatchResult(
-                response=result,
-                provider_used=provider_name,
-                was_fallback=False,
-                attempted_providers=attempted,
+        # Candidates in order: the resolved endpoint, then (unless pinned or
+        # fallback is off) the fallback chain. A pin must go there and ONLY
+        # there; falling back elsewhere would mask its real error.
+        candidates = [provider_name]
+        if not pinned and request.fallback_allowed:
+            fallback_chain = self._permitted(
+                request, self._registry.get_fallback_chain(exclude=provider_name)
             )
+            # Only fall back to endpoints that actually have the model —
+            # anything else converts the real failure into a confusing 404
+            if request.model:
+                with_model = set(self._registry.get_endpoints_with_model(request.model))
+                if with_model:
+                    fallback_chain = [name for name in fallback_chain if name in with_model]
+            # Security: Cap fallback attempts to prevent unbounded attempts
+            candidates += fallback_chain[: MAX_FALLBACK_ATTEMPTS - 1]
+        candidates = await self._order_candidates(candidates, pinned)
+        remaining = list(candidates)
+        deadline = admission_deadline(self._registry, request.priority)
 
-        # Primary failed - try fallbacks if allowed
-        if pinned or not request.fallback_allowed:
-            raise ProviderUnavailableError(provider=provider_name, fallback_disabled=True)
-
-        # Get fallback chain - limited to prevent unbounded attempts
-        fallback_chain = self._registry.get_fallback_chain(exclude=provider_name)
-        # Only fall back to endpoints that actually have the model —
-        # anything else converts the real failure into a confusing 404
-        if request.model:
-            with_model = set(self._registry.get_endpoints_with_model(request.model))
-            if with_model:
-                fallback_chain = [name for name in fallback_chain if name in with_model]
-        # Security: Cap fallback attempts to prevent unbounded attempts
-        max_fallbacks = MAX_FALLBACK_ATTEMPTS - 1  # -1 for primary already tried
-
-        for fallback_name in fallback_chain[:max_fallbacks]:
-            result = await self._try_provider(fallback_name, request, error_sink=errors_seen)
-            attempted.append(fallback_name)
+        while remaining:
+            # Admission (D-032): the first candidate with a free slot; when
+            # all are full, wait for whichever frees first
+            lease = await admit(self._registry, remaining, deadline, request.priority)
+            name = lease.endpoint
+            remaining.remove(name)
+            try:
+                # When pinned, error responses raise with the provider's
+                # actual error instead of silently returning None
+                result = await self._try_provider(
+                    name, request, raise_on_error=pinned, error_sink=errors_seen
+                )
+            finally:
+                await lease.release()
+            attempted.append(name)
 
             if result is not None:
                 return DispatchResult(
                     response=result,
-                    provider_used=fallback_name,
-                    was_fallback=True,
+                    provider_used=name,
+                    was_fallback=name != provider_name,
                     attempted_providers=attempted,
                 )
+
+        if pinned or not request.fallback_allowed:
+            raise ProviderUnavailableError(provider=provider_name, fallback_disabled=True)
 
         # All providers failed
         raise AllProvidersUnavailableError(
             attempted=attempted,
             last_error=errors_seen[-1] if errors_seen else None,
         )
+
+    # ------------------------------------------------------------------
+    # Admission control (dispatch/admission.py, D-032)
+    # ------------------------------------------------------------------
+
+    async def _order_candidates(self, candidates: list[str], pinned: bool) -> list[str]:
+        if pinned:
+            return candidates
+        return await order_candidates(self._registry, self._resolution_config.strategy, candidates)
 
     async def _try_provider(
         self,
@@ -427,19 +520,21 @@ class Dispatcher:
         if adapter is None:
             return None
 
-        # Check health (use cached status, don't block on health check)
-        if not self._registry.is_healthy(provider_name):
-            # Try one on-demand health check in case it recovered
-            status = await self._registry.check_health(provider_name)
-            if status != HealthStatus.HEALTHY:
-                return None
+        # Circuit breaker: an endpoint failing repeatedly is skipped instantly
+        # instead of probed inside the request (see dispatch/circuit.py)
+        if not self._registry.allow_request(provider_name):
+            if error_sink is not None:
+                error_sink.append(f"{provider_name}: circuit open (recent failures)")
+            return None
 
         # Dispatch based on task type
         try:
             response = await self._execute_request(adapter, request)
         except GatewayError:
+            self._registry.release_probe(provider_name)
             raise
         except Exception as e:
+            self._registry.record_failure(provider_name)
             logger.warning(
                 "Provider dispatch failed",
                 provider=provider_name,
@@ -450,12 +545,16 @@ class Dispatcher:
             if error_sink is not None:
                 error_sink.append(f"{provider_name}: {e}")
             return None
+        except BaseException:
+            self._registry.release_probe(provider_name)  # cancelled: no verdict
+            raise
 
         if response.is_error:
             # Retryable failures (timeouts, connection errors, upstream 5xx)
             # fall through to the next provider. Upstream 4xx means the
             # request itself is wrong (bad model, invalid params) — retrying
             # elsewhere just masks the real error, so propagate it.
+            self._record_outcome(provider_name, response.error_code)
             if self._is_retryable_error(response.error_code) and not raise_on_error:
                 logger.warning(
                     "Provider returned retryable error",
@@ -474,6 +573,7 @@ class Dispatcher:
                 http_status=self._upstream_client_status(response.error_code),
             )
 
+        self._registry.record_success(provider_name)
         return response
 
     @staticmethod
@@ -501,7 +601,30 @@ class Dispatcher:
             # http_<status>: only server-side errors are retryable
             status = error_code.removeprefix("http_")
             return status.startswith("5")
-        return error_code in {"timeout", "connection_error", "unknown_error", "empty_response"}
+        # upstream_error: the runtime reported a failure in-band (Ollama
+        # error line, OpenAI error frame) — server-side, another box may work
+        return error_code in {
+            "timeout",
+            "connection_error",
+            "unknown_error",
+            "empty_response",
+            "upstream_error",
+            "pool_timeout",
+        }
+
+    def _record_outcome(self, name: str, error_code: str | None) -> None:
+        """Feed an error response to the endpoint's circuit breaker.
+
+        Retryable errors count as failures; upstream 4xx means the engine is
+        alive (the request was wrong). A full gateway connection pool says
+        nothing about the engine, so it gives no verdict.
+        """
+        if error_code == "pool_timeout":
+            self._registry.release_probe(name)
+        elif self._is_retryable_error(error_code):
+            self._registry.record_failure(name)
+        else:
+            self._registry.record_success(name)
 
     async def _execute_request(
         self, adapter: ProviderAdapter, request: InternalRequest
@@ -515,7 +638,6 @@ class Dispatcher:
         Returns:
             InternalResponse from the provider
         """
-        from gateway.models.common import TaskType
 
         if request.task == TaskType.EMBEDDINGS:
             return await adapter.embeddings(request)
@@ -538,42 +660,34 @@ class Dispatcher:
     ) -> list[str]:
         """Build ordered list of providers to try for streaming.
 
-        Uses the model catalog to prefer providers that have the model,
-        then falls back to health-based ordering. A pinned request
-        (explicit endpoint/model prefix) tries its endpoint and nothing
-        else — never another endpoint the user didn't ask for.
+        Same order as non-streaming dispatch: the resolved primary first
+        (it already reflects pins, target_endpoint, per-model defaults and
+        priority), then other endpoints that have the model (healthy before
+        unhealthy), then the general fallback chain. A pinned request, or
+        one with fallback disabled, tries only the primary.
         """
-        if pinned:
+        if pinned or not request.fallback_allowed:
             return [primary]
 
-        providers: list[str] = []
-        seen: set[str] = set()
+        providers: list[str] = [primary]
+        seen: set[str] = {primary}
 
-        # First: check catalog for providers that have this model
         if model_name:
             catalog_endpoints = self._registry.get_endpoints_with_model(model_name)
-            # Prefer healthy endpoints from catalog
             for ep in catalog_endpoints:
                 if ep not in seen and self._registry.is_healthy(ep):
                     providers.append(ep)
                     seen.add(ep)
-            # Then unhealthy catalog endpoints (model might still work)
+            # Unhealthy catalog endpoints last among those with the model
             for ep in catalog_endpoints:
                 if ep not in seen:
                     providers.append(ep)
                     seen.add(ep)
 
-        # Second: the resolved primary provider
-        if primary not in seen:
-            providers.append(primary)
-            seen.add(primary)
-
-        # Third: fallback chain (if allowed)
-        if request.fallback_allowed:
-            for fb in self._registry.get_fallback_chain(exclude=primary):
-                if fb not in seen:
-                    providers.append(fb)
-                    seen.add(fb)
+        for fb in self._registry.get_fallback_chain(exclude=primary):
+            if fb not in seen:
+                providers.append(fb)
+                seen.add(fb)
 
         return providers
 
@@ -594,64 +708,170 @@ class Dispatcher:
         Raises:
             DispatchError: If all providers fail
         """
-        from gateway.models.common import FinishReason
 
-        pinned = self.parse_provider_from_model(request.model)[0] is not None
+        pinned = self.split_pin(request.model)[0] is not None
 
         provider_name, model_name = self.resolve_provider(request)
+        self._require_permitted(request, provider_name)
 
         # Update request with resolved model
         if model_name and model_name != request.model:
             request = request.model_copy(update={"model": model_name})
 
-        providers_to_try = self._get_stream_provider_order(
-            provider_name,
-            model_name,
+        providers_to_try = self._permitted(
             request,
-            pinned=pinned,
+            self._get_stream_provider_order(
+                provider_name,
+                model_name,
+                request,
+                pinned=pinned,
+            ),
         )
 
         if not providers_to_try:
             raise NoProviderError()
 
         attempted: list[str] = []
+        errors_seen: list[str] = []
 
-        for try_name in providers_to_try[:MAX_FALLBACK_ATTEMPTS]:
-            adapter = self._registry.get(try_name)
-            if adapter is None:
-                continue
+        remaining = [
+            name
+            for name in await self._order_candidates(
+                providers_to_try[:MAX_FALLBACK_ATTEMPTS], pinned
+            )
+            if self._registry.get(name) is not None
+        ]
+        deadline = admission_deadline(self._registry, request.priority)
 
-            attempted.append(try_name)
-
-            # Start the stream and peek at the first chunk to detect errors
-            stream_iter = adapter.chat_stream(request)
+        while remaining:
+            # Admission (D-032); the slot is held until the stream closes
+            lease = await admit(self._registry, remaining, deadline, request.priority)
+            try_name = lease.endpoint
+            remaining.remove(try_name)
             try:
-                first_chunk = await stream_iter.__anext__()
-            except StopAsyncIteration:
-                # Empty stream - provider returned nothing, try next
+                opened = await self._open_stream(try_name, request, pinned, attempted, errors_seen)
+            except BaseException:
+                await lease.release()
+                raise
+            if opened is None:
+                await lease.release()
                 continue
-            except Exception:
-                # Provider threw during stream startup, try next
-                continue
+            first_chunk, stream_iter = opened
+            return try_name, _chain(first_chunk, stream_iter, lease)
 
-            # If first chunk is an error, try next provider
-            # (thinking-only and tool-call chunks are valid content)
-            if (
-                first_chunk.finish_reason == FinishReason.ERROR
-                and not first_chunk.delta
-                and not first_chunk.thinking
-                and not first_chunk.tool_calls
-            ):
-                continue
+        raise AllProvidersUnavailableError(
+            attempted=attempted,
+            last_error=errors_seen[-1] if errors_seen else None,
+        )
 
-            # Success - return a chained stream (first_chunk + rest)
-            async def _chain(
-                first: StreamChunk, rest: AsyncIterator[StreamChunk]
-            ) -> AsyncIterator[StreamChunk]:
-                yield first
-                async for chunk in rest:
-                    yield chunk
+    async def _open_stream(
+        self,
+        try_name: str,
+        request: InternalRequest,
+        pinned: bool,
+        attempted: list[str],
+        errors_seen: list[str],
+    ) -> tuple[StreamChunk, AsyncIterator[StreamChunk]] | None:
+        """Start a stream on one endpoint and peek at its first chunk.
 
-            return try_name, _chain(first_chunk, stream_iter)
+        Returns None when the endpoint can't serve it and the next one
+        should be tried; raises when trying elsewhere would hide the cause.
+        """
 
-        raise AllProvidersUnavailableError(attempted=attempted)
+        adapter = self._registry.get(try_name)
+        if adapter is None:
+            return None
+        if not self._registry.allow_request(try_name):
+            errors_seen.append(f"{try_name}: circuit open (recent failures)")
+            return None
+        attempted.append(try_name)
+
+        # Start the stream and peek at the first chunk to detect errors
+        # before the caller commits to a 200 response
+        # Completion/generate tasks stream from the raw-prompt endpoint
+        # (no chat template), matching their non-streaming dispatch
+        if request.task in (TaskType.COMPLETION, TaskType.GENERATE):
+            stream_iter = adapter.generate_stream(request)
+        else:
+            stream_iter = adapter.chat_stream(request)
+        try:
+            first_chunk = await stream_iter.__anext__()
+        except StopAsyncIteration:
+            self._registry.record_failure(try_name)
+            errors_seen.append(f"{try_name}: empty stream")
+            return None
+        except Exception as e:
+            self._registry.record_failure(try_name)
+            await _close_quietly(stream_iter)
+            errors_seen.append(f"{try_name}: {type(e).__name__}: {e}")
+            return None
+        except BaseException:
+            self._registry.release_probe(try_name)  # cancelled: no verdict
+            await _close_quietly(stream_iter)
+            raise
+
+        # An error before any content means this endpoint can't serve
+        # the request (thinking-only and tool-call chunks are content)
+        if (
+            first_chunk.finish_reason == FinishReason.ERROR
+            and not first_chunk.delta
+            and not first_chunk.thinking
+            and not first_chunk.tool_calls
+        ):
+            await _close_quietly(stream_iter)
+            self._record_outcome(try_name, first_chunk.error_code)
+            message = first_chunk.error or "stream failed"
+            # Same rule as non-streaming: upstream 4xx means the request
+            # itself is wrong, so trying elsewhere only hides the cause.
+            # A pinned request never tries elsewhere.
+            if pinned or not self._is_retryable_error(first_chunk.error_code):
+                raise ProviderError(
+                    message=message,
+                    provider=try_name,
+                    details={"error_code": first_chunk.error_code, "model": request.model},
+                    http_status=self._upstream_client_status(first_chunk.error_code),
+                )
+            logger.warning(
+                "Provider stream failed before first chunk",
+                provider=try_name,
+                model=request.model,
+                error=message,
+                error_code=first_chunk.error_code,
+            )
+            errors_seen.append(f"{try_name}: {message}")
+            return None
+
+        self._registry.record_success(try_name)
+        return first_chunk, stream_iter
+
+
+async def _close_quietly(stream: AsyncIterator[StreamChunk]) -> None:
+    """Close an upstream stream we're abandoning, so its connection is released now."""
+    aclose = getattr(stream, "aclose", None)
+    if aclose is None:
+        return
+    try:
+        await aclose()
+    except Exception:
+        logger.debug("Error closing abandoned stream", exc_info=True)
+
+
+async def _chain(
+    first: StreamChunk, rest: AsyncIterator[StreamChunk], lease: Lease | None = None
+) -> AsyncIterator[StreamChunk]:
+    """The peeked first chunk followed by the rest of the stream.
+
+    Closing this generator closes the upstream stream too; `async for`
+    alone would leave it open until garbage collection. The endpoint's
+    admission slot is released when the stream ends either way.
+    """
+    try:
+        yield first
+        async for chunk in rest:
+            yield chunk
+    finally:
+        try:
+            await _close_quietly(rest)
+        finally:
+            if lease is not None:
+                await lease.release()

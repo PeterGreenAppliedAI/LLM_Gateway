@@ -22,6 +22,8 @@ Per rule.md:
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 
+import httpx
+
 from gateway.config import ProviderConfig
 from gateway.models.common import (
     HealthStatus,
@@ -31,6 +33,17 @@ from gateway.models.common import (
     ProviderType,
 )
 from gateway.models.internal import InternalRequest, InternalResponse, StreamChunk
+
+# Connection pool sizing (D-033). With max_concurrent set, admission keeps
+# requests at or below it, so the pool needs only a little headroom for
+# health checks and model discovery; every connection may stay alive, so
+# a burst doesn't pay TCP setup again. Unset keeps httpx's defaults.
+POOL_HEADROOM = 4
+DEFAULT_MAX_CONNECTIONS = 100
+DEFAULT_MAX_KEEPALIVE = 20
+# A request waiting this long for a pooled connection fails fast instead of
+# inheriting the read timeout (up to an hour)
+POOL_TIMEOUT_SECONDS = 5.0
 
 
 class ProviderAdapter(ABC):
@@ -55,7 +68,9 @@ class ProviderAdapter(ABC):
         self.base_url = config.base_url  # Already validated by ProviderConfig
         self.timeout = config.timeout
         self.connect_timeout = config.connect_timeout
+        self.stream_idle_timeout = config.stream_idle_timeout
         self.max_retries = config.max_retries
+        self.max_concurrent = config.max_concurrent
 
     # =========================================================================
     # Required Methods (per PRD Section 12)
@@ -147,14 +162,48 @@ class ProviderAdapter(ABC):
             StreamChunk with incremental content
         """
         # Default: non-streaming fallback
-        response = await self.chat(request)
-        yield StreamChunk(
+        yield self._response_as_chunk(await self.chat(request))
+
+    async def generate_stream(self, request: InternalRequest) -> AsyncIterator[StreamChunk]:
+        """Stream a raw-prompt completion (no chat template).
+
+        Used for completion/generate tasks. Default implementation yields
+        the non-streaming generate() result as a single chunk. Override
+        for providers with a native streaming completion endpoint.
+        """
+        yield self._response_as_chunk(await self.generate(request))
+
+    @staticmethod
+    def _response_as_chunk(response: InternalResponse) -> StreamChunk:
+        """A complete response as one terminal stream chunk, errors included."""
+        from gateway.models.common import FinishReason
+
+        if response.is_error:
+            return StreamChunk(
+                request_id=response.request_id,
+                delta="",
+                finish_reason=FinishReason.ERROR,
+                error=(response.error or "")[:1000],
+                error_code=(response.error_code or "unknown_error")[:64],
+            )
+        return StreamChunk(
             request_id=response.request_id,
             index=0,
             delta=response.get_output_text(),
+            thinking=response.thinking,
+            tool_calls=response.tool_calls,
             finish_reason=response.finish_reason,
             usage=response.usage,
         )
+
+    async def media_client(self):
+        """HTTP client for OpenAI-shaped media routes (/v1/audio/*, /v1/images/*).
+
+        Carries the endpoint's base URL and auth but no default Content-Type,
+        so multipart uploads keep their own. Adapters whose engines speak the
+        OpenAI media API override this (D-020).
+        """
+        raise NotImplementedError(f"{self.name} does not serve media routes")
 
     # =========================================================================
     # Provider Info
@@ -216,6 +265,29 @@ class ProviderAdapter(ABC):
     # =========================================================================
     # Error Handling (DRY - shared across all adapters)
     # =========================================================================
+
+    def http_limits(self) -> httpx.Limits:
+        """Connection pool limits for this endpoint's clients."""
+        if self.max_concurrent is None:
+            return httpx.Limits(
+                max_connections=DEFAULT_MAX_CONNECTIONS,
+                max_keepalive_connections=DEFAULT_MAX_KEEPALIVE,
+            )
+        size = self.max_concurrent + POOL_HEADROOM
+        return httpx.Limits(max_connections=size, max_keepalive_connections=size)
+
+    def http_timeout(self) -> httpx.Timeout:
+        return httpx.Timeout(self.timeout, connect=self.connect_timeout, pool=POOL_TIMEOUT_SECONDS)
+
+    def _timeout_response(
+        self, request: InternalRequest, exc: httpx.TimeoutException
+    ) -> InternalResponse:
+        """A timeout, telling the gateway's own pool exhaustion apart from a slow engine."""
+        if isinstance(exc, httpx.PoolTimeout):
+            return self._error_response(
+                request, f"Gateway connection pool exhausted: {exc}", "pool_timeout"
+            )
+        return self._error_response(request, f"Timeout: {exc}", "timeout")
 
     def _error_response(
         self, request: InternalRequest, error: str, error_code: str

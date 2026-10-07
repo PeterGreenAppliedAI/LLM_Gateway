@@ -16,12 +16,14 @@ Ollama-compatible endpoints:
 - POST /api/embeddings
 """
 
+from gateway.routes.audio import router as audio_router
 from gateway.routes.devmesh import router as devmesh_router
 from gateway.routes.ollama import router as ollama_router
 from gateway.routes.openai import router as openai_router
 
 __all__ = [
     "openai_router",
+    "audio_router",
     "devmesh_router",
     "ollama_router",
 ]

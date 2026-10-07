@@ -12,7 +12,15 @@ Production: PostgreSQL recommended
 from gateway.storage.audit import AuditLogger
 from gateway.storage.engine import DatabaseConfig, create_async_db_engine
 from gateway.storage.keys import KeyManager
-from gateway.storage.schema import api_keys, audit_log, metadata, security_scans, usage_daily
+from gateway.storage.runtime_settings import RuntimeSettingsStore
+from gateway.storage.schema import (
+    api_keys,
+    audit_log,
+    metadata,
+    runtime_settings,
+    security_scans,
+    usage_daily,
+)
 from gateway.storage.security_store import SecurityScanStore
 
 __all__ = [
@@ -22,6 +30,7 @@ __all__ = [
     "usage_daily",
     "api_keys",
     "security_scans",
+    "runtime_settings",
     # Engine
     "create_async_db_engine",
     "DatabaseConfig",
@@ -31,4 +40,6 @@ __all__ = [
     "KeyManager",
     # Security scans
     "SecurityScanStore",
+    # Runtime settings
+    "RuntimeSettingsStore",
 ]

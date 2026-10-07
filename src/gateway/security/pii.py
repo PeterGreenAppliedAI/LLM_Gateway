@@ -197,3 +197,25 @@ class PIIScrubber:
             output_messages.append(new_msg)
 
         return output_messages, results
+
+    def redact(self, value):
+        """Return a copy of a JSON-like value with PII replaced in every string.
+
+        For data at rest (audit bodies, stored scans): independent of the
+        per-route scrub setting, so flag-only mode still never persists raw
+        PII. Text beyond the scan limit is dropped rather than stored
+        unscanned.
+        """
+        if isinstance(value, str):
+            if not value:
+                return value
+            result = self.scan(value, scrub=True)
+            redacted = result.scrubbed_text if result.scrubbed_text is not None else value
+            if len(value) > self._max_input_length:
+                redacted = redacted[: self._max_input_length] + "[TRUNCATED: not scanned for PII]"
+            return redacted
+        if isinstance(value, dict):
+            return {k: self.redact(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [self.redact(v) for v in value]
+        return value

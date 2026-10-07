@@ -14,9 +14,10 @@ Per Endpoints/Environments Architecture:
 
 import asyncio
 import contextlib
+import copy
 import re
 import secrets
-from collections.abc import Awaitable
+from collections.abc import AsyncIterator, Awaitable
 from typing import Annotated, TypeVar
 from uuid import uuid4
 
@@ -31,12 +32,15 @@ from gateway.errors import (
     InvalidApiKeyFormatError,
     PolicyError,
     RateLimitError,
+    ValidationError,
 )
 from gateway.observability import RequestContext, get_logger
 from gateway.observability.logging import clear_request_context, set_request_context
 from gateway.policy import PolicyEnforcer, PolicyViolation
 from gateway.policy.token_budget import TokenBudgetTracker
 from gateway.security import AsyncSecurityAnalyzer, PIIScrubber, Sanitizer
+from gateway.security.access import DEV_CLIENT_ID, dev_mode_allows, from_networks
+from gateway.state.concurrency import ConcurrencyBackend, InMemoryConcurrency
 from gateway.storage import AuditLogger
 
 logger = get_logger(__name__)
@@ -131,61 +135,69 @@ def get_dispatcher(
 
 
 def get_enforcer(request: Request) -> PolicyEnforcer:
-    """Get or create policy enforcer.
-
-    Creates enforcer on first request and caches in app state.
-    Bridges gateway.yaml rate_limits config into PolicyConfig.
-    """
+    """The app's policy enforcer (built at startup; built here if absent, e.g. in tests)."""
     enforcer = getattr(request.app.state, "enforcer", None)
     if enforcer is None:
-        config = get_config(request)
-        if config.policy:
-            policy_config = config.policy
-        else:
-            # Bridge gateway.yaml rate_limits + token_budgets into PolicyConfig
-            from gateway.policy.enforcer import PolicyConfig
-            from gateway.policy.rate_limiter import RateLimitConfig as PolicyRateLimitConfig
-            from gateway.policy.token_budget import (
-                ModelAssignment,
-                ModelTierConfig,
-                TokenBudgetConfig,
-            )
-            from gateway.policy.token_limiter import TokenLimitConfig
+        enforcer = build_enforcer(request.app)
+    return enforcer
 
-            # Build token budget config from yaml
-            budget_cfg = config.token_budgets
-            budget_config = TokenBudgetConfig(
-                enabled=budget_cfg.enabled,
-                default_daily_limit=budget_cfg.default_daily_limit,
-                default_cost_multiplier=budget_cfg.default_cost_multiplier,
-                enforce_pre_request=budget_cfg.enforce_pre_request,
-                model_tiers=[
-                    ModelTierConfig(
-                        name=t.name,
-                        cost_multiplier=t.cost_multiplier,
-                        daily_limit=t.daily_limit,
-                    )
-                    for t in budget_cfg.model_tiers
-                ],
-                model_assignments=[
-                    ModelAssignment(model=a.model, tier=a.tier)
-                    for a in budget_cfg.model_assignments
-                ],
-            )
 
-            policy_config = PolicyConfig(
-                rate_limit=PolicyRateLimitConfig(
-                    requests_per_minute=config.rate_limits.requests_per_minute_per_user,
-                    requests_per_hour=config.rate_limits.requests_per_hour_per_user,
-                    burst_limit=config.rate_limits.burst_limit,
-                ),
-                token_limit=TokenLimitConfig(
-                    max_tokens_per_request=config.rate_limits.max_tokens_per_request,
-                ),
-                token_budget=budget_config,
-            )
-        enforcer = PolicyEnforcer(policy_config)
-        request.app.state.enforcer = enforcer
+def build_enforcer(app) -> PolicyEnforcer:
+    """Create the policy enforcer from config and cache it in app state.
+
+    Bridges gateway.yaml rate_limits and token_budgets into PolicyConfig.
+    """
+    config = getattr(app.state, "config", None) or GatewayConfig()
+    if config.policy:
+        policy_config = config.policy
+    else:
+        # Bridge gateway.yaml rate_limits + token_budgets into PolicyConfig
+        from gateway.policy.enforcer import PolicyConfig
+        from gateway.policy.rate_limiter import RateLimitConfig as PolicyRateLimitConfig
+        from gateway.policy.token_budget import (
+            ModelAssignment,
+            ModelTierConfig,
+            TokenBudgetConfig,
+        )
+        from gateway.policy.token_limiter import TokenLimitConfig
+
+        # Build token budget config from yaml
+        budget_cfg = config.token_budgets
+        budget_config = TokenBudgetConfig(
+            enabled=budget_cfg.enabled,
+            default_daily_limit=budget_cfg.default_daily_limit,
+            default_cost_multiplier=budget_cfg.default_cost_multiplier,
+            enforce_pre_request=budget_cfg.enforce_pre_request,
+            model_tiers=[
+                ModelTierConfig(
+                    name=t.name,
+                    cost_multiplier=t.cost_multiplier,
+                    daily_limit=t.daily_limit,
+                )
+                for t in budget_cfg.model_tiers
+            ],
+            model_assignments=[
+                ModelAssignment(model=a.model, tier=a.tier) for a in budget_cfg.model_assignments
+            ],
+        )
+
+        policy_config = PolicyConfig(
+            rate_limit=PolicyRateLimitConfig(
+                enabled=config.rate_limits.enabled,
+                requests_per_minute=config.rate_limits.requests_per_minute_per_user,
+                requests_per_hour=config.rate_limits.requests_per_hour_per_user,
+                burst_limit=config.rate_limits.burst_limit,
+            ),
+            token_limit=TokenLimitConfig(
+                max_tokens_per_request=config.rate_limits.max_tokens_per_request,
+            ),
+            token_budget=budget_config,
+        )
+    shared = getattr(app.state, "shared_state", None)
+    enforcer = PolicyEnforcer(
+        policy_config, rate_store=shared.rate_windows if shared is not None else None
+    )
+    app.state.enforcer = enforcer
     return enforcer
 
 
@@ -220,6 +232,7 @@ async def validate_api_key(
     api_key: str,
     config: GatewayConfig,
     db_engine=None,
+    key_cache=None,
 ) -> dict:
     """Validate API key and return auth details.
 
@@ -260,14 +273,18 @@ async def validate_api_key(
                 "client_id": key_config.client_id,
                 "environment": key_config.environment,
                 "target_endpoint": key_config.target_endpoint,
+                "max_concurrent": key_config.max_concurrent,
+                "priority": key_config.priority,
             }
 
-    # Source 2: DB-backed keys (async hash lookup)
+    # Source 2: DB-backed keys (hash lookup; cached when the app has a cache, D-040)
     if db_engine is not None:
-        from gateway.storage.keys import KeyManager
+        if key_cache is not None:
+            key_info = await key_cache.validate(api_key)
+        else:
+            from gateway.storage.keys import KeyManager
 
-        km = KeyManager(db_engine)
-        key_info = await km.validate_plaintext_key(api_key)
+            key_info = await KeyManager(db_engine).validate_plaintext_key(api_key)
         if key_info is not None:
             return {
                 "client_id": key_info["client_id"],
@@ -275,6 +292,8 @@ async def validate_api_key(
                 "allowed_models": key_info.get("allowed_models"),
                 "allowed_endpoints": key_info.get("allowed_endpoints"),
                 "rate_limit_rpm": key_info.get("rate_limit_rpm"),
+                "max_concurrent": key_info.get("max_concurrent"),
+                "priority": key_info.get("priority") or "interactive",
             }
 
     raise InvalidApiKeyError()
@@ -291,6 +310,8 @@ class AuthResult:
         allowed_models: list[str] | None = None,
         allowed_endpoints: list[str] | None = None,
         rate_limit_rpm: int | None = None,
+        max_concurrent: int | None = None,
+        priority: str = "interactive",
     ):
         self.client_id = client_id
         self.environment = environment
@@ -298,6 +319,8 @@ class AuthResult:
         self.allowed_models = allowed_models
         self.allowed_endpoints = allowed_endpoints
         self.rate_limit_rpm = rate_limit_rpm
+        self.max_concurrent = max_concurrent  # in-flight requests for this key (D-034)
+        self.priority = priority  # interactive | batch
 
 
 async def authenticate(
@@ -325,6 +348,47 @@ async def authenticate(
     return result.client_id
 
 
+ADMIN_CLIENT_ID = "admin"
+
+
+def _solo_client(request: Request, config: GatewayConfig) -> str:
+    """Auth is off: allow this machine (and auth.anonymous.allowed_networks) only.
+
+    Raises:
+        PolicyError: The request comes from anywhere else.
+    """
+    if dev_mode_allows(request):
+        return DEV_CLIENT_ID
+    if from_networks(request, config.auth.anonymous.allowed_networks):
+        return "default"
+    raise PolicyError(
+        message="Authentication is off, so this gateway only accepts requests from "
+        f"{', '.join(config.auth.anonymous.allowed_networks)}. To serve other machines, "
+        "enable auth (auth.enabled: true) or add their network to "
+        "auth.anonymous.allowed_networks.",
+        code=ErrorCode.NETWORK_NOT_ALLOWED,
+    )
+
+
+def _extract_api_key(authorization: str | None, x_api_key: str | None) -> str | None:
+    """Pull the API key from a Bearer header or X-API-Key."""
+    if authorization:
+        if authorization.lower().startswith("bearer "):
+            return authorization[7:].strip()
+        raise AuthenticationError(message="Invalid authorization header format")
+    return x_api_key or None
+
+
+def _is_admin_key(api_key: str) -> bool:
+    """Whether api_key is the configured GATEWAY_ADMIN_API_KEY (constant-time)."""
+    from gateway.settings import get_settings
+
+    admin_key = get_settings().admin_api_key
+    return admin_key is not None and secrets.compare_digest(
+        api_key.encode(), admin_key.get_secret_value().encode()
+    )
+
+
 async def require_api_key(
     request: Request,
     authorization: Annotated[str | None, Header()] = None,
@@ -348,22 +412,23 @@ async def require_api_key(
     """
     config = get_config(request)
     if not config.auth.enabled:
-        return "default"
+        return _solo_client(request, config)
 
-    api_key = None
-    if authorization:
-        if authorization.lower().startswith("bearer "):
-            api_key = authorization[7:].strip()
-        else:
-            raise AuthenticationError(message="Invalid authorization header format")
-    elif x_api_key:
-        api_key = x_api_key
-
+    api_key = _extract_api_key(authorization, x_api_key)
     if not api_key:
+        if dev_mode_allows(request):
+            return DEV_CLIENT_ID
         raise AuthenticationError(message="API key required")
 
+    # The admin key is a superset of a client key: the dashboard sends one
+    # key for both reads and admin writes
+    if _is_admin_key(api_key):
+        return ADMIN_CLIENT_ID
+
     db_engine = getattr(request.app.state, "db_engine", None)
-    key_info = await validate_api_key(api_key, config, db_engine)
+    key_info = await validate_api_key(
+        api_key, config, db_engine, getattr(request.app.state, "key_cache", None)
+    )
     return key_info["client_id"]
 
 
@@ -385,30 +450,31 @@ async def require_admin(
     from gateway.settings import get_settings
 
     settings = get_settings()
+    config = get_config(request)
+    api_key = _extract_api_key(authorization, x_api_key)
 
-    # If no admin key configured, fall back to standard auth — but still
-    # require a real key (no anonymous admin)
+    if not api_key and dev_mode_allows(request):
+        return ADMIN_CLIENT_ID  # test mode: the local tester is the operator
+    if not config.auth.enabled and not settings.admin_api_key:
+        _solo_client(request, config)  # solo mode: this machine only
+        return ADMIN_CLIENT_ID
+
+    # With auth on, operator access needs the operator credential. Falling
+    # back to any client key (as before D-042) gave every key holder the
+    # dashboard, key management and budgets.
     if not settings.admin_api_key:
-        return await require_api_key(request, authorization, x_api_key)
-
-    # Extract API key from headers
-    api_key = None
-    if authorization:
-        if authorization.lower().startswith("bearer "):
-            api_key = authorization[7:].strip()
-        else:
-            raise AuthenticationError(message="Invalid authorization header format")
-    elif x_api_key:
-        api_key = x_api_key
-
+        raise PolicyError(
+            message="Admin routes are disabled: set GATEWAY_ADMIN_API_KEY to use the dashboard "
+            "and management APIs (or GATEWAY_DEV_MODE=true to try things locally)",
+            code=ErrorCode.ADMIN_KEY_REQUIRED,
+        )
     if not api_key:
         raise AuthenticationError(message="Admin authentication required")
 
-    # Compare against admin key using constant-time comparison
-    if not secrets.compare_digest(api_key, settings.admin_api_key.get_secret_value()):
+    if not _is_admin_key(api_key):
         raise AuthenticationError(message="Invalid admin credentials")
 
-    return "admin"
+    return ADMIN_CLIENT_ID
 
 
 async def get_auth(
@@ -452,6 +518,10 @@ async def authenticate_with_environment(
     """
     config = get_config(request)
 
+    # Solo mode (auth off): no keys, but only from this machine (D-042)
+    if not config.auth.enabled:
+        return AuthResult(_solo_client(request, config))
+
     # Extract API key from headers
     api_key = None
 
@@ -464,13 +534,38 @@ async def authenticate_with_environment(
     elif x_api_key:
         api_key = x_api_key
 
-    # If no key provided, use default (auth is optional - keys enable features like target_endpoint)
+    # No key: anonymous client "default". With auth enabled, the anonymous
+    # policy decides whether that's allowed and what it may reach —
+    # otherwise dropping the key would escape every per-key restriction.
     if not api_key:
-        return AuthResult("default", None, None)
+        if dev_mode_allows(request):
+            return AuthResult(DEV_CLIENT_ID)  # test mode (D-042): audited as "dev"
+        anonymous = config.auth.anonymous
+        if not anonymous.enabled:
+            raise AuthenticationError(message="API key required")
+        if not from_networks(request, anonymous.allowed_networks):
+            raise AuthenticationError(
+                message="API key required (keyless access is only allowed from "
+                "auth.anonymous.allowed_networks)"
+            )
+        return AuthResult(
+            client_id="default",
+            allowed_models=anonymous.allowed_models,
+            allowed_endpoints=anonymous.allowed_endpoints,
+            rate_limit_rpm=anonymous.rate_limit_rpm,
+            max_concurrent=anonymous.max_concurrent,
+        )
+
+    # The admin key can do anything a client key can (D-002), including
+    # inference: the dashboard playground uses it. Audited as client "admin".
+    if _is_admin_key(api_key):
+        return AuthResult(client_id=ADMIN_CLIENT_ID)
 
     # Validate key if provided (pass db_engine for DB-backed key lookup)
     db_engine = getattr(request.app.state, "db_engine", None)
-    key_info = await validate_api_key(api_key, config, db_engine)
+    key_info = await validate_api_key(
+        api_key, config, db_engine, getattr(request.app.state, "key_cache", None)
+    )
     return AuthResult(
         client_id=key_info["client_id"],
         environment=key_info.get("environment"),
@@ -478,59 +573,164 @@ async def authenticate_with_environment(
         allowed_models=key_info.get("allowed_models"),
         allowed_endpoints=key_info.get("allowed_endpoints"),
         rate_limit_rpm=key_info.get("rate_limit_rpm"),
+        max_concurrent=key_info.get("max_concurrent"),
+        priority=key_info.get("priority") or "interactive",
     )
 
 
-async def get_environment(
+PRIORITY_HEADER = "X-DevMesh-Priority"
+
+
+async def get_inference_auth(
     request: Request,
-    x_environment: Annotated[str | None, Header(alias="X-Environment")] = None,
-    authorization: Annotated[str | None, Header()] = None,
-    x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
-) -> EnvironmentConfig | None:
-    """Get environment configuration for the request.
+    authenticated: Annotated[AuthResult, Depends(get_auth)],
+    x_devmesh_priority: Annotated[str | None, Header(alias=PRIORITY_HEADER)] = None,
+) -> AsyncIterator[AuthResult]:
+    """Authenticate an inference request and hold one of its key's slots (D-034).
 
-    Resolution order:
-    1. X-Environment header (explicit override)
-    2. Environment from API key configuration
-    3. Default environment from config
+    A key with `max_concurrent` gets 429 when that many of its requests are
+    already in flight. The slot is held until the response is fully sent
+    (FastAPI runs this teardown after streaming ends), so a long stream
+    counts for its whole duration.
 
-    Args:
-        request: FastAPI request
-        x_environment: Optional explicit environment header
-        authorization: Optional auth header (for env lookup)
-        x_api_key: Optional API key header (for env lookup)
+    `X-DevMesh-Priority: batch` lets a client mark its own request as
+    batch work. It can only lower priority: a batch key stays batch.
+    """
+    auth = copy.copy(authenticated)
+    if x_devmesh_priority is not None:
+        value = x_devmesh_priority.strip().lower()
+        if value not in ("interactive", "batch"):
+            raise ValidationError(message=f"{PRIORITY_HEADER} must be 'interactive' or 'batch'")
+        if value == "batch":
+            auth.priority = "batch"
 
-    Returns:
-        EnvironmentConfig if environment is configured, None otherwise
+    # Budget reservations made by this request (D-043); released below if
+    # never settled, so a failed or abandoned request doesn't keep its hold
+    from gateway.policy.enforcer import start_budget_holds
+
+    holds = start_budget_holds()
+
+    lease = None
+    if auth.max_concurrent is not None:
+        slots = _key_slots(request)
+        slots.set_capacity(auth.client_id, auth.max_concurrent)
+        lease = await slots.try_acquire(auth.client_id)
+        if lease is None:
+            raise RateLimitError(
+                message=(
+                    f"Too many concurrent requests for this API key "
+                    f"(max {auth.max_concurrent} in flight)"
+                ),
+                retry_after=1,
+                code=ErrorCode.CONCURRENCY_LIMIT_EXCEEDED,
+                details={"max_concurrent": auth.max_concurrent},
+            )
+    try:
+        yield auth
+    finally:
+        if lease is not None:
+            await lease.release()
+        enforcer = getattr(request.app.state, "enforcer", None)
+        if holds and enforcer is not None:
+            enforcer.release_budget_holds(holds)
+
+
+def _key_slots(request: Request) -> ConcurrencyBackend:
+    """Per-key in-flight counts: shared state if configured (D-035), else this process's."""
+    shared = getattr(request.app.state, "shared_state", None)
+    if shared is not None:
+        return shared.key_slots
+    slots = getattr(request.app.state, "key_slots", None)
+    if slots is None:
+        slots = InMemoryConcurrency()
+        request.app.state.key_slots = slots
+    return slots
+
+
+def resolve_environment(request: Request, auth: AuthResult) -> EnvironmentConfig | None:
+    """Pick the environment for a request.
+
+    An API key bound to an environment always gets that environment; an
+    X-Environment header naming a different one is refused rather than
+    silently ignored. Keys without one (and keyless requests) may choose
+    with the header, else get the default. Unknown names are refused —
+    falling through to "no environment" would lift every restriction.
     """
     config = get_config(request)
-
-    # If no environments configured, return None
     if not config.environments:
         return None
 
-    env_name: str | None = None
+    header = request.headers.get("X-Environment")
+    if auth.environment:
+        if header and header != auth.environment:
+            raise PolicyError(
+                message=f"API key is bound to environment '{auth.environment}'",
+                code=ErrorCode.ENVIRONMENT_NOT_ALLOWED,
+            )
+        name = auth.environment
+    else:
+        name = header
 
-    # Priority 1: Explicit header
-    if x_environment:
-        env_name = x_environment
+    if not name:
+        return config.get_default_environment()
 
-    # Priority 2: From API key
-    if not env_name:
-        try:
-            auth_result = await authenticate_with_environment(request, authorization, x_api_key)
-            env_name = auth_result.environment
-        except AuthenticationError:
-            # Auth failed, will use default
-            pass
+    environment = config.get_environment(name)
+    if environment is None:
+        raise PolicyError(
+            message=f"Unknown environment '{name}'",
+            code=ErrorCode.ENVIRONMENT_NOT_ALLOWED,
+        )
+    return environment
 
-    # Priority 3: Default environment
-    if not env_name:
-        default_env = config.get_default_environment()
-        return default_env
 
-    # Look up environment by name
-    return config.get_environment(env_name)
+async def resolve_access_scope(request: Request, auth: AuthResult, model: str | None) -> dict:
+    """Routing restrictions for a request, as InternalRequest field updates.
+
+    Combines the API key's target/allowed endpoints with the environment's
+    endpoints and approved models. The dispatcher enforces the resulting
+    allowed_endpoints on every endpoint it tries, so catalog routing and
+    fallback can't reach an endpoint the key or environment excludes.
+
+    Raises:
+        PolicyError: Unknown/conflicting environment, or model not approved
+            in the environment.
+    """
+    from gateway.catalog.models import (
+        endpoint_allowed_in_environment,
+        model_approved_in_environment,
+    )
+
+    updates: dict = {"priority": auth.priority}
+    if auth.target_endpoint:
+        updates["preferred_provider"] = auth.target_endpoint
+
+    allowed = set(auth.allowed_endpoints) if auth.allowed_endpoints else None
+
+    environment = resolve_environment(request, auth)
+    if environment is not None:
+        updates["environment"] = environment.name
+        endpoint_names = {ep.name for ep in get_config(request).endpoints} | {
+            p.name for p in get_config(request).providers
+        }
+        bare_model = Dispatcher.parse_provider_from_model(model, endpoint_names)[1] or ""
+        # model None = listing (e.g. GET /v1/audio/voices): scope only, no model check
+        if model is not None and not model_approved_in_environment(bare_model, environment):
+            raise PolicyError(
+                message=f"Model '{bare_model}' is not approved in environment '{environment.name}'",
+                code=ErrorCode.MODEL_NOT_ALLOWED,
+            )
+        registry = await get_registry(request)
+        labels = registry.get_endpoint_labels()
+        in_environment = {
+            name
+            for name in registry.list_providers()
+            if endpoint_allowed_in_environment(name, environment, labels)
+        }
+        allowed = in_environment if allowed is None else allowed & in_environment
+
+    if allowed is not None:
+        updates["allowed_endpoints"] = sorted(allowed)
+    return updates
 
 
 def setup_request_context(

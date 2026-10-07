@@ -166,6 +166,70 @@ class MetricsCollector:
             **reg_kwargs,
         )
 
+        # Audit writes that didn't reach the database on the first path
+        # (outcome: spilled = saved to the spill file for replay,
+        # lost = not saved anywhere, rejected = refused by the database)
+        self._audit_write_failures = Counter(
+            f"{prefix}_audit_write_failures_total",
+            "Audit/PII event writes that failed to reach the database",
+            ["table", "outcome"],
+            **reg_kwargs,
+        )
+
+        # Circuit breaker state per endpoint (0 closed, 1 half-open, 2 open);
+        # refreshed from the registry on each scrape
+        self._circuit_state = Gauge(
+            f"{prefix}_circuit_state",
+            "Endpoint circuit breaker state (0 closed, 1 half-open, 2 open)",
+            ["endpoint"],
+            **reg_kwargs,
+        )
+
+        # Admission control (D-032). Gauges refreshed from the registry on
+        # each scrape; waits and rejections recorded as they happen.
+        self._endpoint_in_flight = Gauge(
+            f"{prefix}_endpoint_in_flight",
+            "Requests this gateway has in flight to the endpoint",
+            ["endpoint"],
+            **reg_kwargs,
+        )
+        self._endpoint_max_concurrent = Gauge(
+            f"{prefix}_endpoint_max_concurrent",
+            "Configured max_concurrent per endpoint (absent = unlimited)",
+            ["endpoint"],
+            **reg_kwargs,
+        )
+        self._admission_queue_depth = Gauge(
+            f"{prefix}_admission_queue_depth",
+            "Requests waiting for an endpoint slot",
+            **reg_kwargs,
+        )
+        self._admission_wait = Histogram(
+            f"{prefix}_admission_wait_seconds",
+            "Time requests waited for an endpoint slot (only requests that waited)",
+            ["priority"],
+            buckets=(0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60),
+            **reg_kwargs,
+        )
+        self._admission_rejected = Counter(
+            f"{prefix}_admission_rejected_total",
+            "Requests refused with 503 because every candidate endpoint stayed full",
+            ["priority"],
+            **reg_kwargs,
+        )
+
+        # Audit intent log (D-038): records not yet in the database
+        self._audit_backlog = Gauge(
+            f"{prefix}_audit_backlog_records",
+            "Audit records in the intent log not yet written to the database",
+            **reg_kwargs,
+        )
+        self._audit_backlog_age = Gauge(
+            f"{prefix}_audit_backlog_oldest_seconds",
+            "Age of the oldest audit record not yet written to the database",
+            **reg_kwargs,
+        )
+
         # Active requests gauge
         self._active_requests = Gauge(
             f"{prefix}_active_requests", "Number of active requests", ["provider"], **reg_kwargs
@@ -232,6 +296,46 @@ class MetricsCollector:
             self._tokens_per_second.labels(provider=provider, model=model).observe(
                 tokens_per_second
             )
+
+    def record_audit_write_failure(self, table: str, outcome: str) -> None:
+        """Record an audit write that failed (outcome: spilled, lost, rejected)."""
+        if not self._enabled:
+            return
+        self._audit_write_failures.labels(
+            table=self._sanitize_label(table), outcome=self._sanitize_label(outcome)
+        ).inc()
+
+    def set_circuit_state(self, endpoint: str, state: str) -> None:
+        """Publish an endpoint's breaker state (closed, half_open, open)."""
+        if not self._enabled:
+            return
+        value = {"closed": 0, "half_open": 1, "open": 2}.get(state, 0)
+        self._circuit_state.labels(endpoint=self._sanitize_label(endpoint)).set(value)
+
+    def set_endpoint_load(self, endpoint: str, in_flight: int, capacity: int | None) -> None:
+        if not self._enabled:
+            return
+        endpoint = self._sanitize_label(endpoint)
+        self._endpoint_in_flight.labels(endpoint=endpoint).set(in_flight)
+        if capacity is not None:
+            self._endpoint_max_concurrent.labels(endpoint=endpoint).set(capacity)
+
+    def set_audit_backlog(self, records: int, oldest_seconds: float) -> None:
+        if self._enabled:
+            self._audit_backlog.set(records)
+            self._audit_backlog_age.set(oldest_seconds)
+
+    def set_admission_queue_depth(self, waiting: int) -> None:
+        if self._enabled:
+            self._admission_queue_depth.set(waiting)
+
+    def observe_admission_wait(self, seconds: float, priority: str = "interactive") -> None:
+        if self._enabled:
+            self._admission_wait.labels(priority=self._sanitize_label(priority)).observe(seconds)
+
+    def record_admission_rejected(self, priority: str = "interactive") -> None:
+        if self._enabled:
+            self._admission_rejected.labels(priority=self._sanitize_label(priority)).inc()
 
     def record_error(self, provider: str, error_type: str) -> None:
         """Record a provider error.

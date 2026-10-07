@@ -33,7 +33,7 @@ This isn't just a proxy. It's a **security and governance layer** with a built-i
 git clone https://github.com/PeterGreenAppliedAI/LLM_Gateway.git
 cd LLM_Gateway
 
-python3 -m venv venv && source venv/bin/activate
+python3 -m venv venv && source venv/bin/activate   # Python 3.11 or newer
 pip install -e ".[dev]"
 
 cp config/gateway.yaml.example config/gateway.yaml
@@ -47,7 +47,7 @@ cp .env.example .env
 ./start-gateway.sh
 ```
 
-Point your apps at `http://your-server:8001`. Use OpenAI format or Ollama format — both work.
+Point your apps at `http://your-server:8001`. Use OpenAI format or Ollama format — both work. Clients need an API key; keyless clients on other machines need `auth.anonymous` (see [Access modes](#api-compatibility)). To try things out without keys, run `./start-gateway.sh --dev` (test mode, this machine only).
 
 ```python
 # Works with any OpenAI-compatible client
@@ -87,13 +87,13 @@ LiteLLM is a good proxy for routing requests to different LLM providers. DevMesh
 | **Token budgets** | Cost-tier weighted daily quotas per API key | Spend limits per key |
 | **Self-hosted only** | Yes — runs inside your infrastructure | Cloud + self-hosted options |
 | **Dashboard** | Included React UI with security, PII, budgets, requests | Separate UI project |
-| **Test coverage** | 538 tests across Python 3.10/3.11/3.12 | Varies |
+| **Test coverage** | ~915 tests on Python 3.11–3.13, Linux and Windows, SQLite, PostgreSQL and Redis | Varies |
 
 If you just need to route requests to different providers, LiteLLM works. If you need to know what's going through your models, stop PII from leaking, build your own guard model, and prove it all to an auditor — that's what this is for.
 
 ## Dashboard
 
-React + TypeScript monitoring UI with four tabs:
+React + TypeScript monitoring UI with five tabs:
 
 <!-- TODO: Take screenshots and drop into docs/screenshots/ -->
 <!-- ![Dashboard Tab](docs/screenshots/dashboard-tab.png) -->
@@ -102,15 +102,16 @@ React + TypeScript monitoring UI with four tabs:
 <!-- ![Requests Tab](docs/screenshots/requests-tab.png) -->
 
 - **Dashboard** — Request volume, success rates, latency, token usage, endpoint health, top models
-- **Security** — Guard model verdicts, regex vs guard comparison, PII detection audit with hash-only event log, security scan labeling with bulk actions and training data export
+- **Security** — Guard model verdicts, regex vs guard comparison, PII scrubbing controls (admin, applied live) and detection audit with hash-only event log, security scan labeling with bulk actions and training data export
 - **Keys & Budgets** — API key management (create/revoke with model/endpoint policies), token budget tiers, model-to-tier assignments, per-key usage tracking
 - **Requests** — Full audit log with click-to-expand request/response details, token counts, latency, streaming metrics
+- **Voice** — Voice engines (health, profile, voices, models), a text-to-speech playground (voice picker filtered by language/gender, Kokoro voice blending with weights, speed within the engine's range, play/download) and speech-to-text (upload or record, model, language or auto-detect, output format). Playground requests use the real routes, so they are audited and metered
 
 ```bash
 cd dashboard && npm install && npx vite --host 0.0.0.0 --port 5174
 ```
 
-On first load, enter a gateway API key in the header field (top right) — the dashboard endpoints require one. The key is stored in the browser's localStorage and sent as `X-API-Key` on every request.
+On first load, enter the admin key (`GATEWAY_ADMIN_API_KEY`) in the header field (top right) — with `auth.enabled: true` the dashboard endpoints require it, and client keys are refused. In solo mode (`auth.enabled: false`) and test mode the dashboard works from this machine without a key. The key is stored in the browser's localStorage and sent as `X-API-Key` on every request.
 
 ## Security Architecture
 
@@ -145,9 +146,28 @@ Request → Auth → Sanitize → PII Scan → Policy Check → Route → Respon
 
 Both OpenAI and Ollama formats — your apps don't need to change.
 
-**Auth model:** inference endpoints work without an API key (stock Ollama/OpenAI clients just work; keys opt you into per-client routing, allowlists, and budgets). Management, dashboard, and security endpoints **require** a valid key when `auth.enabled: true` — they expose stored traffic and audit data.
+**Access modes** (D-042):
+
+- **Keys** (`auth.enabled: true`) — every request needs an API key. Keyless requests (stock Ollama clients such as LocalClaw) are refused unless you enable `auth.anonymous` and list the networks they come from in `auth.anonymous.allowed_networks`; restrict their models, endpoints and rate too, so clients can't drop their key to escape its limits. Dashboard, security, budget and key-management endpoints are the operator console and **require** `GATEWAY_ADMIN_API_KEY`; without it they return 403.
+- **Solo** (`auth.enabled: false`) — no keys, for one person on one machine. Requests are accepted only from `auth.anonymous.allowed_networks` (default: this machine). A request that arrived through a reverse proxy never counts as local.
+- **Test mode** (`./start-gateway.sh --dev`, or `GATEWAY_DEV_MODE=true`) — try a real config without minting keys: keyless inference and dashboard from `GATEWAY_DEV_NETWORKS` (default: this machine), keys that are sent are still checked, traffic is audited as client `dev`, and the script uses a separate `data/dev.db`. Shown in the startup log, `/health` and the dashboard.
+
+Set `GATEWAY_PROFILE=production` to refuse startup with test mode on, auth off, no admin key, or unrestricted keyless access.
+
+**Upgrading:** keyless access used to be on by default. Keyless clients on other machines now need:
+
+```yaml
+auth:
+  anonymous:
+    enabled: true
+    allowed_networks: ["192.168.1.40/32"]   # the client's address or subnet
+```
+
+**Environments:** a key bound to an environment (`environment: prod`) is routed only to that environment's endpoints and approved models, including on fallback; `X-Environment` can't override it. Keys without an environment may pick one with `X-Environment`, otherwise they get the default (`dev` if defined, else the first).
 
 **OpenAI:** `POST /v1/chat/completions`, `POST /v1/completions`, `POST /v1/embeddings`, `GET /v1/models`
+
+**Voice (OpenAI audio API):** `POST /v1/audio/speech` (text-to-speech, streamed), `POST /v1/audio/transcriptions` and `/v1/audio/translations` (speech-to-text, multipart). Works with any engine that speaks OpenAI's audio API (Kokoro-FastAPI, speaches/faster-whisper, vLLM, vLLM-Omni, ...): declare the endpoint with `type: openai` and `capabilities: [tts]` or `[stt]`. Same auth, scope, PII, audit and budget rules as chat. `GET /v1/audio/voices` lists the voices the gateway discovered (with language/gender where known). Optional engine profiles (`config/profiles/`, e.g. `profile: kokoro`) add voice metadata, blending and setting ranges; requests then route to an endpoint that has the requested voice, and unknown voices or out-of-range settings are rejected with the valid choices. Engine setup notes: [docs/MEDIA_ENGINES.md](docs/MEDIA_ENGINES.md).
 
 **Ollama:** `POST /api/chat`, `POST /api/generate`, `POST /api/embed`, `POST /api/embeddings` (legacy), `GET /api/tags`
 
@@ -212,13 +232,27 @@ auth:
 |----------|---------|-------------|
 | `GATEWAY_DB_URL` | `sqlite:///./data/gateway.db` | Database URL (SQLite or PostgreSQL) |
 | `GATEWAY_DB_STORE_REQUEST_BODY` | `false` | Store prompts in audit log |
+| `GATEWAY_DB_REQUIRED` | `true` | Refuse to start if the database can't be initialized (no silent run without an audit trail) |
+| `GATEWAY_DB_AUDIT_DURABILITY` | `auto` | How audit rows are written (D-038). `process`: to a local intent log and the response returns; a background task writes them to the DB, and nothing is lost on a gateway crash. `grouped`: the response also waits until the log is on disk (survives power loss; one shared disk flush per burst). `sync`: the response waits for the DB commit. `auto`: `process` on SQLite, `sync` on PostgreSQL |
+| `GATEWAY_DB_AUDIT_JOURNAL_PATH` | `data/audit-journal` | Intent log directory. Use local disk; keep it on a persistent volume in containers |
+| `GATEWAY_DB_AUDIT_JOURNAL_MAX_MB` | `1024` | Cap while the DB is unreachable; past it the oldest records are dropped (logged as critical) |
+| `GATEWAY_DB_KEY_CACHE_SECONDS` | `30` | How long a validated DB-backed API key is remembered (no DB query per request). Revoking a key is immediate in the gateway process that handled the revoke; other processes follow within this time. `0` disables |
+| `GATEWAY_DB_AUDIT_SPILL_PATH` | `data/audit-spill.jsonl` | Audit rows that can't reach the DB after retries are written here and replayed on startup; watch `gateway_audit_write_failures_total` |
 | `GATEWAY_GUARD_ENABLED` | `false` | Enable guard model shadow analysis |
 | `GATEWAY_GUARD_MODEL_NAME` | `ibm/granite3.2-guardian:5b` | Guard model name |
 | `GATEWAY_GUARD_BASE_URL` | `http://localhost:11434` | Ollama server hosting guard model |
-| `GATEWAY_PII_ENABLED` | `false` | Enable PII detection |
-| `GATEWAY_PII_SCRUB_ENABLED` | `false` | Replace PII with placeholders |
-| `GATEWAY_ADMIN_API_KEY` | | Admin key for key management |
+| `GATEWAY_PII_ENABLED` | `false` | Enable PII detection. Also redacts PII from stored audit bodies and security scans, even when scrubbing is off |
+| `GATEWAY_PII_SCRUB_ENABLED` | `false` | Replace PII with placeholders. Startup default only: admins can change scrubbing (on/off, all or selected routes) live from the dashboard's Security tab, and that saved setting overrides this |
+| `GATEWAY_ADMIN_API_KEY` | | Operator key for the dashboard, key management, budgets, and security labeling. Required for those routes when `auth.enabled: true` |
+| `GATEWAY_DEV_MODE` | `false` | Test mode: keyless inference and dashboard from `GATEWAY_DEV_NETWORKS`, whatever the auth config says. Keys that are sent are still checked. Never in production |
+| `GATEWAY_DEV_NETWORKS` | `127.0.0.0/8,::1/128` | Comma-separated addresses or CIDRs test mode accepts keyless requests from |
+| `GATEWAY_PROFILE` | `default` | `production` refuses to start with test mode on, auth off, no admin key, or unrestricted keyless access |
+| `GATEWAY_DB_RETENTION_DAYS` | `90` | Delete audit rows and budget history older than this (`0` = keep) |
+| `GATEWAY_SECURITY_STORE_MESSAGES` | `none` | What security scans keep of the prompt (D-041). `none`: verdicts only. `flagged`: messages of flagged requests, for review and labeling. `all`: every request (training-data collection). Kept messages are always PII-redacted |
+| `GATEWAY_SECURITY_RETENTION_DAYS` | `90` | Delete security scans and PII events older than this (`0` = keep) |
 | `GATEWAY_CORS_ORIGINS` | `["*"]` | Allowed CORS origins |
+| `GATEWAY_REDIS_URL` | | **Optional.** Share rate limits and concurrency slots across gateway processes or replicas (e.g. `redis://:password@host:6379/0`). Unset, everything stays in process memory and nothing else needs to run. If Redis becomes unreachable, each process falls back to its own limits and `/health` reports `shared_state.status: degraded` |
+| `GATEWAY_REDIS_PREFIX` | `devmesh` | Key prefix, so several gateways can share one Redis |
 
 ## Production Deployment
 
@@ -229,7 +263,8 @@ For evaluation, `./start-gateway.sh` is all you need. For production:
 - **Reverse proxy** — Put nginx or Caddy in front for TLS termination. The gateway runs HTTP on port 8001.
 - **Backups** — If using SQLite, back up `data/gateway.db`. If PostgreSQL, use `pg_dump` on your schedule.
 - **Log retention** — `GATEWAY_DB_RETENTION_DAYS=90` auto-deletes old audit records. Adjust based on compliance requirements.
-- **Docker Compose** — `docker compose up -d` starts the gateway, dashboard, Prometheus, and Grafana.
+- **Docker Compose** — `GATEWAY_ADMIN_API_KEY=<operator key> docker compose up -d` starts the gateway, dashboard, Prometheus, and Grafana. Put your `gateway.yaml` (with `auth.enabled: true`) in `./config`. The database and audit log live in the `gateway-data` volume, so they survive upgrades and container replacement; back up that volume. Open the dashboard at `http://<host>:5174`: it proxies the API itself, so it works from any machine.
+- **More than one gateway process** — By default rate limits and `max_concurrent` slots are kept per process, so two processes would each allow the full limit. To share them, install the extra (`pip install 'devmesh-gateway[redis]'`; the Docker image already has it) and set `GATEWAY_REDIS_URL`. With Compose: `GATEWAY_REDIS_URL=redis://redis:6379/0 docker compose --profile ha up -d`. A single process needs none of this.
 
 ## Providers
 
@@ -244,9 +279,11 @@ For evaluation, `./start-gateway.sh` is all you need. For production:
 ## Testing
 
 ```bash
-pytest tests/ -v              # 538 tests
+pytest tests/ -v              # ~915 tests
 pytest tests/ --cov=gateway   # With coverage
 ```
+
+PostgreSQL and Redis tests run when a server is reachable (`GATEWAY_TEST_PG_URL`, `GATEWAY_TEST_REDIS_URL`) and are skipped otherwise. CI runs them against real servers and fails if they're missing (`GATEWAY_TEST_REQUIRE_SERVICES=1`).
 
 ## License
 

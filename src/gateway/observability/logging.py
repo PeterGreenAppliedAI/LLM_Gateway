@@ -13,9 +13,10 @@ import json
 import logging
 import re
 import sys
+import time
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any, Literal, Optional
 
@@ -85,7 +86,10 @@ class RequestContext:
     provider: str | None = None
     model: str | None = None
     task: str | None = None
-    start_time: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    start_time: datetime = field(default_factory=lambda: datetime.now(UTC))
+    # Durations come from a monotonic clock: wall-clock time can jump (NTP)
+    # and ticks every ~15 ms on Windows, which made fast requests 0 ms long
+    _started: float = field(default_factory=time.perf_counter, repr=False, compare=False)
 
     # Timing metrics (populated as request progresses)
     time_to_first_token_ms: float | None = None
@@ -108,17 +112,19 @@ class RequestContext:
         """Convert to dictionary for logging, excluding None values."""
         result = {}
         for k, v in asdict(self).items():
-            if v is not None:
+            if v is not None and not k.startswith("_"):
                 if isinstance(v, datetime):
                     result[k] = v.isoformat()
                 else:
                     result[k] = v
         return result
 
+    def _elapsed_ms(self) -> float:
+        return (time.perf_counter() - self._started) * 1000
+
     def record_first_token(self) -> None:
         """Record time to first token."""
-        elapsed = datetime.now(timezone.utc) - self.start_time
-        self.time_to_first_token_ms = elapsed.total_seconds() * 1000
+        self.time_to_first_token_ms = self._elapsed_ms()
 
     def record_complete(
         self,
@@ -126,8 +132,7 @@ class RequestContext:
         completion_tokens: int | None = None,
     ) -> None:
         """Record request completion with token counts."""
-        elapsed = datetime.now(timezone.utc) - self.start_time
-        self.total_latency_ms = elapsed.total_seconds() * 1000
+        self.total_latency_ms = self._elapsed_ms()
         self.status = "success"
 
         if prompt_tokens is not None:
@@ -144,8 +149,7 @@ class RequestContext:
 
     def record_error(self, error_type: str, error_message: str) -> None:
         """Record request error."""
-        elapsed = datetime.now(timezone.utc) - self.start_time
-        self.total_latency_ms = elapsed.total_seconds() * 1000
+        self.total_latency_ms = self._elapsed_ms()
         self.status = "error"
         self.error_type = error_type
         # Truncate error message to prevent log bloat
@@ -186,7 +190,7 @@ class StructuredJsonFormatter(logging.Formatter):
         }
 
         if self._config.include_timestamp:
-            log_data["timestamp"] = datetime.now(timezone.utc).isoformat()
+            log_data["timestamp"] = datetime.now(UTC).isoformat()
 
         # Add request context if available
         # Security: Sanitize all user-provided values
@@ -227,7 +231,7 @@ class StructuredTextFormatter(logging.Formatter):
         parts = []
 
         if self._config.include_timestamp:
-            parts.append(datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"))
+            parts.append(datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S"))
 
         parts.append(f"[{record.levelname}]")
         parts.append(f"{record.name}:")

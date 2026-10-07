@@ -1,0 +1,11 @@
+# Keep build contexts small and free of local state
+.git
+**/node_modules
+dashboard/dist
+data
+venv
+.venv
+**/__pycache__
+.pytest_cache
+.ruff_cache
+.env

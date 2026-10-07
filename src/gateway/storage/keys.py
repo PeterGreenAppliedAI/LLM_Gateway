@@ -7,7 +7,7 @@ Uses async SQLAlchemy for non-blocking database I/O.
 
 import hashlib
 import secrets
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -48,6 +48,8 @@ class KeyManager:
         allowed_endpoints: list[str] | None = None,
         allowed_models: list[str] | None = None,
         rate_limit_rpm: int | None = None,
+        max_concurrent: int | None = None,
+        priority: str | None = None,
     ) -> dict:
         """Create a new API key.
 
@@ -58,7 +60,7 @@ class KeyManager:
         key_hash = _hash_key(plaintext)
         key_prefix = plaintext[:12]  # "gw-" + first 9 chars of token
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         async with self._engine.connect() as conn:
             result = await conn.execute(
@@ -72,6 +74,8 @@ class KeyManager:
                     allowed_endpoints=allowed_endpoints,
                     allowed_models=allowed_models,
                     rate_limit_rpm=rate_limit_rpm,
+                    max_concurrent=max_concurrent,
+                    priority=priority,
                     created_at=now,
                     is_active=True,
                 )
@@ -110,6 +114,8 @@ class KeyManager:
                         api_keys.c.allowed_endpoints,
                         api_keys.c.allowed_models,
                         api_keys.c.rate_limit_rpm,
+                        api_keys.c.max_concurrent,
+                        api_keys.c.priority,
                         api_keys.c.description,
                     ).order_by(api_keys.c.created_at.desc())
                 )
@@ -128,6 +134,8 @@ class KeyManager:
                 "allowed_endpoints": row.allowed_endpoints,
                 "allowed_models": row.allowed_models,
                 "rate_limit_rpm": row.rate_limit_rpm,
+                "max_concurrent": row.max_concurrent,
+                "priority": row.priority or "interactive",
                 "description": row.description,
             }
             for row in rows
@@ -150,23 +158,22 @@ class KeyManager:
                 logger.warning("API key revoke failed: not found", key_id=key_id)
             return revoked
 
-    async def get_key_by_hash(self, key_hash: str) -> dict | None:
-        """Look up an active key by its hash.
-
-        Returns key metadata if found and active, None otherwise.
-        """
+    async def lookup_by_hash(self, key_hash: str) -> dict | None:
+        """An active, unexpired key's metadata, without touching last_used_at."""
+        now = datetime.now(UTC)
         async with self._engine.connect() as conn:
-            now = datetime.now(timezone.utc)
             row = (
                 await conn.execute(
                     select(
                         api_keys.c.id,
                         api_keys.c.client_id,
                         api_keys.c.environment,
-                        api_keys.c.is_active,
+                        api_keys.c.expires_at,
                         api_keys.c.allowed_endpoints,
                         api_keys.c.allowed_models,
                         api_keys.c.rate_limit_rpm,
+                        api_keys.c.max_concurrent,
+                        api_keys.c.priority,
                     ).where(
                         api_keys.c.key_hash == key_hash,
                         api_keys.c.is_active == True,  # noqa: E712
@@ -177,27 +184,45 @@ class KeyManager:
                     )
                 )
             ).fetchone()
+        if row is None:
+            logger.debug("API key validation failed: key not found or expired")
+            return None
+        return {
+            "id": row.id,
+            "client_id": row.client_id,
+            "environment": row.environment,
+            "expires_at": row.expires_at,
+            "allowed_endpoints": row.allowed_endpoints,
+            "allowed_models": row.allowed_models,
+            "rate_limit_rpm": row.rate_limit_rpm,
+            "max_concurrent": row.max_concurrent,
+            "priority": row.priority or "interactive",
+        }
 
-            if row is None:
-                logger.debug("API key validation failed: key not found or expired")
-                return None
+    async def get_key_by_hash(self, key_hash: str) -> dict | None:
+        """Look up an active key by its hash and record the use (uncached path).
 
-            # Update last_used_at
-            await conn.execute(
-                update(api_keys)
-                .where(api_keys.c.id == row.id)
-                .values(last_used_at=datetime.now(timezone.utc))
-            )
-            await conn.commit()
+        Returns key metadata if found and active, None otherwise.
+        """
+        info = await self.lookup_by_hash(key_hash)
+        if info is not None:
+            await self.touch({info["id"]: datetime.now(UTC)})
+        return info
 
-            return {
-                "id": row.id,
-                "client_id": row.client_id,
-                "environment": row.environment,
-                "allowed_endpoints": row.allowed_endpoints,
-                "allowed_models": row.allowed_models,
-                "rate_limit_rpm": row.rate_limit_rpm,
-            }
+    async def touch(self, last_used: dict[int, datetime]) -> None:
+        """Set last_used_at for several keys in one transaction (never moves it back)."""
+        if not last_used:
+            return
+        async with self._engine.begin() as conn:
+            for key_id, used_at in last_used.items():
+                await conn.execute(
+                    update(api_keys)
+                    .where(
+                        api_keys.c.id == key_id,
+                        or_(api_keys.c.last_used_at.is_(None), api_keys.c.last_used_at < used_at),
+                    )
+                    .values(last_used_at=used_at)
+                )
 
     async def validate_plaintext_key(self, plaintext: str) -> dict | None:
         """Validate a plaintext API key by hashing and looking up.

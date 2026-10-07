@@ -20,6 +20,7 @@ from gateway.models.common import (
     ModelCapability,
     ModelInfo,
     ProviderType,
+    TaskType,
     UsageStats,
 )
 from gateway.models.internal import (
@@ -30,7 +31,15 @@ from gateway.models.internal import (
     StreamChunk,
     ToolCall,
 )
+from gateway.providers.auth import auth_headers
 from gateway.providers.base import ProviderAdapter
+from gateway.providers.streaming import (
+    classify_exception,
+    error_chunk,
+    iter_lines_with_timeouts,
+    parse_openai_sse,
+    upstream_http_error,
+)
 
 
 class VLLMAdapter(ProviderAdapter):
@@ -49,6 +58,10 @@ class VLLMAdapter(ProviderAdapter):
         super().__init__(config=config, provider_type=ProviderType.VLLM)
         self._client: httpx.AsyncClient | None = None
         self._client_lock = asyncio.Lock()
+        # vLLM started with --api-key requires it on every call (D-036)
+        self._headers = auth_headers(
+            config.name, config.api_key, config.api_key_env, config.headers
+        )
 
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create HTTP client (thread-safe)."""
@@ -56,9 +69,15 @@ class VLLMAdapter(ProviderAdapter):
             if self._client is None or self._client.is_closed:
                 self._client = httpx.AsyncClient(
                     base_url=self.base_url,
-                    timeout=httpx.Timeout(self.timeout, connect=self.connect_timeout),
+                    timeout=self.http_timeout(),
+                    limits=self.http_limits(),
+                    headers=self._headers,
                 )
             return self._client
+
+    async def media_client(self) -> httpx.AsyncClient:
+        """vLLM serves /v1/audio/transcriptions and /translations (vllm[audio])."""
+        return await self._get_client()
 
     async def close(self) -> None:
         """Close the HTTP client."""
@@ -137,7 +156,7 @@ class VLLMAdapter(ProviderAdapter):
             return self._parse_chat_response(request, data, latency_ms)
 
         except httpx.TimeoutException as e:
-            return self._error_response(request, f"Timeout: {e}", "timeout")
+            return self._timeout_response(request, e)
         except httpx.HTTPStatusError as e:
             return self._error_response(
                 request,
@@ -153,6 +172,52 @@ class VLLMAdapter(ProviderAdapter):
     # Optional Methods
     # =========================================================================
 
+    async def embeddings(self, request: InternalRequest) -> InternalResponse:
+        """Generate embeddings via vLLM /v1/embeddings (OpenAI-compatible).
+
+        The whole input list goes in one request; vLLM batches it.
+        """
+        start_time = time.perf_counter()
+
+        try:
+            client = await self._get_client()
+            input_texts = request.input_data or [request.get_input_text()]
+            response = await client.post(
+                "/v1/embeddings", json={"model": request.model, "input": input_texts}
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            # Order by index so output i always belongs to input i
+            items = sorted(data.get("data", []), key=lambda item: item.get("index", 0))
+            usage_data = data.get("usage") or {}
+            return InternalResponse(
+                request_id=request.request_id,
+                task=TaskType.EMBEDDINGS,
+                provider=self.name,
+                model=data.get("model", request.model or "unknown"),
+                embeddings=[item["embedding"] for item in items],
+                finish_reason=FinishReason.STOP,
+                usage=UsageStats(
+                    prompt_tokens=usage_data.get("prompt_tokens", 0),
+                    total_tokens=usage_data.get("total_tokens", 0),
+                ),
+                latency_ms=(time.perf_counter() - start_time) * 1000,
+            )
+
+        except httpx.TimeoutException as e:
+            return self._timeout_response(request, e)
+        except httpx.HTTPStatusError as e:
+            return self._error_response(
+                request,
+                f"HTTP {e.response.status_code}: {e.response.text}",
+                f"http_{e.response.status_code}",
+            )
+        except httpx.ConnectError as e:
+            return self._error_response(request, f"Connection failed: {e}", "connection_error")
+        except Exception as e:
+            return self._error_response(request, str(e), "unknown_error")
+
     async def generate(self, request: InternalRequest) -> InternalResponse:
         """Execute text generation via vLLM /v1/completions endpoint."""
         start_time = time.perf_counter()
@@ -160,21 +225,9 @@ class VLLMAdapter(ProviderAdapter):
         try:
             client = await self._get_client()
 
-            # Build OpenAI-compatible completion request
-            vllm_request: dict[str, Any] = {
-                "model": request.model,
-                "prompt": request.prompt or request.get_input_text(),
-                "stream": False,
-            }
-            for key, value in (
-                ("max_tokens", request.max_tokens),
-                ("temperature", request.temperature),
-                ("top_p", request.top_p),
-            ):
-                if value is not None:
-                    vllm_request[key] = value
-
-            response = await client.post("/v1/completions", json=vllm_request)
+            response = await client.post(
+                "/v1/completions", json=self._build_completion_request(request)
+            )
             response.raise_for_status()
             data = response.json()
 
@@ -183,7 +236,7 @@ class VLLMAdapter(ProviderAdapter):
             return self._parse_completion_response(request, data, latency_ms)
 
         except httpx.TimeoutException as e:
-            return self._error_response(request, f"Timeout: {e}", "timeout")
+            return self._timeout_response(request, e)
         except httpx.HTTPStatusError as e:
             return self._error_response(
                 request,
@@ -199,25 +252,6 @@ class VLLMAdapter(ProviderAdapter):
     # Streaming
     # =========================================================================
 
-    # Per-chunk timeout: if no chunk arrives within this window, the stream is dead
-    STREAM_CHUNK_TIMEOUT = 120.0  # seconds between chunks
-
-    async def _iter_lines_with_timeout(self, response: httpx.Response) -> AsyncIterator[str]:
-        """Iterate response lines with a per-chunk timeout."""
-        aiter = response.aiter_lines().__aiter__()
-        while True:
-            try:
-                line = await asyncio.wait_for(
-                    aiter.__anext__(),
-                    # At least as patient as the endpoint's configured
-                    # timeout: cold-loading a large model can stall the
-                    # first chunk far beyond the 120s floor
-                    timeout=max(self.STREAM_CHUNK_TIMEOUT, self.timeout),
-                )
-                yield line
-            except StopAsyncIteration:
-                break
-
     async def chat_stream(self, request: InternalRequest) -> AsyncIterator[StreamChunk]:
         """Stream chat completion via vLLM /v1/chat/completions with stream=true."""
         try:
@@ -229,75 +263,53 @@ class VLLMAdapter(ProviderAdapter):
             vllm_request["stream_options"] = {"include_usage": True}
 
             async with client.stream("POST", "/v1/chat/completions", json=vllm_request) as response:
-                response.raise_for_status()
-                index = 0
-                # The finish chunk is held back: usage arrives AFTER it, in a
-                # frame with empty choices. Attach usage, then emit as final.
-                pending_final: StreamChunk | None = None
-
-                async for line in self._iter_lines_with_timeout(response):
-                    if not line or line.startswith(":"):
-                        continue
-                    if line.startswith("data: "):
-                        line = line[6:]
-                    if line == "[DONE]":
-                        break
-
-                    import json
-
-                    chunk_data = json.loads(line)
-
-                    usage = None
-                    if chunk_data.get("usage"):
-                        usage_data = chunk_data["usage"]
-                        usage = UsageStats(
-                            prompt_tokens=usage_data.get("prompt_tokens", 0),
-                            completion_tokens=usage_data.get("completion_tokens", 0),
-                            total_tokens=usage_data.get("total_tokens", 0),
-                        )
-
-                    choices = chunk_data.get("choices", [])
-                    if not choices:
-                        # Usage-only frame (stream_options.include_usage)
-                        if usage and pending_final:
-                            pending_final = pending_final.model_copy(update={"usage": usage})
-                        continue
-
-                    choice = choices[0]
-                    delta = choice.get("delta", {})
-                    content = delta.get("content", "")
-                    finish = choice.get("finish_reason")
-
-                    finish_reason = None
-                    if finish == "stop":
-                        finish_reason = FinishReason.STOP
-                    elif finish == "length":
-                        finish_reason = FinishReason.LENGTH
-
-                    chunk = StreamChunk(
-                        request_id=request.request_id,
-                        index=index,
-                        delta=content,
-                        finish_reason=finish_reason,
-                        usage=usage,
-                    )
-                    index += 1
-
-                    if finish_reason is not None:
-                        pending_final = chunk
-                        continue
+                if response.status_code >= 400:
+                    code, message = await upstream_http_error(response)
+                    yield error_chunk(request, code, message)
+                    return
+                lines = iter_lines_with_timeouts(response, self.timeout, self.stream_idle_timeout)
+                async for chunk in parse_openai_sse(lines, request, _map_finish_reason):
                     yield chunk
 
-                if pending_final is not None:
-                    yield pending_final
+        except Exception as e:
+            yield error_chunk(request, *classify_exception(e))
 
-        except Exception:
-            yield StreamChunk(
-                request_id=request.request_id,
-                index=0,
-                delta="",
-                finish_reason=FinishReason.ERROR,
-            )
+    def _build_completion_request(self, request: InternalRequest) -> dict[str, Any]:
+        """OpenAI-compatible /v1/completions body (raw prompt, no chat template)."""
+        body: dict[str, Any] = {
+            "model": request.model,
+            "prompt": request.prompt or request.get_input_text(),
+            "stream": False,
+        }
+        for key, value in (
+            ("max_tokens", request.max_tokens),
+            ("temperature", request.temperature),
+            ("top_p", request.top_p),
+            ("stop", request.stop),
+        ):
+            if value is not None:
+                body[key] = value
+        return body
+
+    async def generate_stream(self, request: InternalRequest) -> AsyncIterator[StreamChunk]:
+        """Stream a completion via vLLM /v1/completions with stream=true."""
+        try:
+            client = await self._get_client()
+            vllm_request = self._build_completion_request(request)
+            vllm_request["stream"] = True
+            vllm_request["stream_options"] = {"include_usage": True}
+
+            async with client.stream("POST", "/v1/completions", json=vllm_request) as response:
+                if response.status_code >= 400:
+                    code, message = await upstream_http_error(response)
+                    yield error_chunk(request, code, message)
+                    return
+                lines = iter_lines_with_timeouts(response, self.timeout, self.stream_idle_timeout)
+                async for chunk in parse_openai_sse(lines, request, _map_finish_reason):
+                    yield chunk
+
+        except Exception as e:
+            yield error_chunk(request, *classify_exception(e))
 
     # =========================================================================
     # Provider Metadata
@@ -473,3 +485,14 @@ class VLLMAdapter(ProviderAdapter):
         )
 
     # _error_response inherited from ProviderAdapter base class (DRY)
+
+
+def _map_finish_reason(reason: str | None) -> FinishReason:
+    """Map an OpenAI-style finish_reason to the internal enum."""
+    return {
+        "stop": FinishReason.STOP,
+        "length": FinishReason.LENGTH,
+        "content_filter": FinishReason.CONTENT_FILTER,
+        "tool_calls": FinishReason.TOOL_CALLS,
+        "function_call": FinishReason.TOOL_CALLS,
+    }.get((reason or "stop").lower(), FinishReason.STOP)

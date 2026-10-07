@@ -211,7 +211,7 @@ class TestOverlapFiltering:
 class TestPolicyEnforcementPerKey:
     """Tests for per-key policy enforcement (model/endpoint allowlists, rate limit overrides)."""
 
-    def test_model_allowlist_blocks_disallowed(self):
+    async def test_model_allowlist_blocks_disallowed(self):
         from gateway.models.internal import InternalRequest
         from gateway.policy.enforcer import PolicyConfig, PolicyEnforcer
         from gateway.policy.rate_limiter import RateLimitConfig as PolicyRateLimitConfig
@@ -233,10 +233,10 @@ class TestPolicyEnforcementPerKey:
         from gateway.policy.enforcer import PolicyViolation
 
         with pytest.raises(PolicyViolation) as exc_info:
-            enforcer.enforce(req, allowed_models=["llama-*"])
+            await enforcer.enforce(req, allowed_models=["llama-*"])
         assert exc_info.value.policy_type == "model_not_allowed"
 
-    def test_model_allowlist_allows_glob(self):
+    async def test_model_allowlist_allows_glob(self):
         from gateway.models.internal import InternalRequest
         from gateway.policy.enforcer import PolicyConfig, PolicyEnforcer
         from gateway.policy.rate_limiter import RateLimitConfig as PolicyRateLimitConfig
@@ -256,9 +256,9 @@ class TestPolicyEnforcementPerKey:
         )
 
         # Should not raise
-        enforcer.enforce(req, rate_limit_key="test", allowed_models=["llama-*"])
+        await enforcer.enforce(req, rate_limit_key="test", allowed_models=["llama-*"])
 
-    def test_endpoint_allowlist_blocks(self):
+    async def test_endpoint_allowlist_blocks(self):
         from gateway.models.internal import InternalRequest
         from gateway.policy.enforcer import PolicyConfig, PolicyEnforcer
         from gateway.policy.rate_limiter import RateLimitConfig as PolicyRateLimitConfig
@@ -281,10 +281,10 @@ class TestPolicyEnforcementPerKey:
         from gateway.policy.enforcer import PolicyViolation
 
         with pytest.raises(PolicyViolation) as exc_info:
-            enforcer.enforce(req, allowed_endpoints=["openai-main"])
+            await enforcer.enforce(req, allowed_endpoints=["openai-main"])
         assert exc_info.value.policy_type == "endpoint_not_allowed"
 
-    def test_endpoint_allowlist_allows(self):
+    async def test_endpoint_allowlist_allows(self):
         from gateway.models.internal import InternalRequest
         from gateway.policy.enforcer import PolicyConfig, PolicyEnforcer
         from gateway.policy.rate_limiter import RateLimitConfig as PolicyRateLimitConfig
@@ -305,6 +305,28 @@ class TestPolicyEnforcementPerKey:
         )
 
         # Should not raise
-        enforcer.enforce(
+        await enforcer.enforce(
             req, rate_limit_key="test", allowed_endpoints=["openai-main", "ollama-server"]
         )
+
+
+class TestRedactForStorage:
+    """redact() scrubs every string in a JSON-like value, for data at rest."""
+
+    def test_nested_values_redacted(self):
+        scrubber = PIIScrubber()
+        body = {
+            "messages": [{"role": "user", "content": "mail me at a.b@example.com"}],
+            "meta": {"note": "SSN 123-45-6789", "count": 3, "ok": True, "none": None},
+        }
+        out = scrubber.redact(body)
+        assert out["messages"][0]["content"] == "mail me at [EMAIL]"
+        assert out["meta"] == {"note": "SSN [SSN]", "count": 3, "ok": True, "none": None}
+        # Input untouched
+        assert body["messages"][0]["content"] == "mail me at a.b@example.com"
+
+    def test_text_beyond_scan_limit_not_stored(self):
+        scrubber = PIIScrubber(max_input_length=20)
+        out = scrubber.redact("x" * 20 + " a.b@example.com")
+        assert "example.com" not in out
+        assert out.endswith("[TRUNCATED: not scanned for PII]")

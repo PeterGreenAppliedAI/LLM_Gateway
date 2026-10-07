@@ -18,6 +18,7 @@ import { SecuritySection } from './components/SecurityPanel'
 import { ApiKeysSection } from './components/KeysPanel'
 import { TokenBudgetSection } from './components/BudgetPanel'
 import { PIISection } from './components/PIIPanel'
+import { VoiceSection } from './components/VoicePanel'
 import { SecurityScansSection } from './components/ScansPanel'
 
 function App() {
@@ -37,7 +38,7 @@ function App() {
   const [authError, setAuthError] = useState(false)
   const [selectedRequest, setSelectedRequest] = useState<RequestDetail | null>(null)
   const [loadingDetail, setLoadingDetail] = useState(false)
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'security' | 'keys' | 'requests'>('dashboard')
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'security' | 'keys' | 'requests' | 'voice'>('dashboard')
 
   useEffect(() => {
     const onAuthError = () => setAuthError(true)
@@ -145,6 +146,25 @@ function App() {
         </div>
       </div>
 
+      {health?.access?.mode === 'dev' && (
+        <div className="bg-yellow-900 border border-yellow-600 rounded p-3 mb-6 text-sm text-left" role="status">
+          <strong>Test mode.</strong> Keyless requests and this dashboard work without a key from{' '}
+          {health.access.keyless_from.join(', ')}. Requests are logged as client <code>dev</code>.
+          Turn off GATEWAY_DEV_MODE before real use.
+        </div>
+      )}
+      {health?.access?.mode === 'solo' && (
+        <div className="bg-gray-800 border border-gray-600 rounded p-3 mb-6 text-sm text-left" role="status">
+          <strong>Solo mode:</strong> authentication is off, so the gateway only accepts requests from{' '}
+          {health.access.keyless_from.join(', ')}.
+        </div>
+      )}
+      {health?.access?.mode === 'keys' && health.access.admin_key_configured === false && (
+        <div className="bg-amber-900 border border-amber-700 rounded p-3 mb-6 text-sm text-left" role="status">
+          The dashboard needs an operator key: set <code>GATEWAY_ADMIN_API_KEY</code> on the gateway and enter it above.
+        </div>
+      )}
+
       {authError && (
         <div className="bg-amber-900 border border-amber-700 rounded p-4 mb-6">
           Gateway API key required or invalid — enter a valid key in the field above.
@@ -165,6 +185,7 @@ function App() {
           ['security', 'Security'],
           ['keys', 'Keys & Budgets'],
           ['requests', 'Requests'],
+          ['voice', 'Voice'],
         ] as const).map(([tab, label]) => (
           <button
             key={tab}
@@ -268,6 +289,9 @@ function App() {
           <TokenBudgetSection budgetConfig={budgetConfig} budgetUsage={budgetUsage} catalog={catalog} onRefresh={refresh} />
         </>
       )}
+
+      {/* === Voice Tab === */}
+      {activeTab === 'voice' && <VoiceSection />}
 
       {/* === Requests Tab === */}
       {activeTab === 'requests' && (

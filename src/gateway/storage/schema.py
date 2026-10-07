@@ -9,10 +9,11 @@ Tables:
 - api_keys: Database-managed API keys (optional, alternative to config)
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     Column,
     DateTime,
@@ -23,7 +24,32 @@ from sqlalchemy import (
     String,
     Table,
     Text,
+    TypeDecorator,
 )
+
+
+class UTCDateTime(TypeDecorator):
+    """A timestamp stored as UTC without a zone, always read back UTC-aware.
+
+    The gateway works in aware UTC datetimes. PostgreSQL's driver refuses
+    aware values for TIMESTAMP WITHOUT TIME ZONE columns, so before this
+    every audit write on PostgreSQL failed; SQLite accepted them and handed
+    back naive values. Same column type on disk, so no migration (D-038).
+    """
+
+    impl = DateTime
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        if isinstance(value, datetime) and value.tzinfo is not None:
+            return value.astimezone(UTC).replace(tzinfo=None)
+        return value
+
+    def process_result_value(self, value, dialect):
+        if isinstance(value, datetime) and value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value
+
 
 # Naming convention for constraints (helps with migrations)
 convention = {
@@ -47,7 +73,7 @@ audit_log = Table(
     # Primary key
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("request_id", String(64), unique=True, nullable=False),
-    Column("timestamp", DateTime, default=lambda: datetime.now(timezone.utc), nullable=False),
+    Column("timestamp", UTCDateTime, default=lambda: datetime.now(UTC), nullable=False),
     # Who made the request
     Column("client_id", String(128), nullable=False),
     Column("user_id", String(128), nullable=True),
@@ -79,6 +105,8 @@ audit_log = Table(
     # Use JSON for SQLite compatibility, JSONB preferred for PostgreSQL
     Column("request_body", JSON, nullable=True),
     Column("response_body", JSON, nullable=True),
+    # Native media units (characters, audio seconds, bytes, voice, format; D-021/D-023)
+    Column("media_usage", JSON, nullable=True),
     # Indexes for common queries
     Index("ix_audit_log_timestamp", "timestamp"),
     Index("ix_audit_log_client_id", "client_id"),
@@ -100,7 +128,7 @@ usage_daily = Table(
     "usage_daily",
     metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
-    Column("date", DateTime, nullable=False),  # Date (time component = 00:00:00)
+    Column("date", UTCDateTime, nullable=False),  # Date (time component = 00:00:00)
     # Grouping dimensions
     Column("client_id", String(128), nullable=False),
     Column("user_id", String(128), nullable=True),
@@ -161,12 +189,14 @@ api_keys = Table(
     Column("client_id", String(128), nullable=False),
     Column("environment", String(64), nullable=True),  # Which environment this key accesses
     # Lifecycle
-    Column("created_at", DateTime, default=lambda: datetime.now(timezone.utc), nullable=False),
-    Column("expires_at", DateTime, nullable=True),
-    Column("last_used_at", DateTime, nullable=True),
+    Column("created_at", UTCDateTime, default=lambda: datetime.now(UTC), nullable=False),
+    Column("expires_at", UTCDateTime, nullable=True),
+    Column("last_used_at", UTCDateTime, nullable=True),
     Column("is_active", Boolean, default=True),
     # Permissions and limits
     Column("rate_limit_rpm", Integer, nullable=True),  # Requests per minute
+    Column("max_concurrent", Integer, nullable=True),  # In-flight requests (D-034)
+    Column("priority", String(16), nullable=True),  # interactive | batch (null = interactive)
     Column("allowed_models", JSON, nullable=True),  # ["ollama/*", "openai/gpt-4"]
     Column("allowed_endpoints", JSON, nullable=True),  # ["gpunode-ollama"]
     # Metadata
@@ -188,7 +218,7 @@ security_scans = Table(
     metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("request_id", String(64), unique=True, nullable=False),
-    Column("timestamp", DateTime, default=lambda: datetime.now(timezone.utc), nullable=False),
+    Column("timestamp", UTCDateTime, default=lambda: datetime.now(UTC), nullable=False),
     # Context
     Column("client_id", String(128), nullable=False),
     Column("model", String(128), nullable=True),
@@ -212,7 +242,7 @@ security_scans = Table(
     Column("label", String(16), nullable=True),  # null=unlabeled, safe, unsafe
     Column("label_category", String(64), nullable=True),  # Why it's unsafe (optional)
     Column("labeled_by", String(128), nullable=True),  # Who labeled it
-    Column("labeled_at", DateTime, nullable=True),
+    Column("labeled_at", UTCDateTime, nullable=True),
     Column("label_notes", Text, nullable=True),  # Free-form notes from reviewer
     # Derived flags
     Column("is_disagreement", Boolean, default=False),  # regex and guard disagree
@@ -234,7 +264,7 @@ pii_events = Table(
     metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("request_id", String(64), nullable=False),
-    Column("timestamp", DateTime, default=lambda: datetime.now(timezone.utc), nullable=False),
+    Column("timestamp", UTCDateTime, default=lambda: datetime.now(UTC), nullable=False),
     # Context
     Column("client_id", String(128), nullable=False),
     Column("model", String(128), nullable=True),
@@ -255,4 +285,46 @@ pii_events = Table(
     Index("ix_pii_events_client_id", "client_id"),
     Index("ix_pii_events_pii_type", "pii_type"),
     Index("ix_pii_events_value_hash", "value_hash"),
+)
+
+
+# =============================================================================
+# Runtime Settings Table (operator changes made from the dashboard)
+# =============================================================================
+
+runtime_settings = Table(
+    "runtime_settings",
+    metadata,
+    # Dotted setting name, e.g. "pii.scrub"
+    Column("key", String(64), primary_key=True),
+    Column("value", JSON, nullable=False),
+    Column("updated_at", UTCDateTime, nullable=False),
+    Column("updated_by", String(128), nullable=True),
+)
+
+
+# Token budget usage per day, client and tier (D-037). Each gateway process
+# adds its usage in small batches; totals are read back so every process
+# (and a restarted one) sees the same day's spend.
+budget_usage = Table(
+    "budget_usage",
+    metadata,
+    Column("day", String(10), primary_key=True),  # YYYY-MM-DD (UTC)
+    Column("client_id", String(128), primary_key=True),
+    Column("tier", String(64), primary_key=True),  # tier name or "unclassified"
+    Column("weighted_tokens", BigInteger, nullable=False, default=0),  # counts toward key budgets
+    Column("raw_tokens", BigInteger, nullable=False, default=0),  # counts toward tier caps
+    Column("requests", Integer, nullable=False, default=0),
+)
+
+
+# Audit intent log positions (D-038): how far each gateway process's local
+# log has been written to the database. Updated in the same transaction as
+# the rows it covers, so a replay after a crash neither loses nor repeats.
+audit_journal = Table(
+    "audit_journal",
+    metadata,
+    Column("instance", String(64), primary_key=True),
+    Column("segment", String(32), nullable=False),
+    Column("byte_offset", BigInteger, nullable=False),
 )

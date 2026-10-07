@@ -52,6 +52,9 @@ export interface Endpoint {
   url: string
   enabled: boolean
   healthy: boolean
+  circuit?: 'closed' | 'open' | 'half_open' | null
+  in_flight?: number
+  max_concurrent?: number | null
   labels: Record<string, string>
   models: string[]
 }
@@ -68,6 +71,7 @@ export interface HealthResponse {
   providers_configured: number
   providers_healthy: number
   providers: { name: string; status: string; healthy: boolean }[]
+  access?: { mode: 'keys' | 'solo' | 'dev'; keyless_from: string[]; admin_key_configured?: boolean } | null
 }
 
 export interface SecurityAlert {
@@ -118,6 +122,8 @@ export interface ApiKeyInfo {
   allowed_endpoints: string[] | null
   allowed_models: string[] | null
   rate_limit_rpm: number | null
+  max_concurrent?: number | null
+  priority?: 'interactive' | 'batch'
   description: string | null
 }
 
@@ -197,6 +203,17 @@ export interface PIIStats {
   unique_values: number
 }
 
+export interface PIIConfig {
+  detection_enabled: boolean
+  scrub_enabled: boolean
+  scrub_routes: string[] // empty = all routes
+  available_routes: string[]
+  source: 'environment' | 'dashboard'
+  updated_at: string | null
+  updated_by: string | null
+  persisted: boolean
+}
+
 export interface PIIEvent {
   id: number
   request_id: string
@@ -213,3 +230,38 @@ export interface PIIEvent {
   was_scrubbed: boolean
   scan_time_ms: number | null
 }
+
+// ---- Media (voice) catalog: GET /api/media/catalog ----
+
+export interface ParamSpec {
+  type: 'number' | 'integer' | 'boolean' | 'enum' | 'string'
+  min?: number
+  max?: number
+  values?: (string | number)[]
+  default?: string | number | boolean
+}
+
+export interface MediaVoice {
+  id: string
+  name: string
+  language?: string
+  gender?: string
+}
+
+export interface MediaEndpoint {
+  endpoint: string
+  capabilities: ('tts' | 'stt' | 'image' | 'video')[]
+  healthy: boolean
+  profile: string | null
+  description: string
+  models: { id: string; task?: string }[]
+  voices: MediaVoice[]
+  voices_source: 'engine' | 'config' | null
+  blending: boolean
+  tts_params: Record<string, ParamSpec>
+  stt_params: Record<string, ParamSpec>
+  stt_languages: string[]
+  fetched_at: string | null
+  error: string | null
+}
+

@@ -8,6 +8,9 @@ export function ApiKeysSection({ keys, onRefresh }: { keys: ApiKeyInfo[]; onRefr
   const [newKeyName, setNewKeyName] = useState('')
   const [newKeyClientId, setNewKeyClientId] = useState('')
   const [newKeyDescription, setNewKeyDescription] = useState('')
+  const [newKeyRpm, setNewKeyRpm] = useState('')
+  const [newKeyConcurrency, setNewKeyConcurrency] = useState('')
+  const [newKeyPriority, setNewKeyPriority] = useState<'interactive' | 'batch'>('interactive')
   const [createdKey, setCreatedKey] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)
   const [copied, setCopied] = useState(false)
@@ -20,11 +23,17 @@ export function ApiKeysSection({ keys, onRefresh }: { keys: ApiKeyInfo[]; onRefr
         name: newKeyName,
         client_id: newKeyClientId,
         description: newKeyDescription || undefined,
+        rate_limit_rpm: newKeyRpm ? Number(newKeyRpm) : undefined,
+        max_concurrent: newKeyConcurrency ? Number(newKeyConcurrency) : undefined,
+        priority: newKeyPriority,
       })
       setCreatedKey(result.key)
       setNewKeyName('')
       setNewKeyClientId('')
       setNewKeyDescription('')
+      setNewKeyRpm('')
+      setNewKeyConcurrency('')
+      setNewKeyPriority('interactive')
       onRefresh()
     } catch (e) {
       console.error('Failed to create key:', e)
@@ -64,7 +73,7 @@ export function ApiKeysSection({ keys, onRefresh }: { keys: ApiKeyInfo[]; onRefr
 
       {/* Create Key Form */}
       {showCreate && (
-        <div className="bg-gray-800 rounded-lg p-4 border border-gray-700 mb-4">
+        <div className="bg-gray-800 rounded-lg p-4 border border-gray-700 mb-4 text-left">
           {createdKey ? (
             <div>
               <div className="text-green-400 font-semibold mb-2">Key Created Successfully</div>
@@ -121,6 +130,54 @@ export function ApiKeysSection({ keys, onRefresh }: { keys: ApiKeyInfo[]; onRefr
                   className="bg-gray-900 border border-gray-600 rounded px-3 py-2 w-full text-sm"
                 />
               </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-gray-400 text-sm block mb-1">Requests / minute (optional)</label>
+                  <input
+                    type="number"
+                    min={1}
+                    value={newKeyRpm}
+                    onChange={e => setNewKeyRpm(e.target.value)}
+                    placeholder="gateway default"
+                    className="bg-gray-900 border border-gray-600 rounded px-3 py-2 w-full text-sm"
+                  />
+                  <p className="text-gray-500 text-xs mt-1">Burst and hourly limits scale with it.</p>
+                </div>
+                <div>
+                  <label className="text-gray-400 text-sm block mb-1">Max concurrent (optional)</label>
+                  <input
+                    type="number"
+                    min={1}
+                    value={newKeyConcurrency}
+                    onChange={e => setNewKeyConcurrency(e.target.value)}
+                    placeholder="unlimited"
+                    className="bg-gray-900 border border-gray-600 rounded px-3 py-2 w-full text-sm"
+                  />
+                  <p className="text-gray-500 text-xs mt-1">Requests in flight at once; more get 429.</p>
+                </div>
+              </div>
+              <div>
+                <label className="text-gray-400 text-sm block mb-1">Priority</label>
+                <div className="flex gap-2" role="radiogroup" aria-label="Priority">
+                  {(['interactive', 'batch'] as const).map(p => (
+                    <button
+                      key={p}
+                      type="button"
+                      role="radio"
+                      aria-checked={newKeyPriority === p}
+                      onClick={() => setNewKeyPriority(p)}
+                      className={`px-3 py-1.5 rounded text-sm border ${newKeyPriority === p ? 'bg-blue-600 border-blue-500' : 'bg-gray-900 border-gray-600 hover:border-gray-400'}`}
+                    >
+                      {p === 'interactive' ? 'Interactive' : 'Batch'}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-gray-500 text-xs mt-1">
+                  {newKeyPriority === 'batch'
+                    ? 'Waits behind interactive traffic, queues longer, and uses at most part of each endpoint.'
+                    : 'Served first when endpoints are busy.'}
+                </p>
+              </div>
               <button
                 onClick={handleCreate}
                 disabled={creating || !newKeyName || !newKeyClientId}
@@ -141,6 +198,7 @@ export function ApiKeysSection({ keys, onRefresh }: { keys: ApiKeyInfo[]; onRefr
               <th className="py-2 px-3">Prefix</th>
               <th className="py-2 px-3">Name</th>
               <th className="py-2 px-3">Client ID</th>
+              <th className="py-2 px-3">Limits</th>
               <th className="py-2 px-3">Created</th>
               <th className="py-2 px-3">Last Used</th>
               <th className="py-2 px-3">Status</th>
@@ -153,6 +211,7 @@ export function ApiKeysSection({ keys, onRefresh }: { keys: ApiKeyInfo[]; onRefr
                 <td className="py-2 px-3 font-mono text-sm">{k.prefix}...</td>
                 <td className="py-2 px-3 text-sm">{k.name}</td>
                 <td className="py-2 px-3 text-gray-400 text-sm">{k.client_id}</td>
+                <td className="py-2 px-3 text-gray-400 text-sm">{keyLimits(k)}</td>
                 <td className="py-2 px-3 text-gray-400 text-sm">
                   {k.created_at ? formatTimestamp(k.created_at) : '-'}
                 </td>
@@ -178,7 +237,7 @@ export function ApiKeysSection({ keys, onRefresh }: { keys: ApiKeyInfo[]; onRefr
             ))}
             {keys.length === 0 && (
               <tr>
-                <td colSpan={7} className="py-8 text-center text-gray-500">
+                <td colSpan={8} className="py-8 text-center text-gray-500">
                   No API keys created yet
                 </td>
               </tr>
@@ -188,4 +247,12 @@ export function ApiKeysSection({ keys, onRefresh }: { keys: ApiKeyInfo[]; onRefr
       </div>
     </div>
   )
+}
+
+function keyLimits(k: ApiKeyInfo): string {
+  const parts: string[] = []
+  if (k.rate_limit_rpm) parts.push(`${k.rate_limit_rpm} rpm`)
+  if (k.max_concurrent) parts.push(`${k.max_concurrent} concurrent`)
+  if (k.priority === 'batch') parts.push('batch')
+  return parts.length ? parts.join(' · ') : 'default'
 }

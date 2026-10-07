@@ -12,7 +12,7 @@ Endpoints:
 
 import json
 from collections.abc import AsyncGenerator
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request
@@ -42,17 +42,19 @@ from gateway.policy import PolicyEnforcer, PolicyViolation
 from gateway.routes.dependencies import (
     AuthResult,
     get_audit_logger,
-    get_auth,
     get_dispatcher,
     get_enforcer,
+    get_inference_auth,
     get_pii_scrubber,
     get_sanitizer,
     get_security_analyzer,
+    resolve_access_scope,
     run_unless_disconnected,
     setup_request_context,
     should_scrub_pii,
     translate_policy_violation,
 )
+from gateway.routes.stream_recorder import StreamRecorder
 from gateway.security import AsyncSecurityAnalyzer, PIIScrubber, Sanitizer
 from gateway.storage import AuditLogger
 
@@ -64,7 +66,7 @@ router = APIRouter(prefix="/api", tags=["ollama"])
 
 def _now_iso() -> str:
     """Get current time in ISO format."""
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _normalize_ollama_format(fmt: str | dict) -> dict:
@@ -102,7 +104,7 @@ def _audit_response_body(response) -> dict:
 async def ollama_chat(
     request: Request,
     body: OllamaChatRequest,
-    auth: Annotated[AuthResult, Depends(get_auth)],
+    auth: Annotated[AuthResult, Depends(get_inference_auth)],
     dispatcher: Annotated[Dispatcher, Depends(get_dispatcher)],
     enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
     pii_scrubber: Annotated[PIIScrubber | None, Depends(get_pii_scrubber)],
@@ -228,9 +230,8 @@ async def ollama_chat(
     if extensions:
         request_kwargs["extensions"] = extensions
 
-    # Apply per-client target endpoint if configured
-    if auth.target_endpoint:
-        request_kwargs["preferred_provider"] = auth.target_endpoint
+    # Apply per-key and per-environment routing restrictions
+    request_kwargs.update(await resolve_access_scope(request, auth, request_kwargs.get("model")))
 
     if options.get("temperature") is not None:
         request_kwargs["temperature"] = options["temperature"]
@@ -243,7 +244,7 @@ async def ollama_chat(
 
     # Check policies - raises domain errors on violation
     try:
-        enforcer.enforce(
+        await enforcer.enforce(
             internal_request,
             rate_limit_key=client_id,
             allowed_models=auth.allowed_models,
@@ -267,12 +268,14 @@ async def ollama_chat(
 
     if body.stream:
         return await _stream_ollama_chat(
+            request,
             dispatcher,
             internal_request,
             body.model,
             ctx,
             audit_logger,
             request_body=audit_request_body,
+            enforcer=enforcer,
         )
 
     # Non-streaming
@@ -345,24 +348,41 @@ async def ollama_chat(
 
 
 async def _stream_ollama_chat(
+    request: Request,
     dispatcher: Dispatcher,
     internal_request: InternalRequest,
     model: str,
     ctx,
     audit_logger: AuditLogger | None,
     request_body: dict | None = None,
+    enforcer: PolicyEnforcer | None = None,
 ) -> StreamingResponse:
     """Stream Ollama chat response."""
+    recorder = StreamRecorder(
+        ctx=ctx,
+        internal_request=internal_request,
+        model=model,
+        task="chat",
+        audit_logger=audit_logger,
+        enforcer=enforcer,
+        request_body=request_body,
+    )
+
+    # Endpoint chosen and first chunk received before the response starts,
+    # so failures up to here return a real HTTP error
+    stream = await recorder.start(request, dispatcher)
 
     async def generate() -> AsyncGenerator[bytes, None]:
-        provider_name = None
-        full_content = ""
-
         try:
-            provider_name, stream = await dispatcher.dispatch_stream(internal_request)
-
             async for chunk in stream:
-                full_content += chunk.delta or ""
+                recorder.observe(chunk)
+
+                if recorder.is_error(chunk):
+                    # Provider failed mid-stream: tell the client, record an error
+                    error = {"error": chunk.error or "Stream interrupted", "done": True}
+                    yield json.dumps(error) + "\n"
+                    await recorder.finish_error_chunk(chunk)
+                    return
 
                 # Tool calls stream through untouched (Ollama shape:
                 # function.arguments stays an object, never stringified)
@@ -402,40 +422,18 @@ async def _stream_ollama_chat(
                         eval_count=chunk.usage.completion_tokens if chunk.usage else 0,
                     )
                     yield json.dumps(final.model_dump()) + "\n"
+                    await recorder.finish()
 
-                    final_prompt_tokens = chunk.usage.prompt_tokens if chunk.usage else 0
-                    final_completion_tokens = chunk.usage.completion_tokens if chunk.usage else 0
-                    ctx.record_complete(
-                        prompt_tokens=final_prompt_tokens,
-                        completion_tokens=final_completion_tokens,
-                    )
-
-                    # Audit log
-                    if audit_logger and provider_name:
-                        await audit_logger.log_request(
-                            request_id=ctx.request_id,
-                            client_id=internal_request.client_id,
-                            task="chat",
-                            model=model,
-                            endpoint=provider_name,
-                            status="success",
-                            stream=True,
-                            latency_ms=ctx.total_latency_ms,
-                            time_to_first_token_ms=ctx.time_to_first_token_ms,
-                            tokens_per_second=ctx.tokens_per_second,
-                            prompt_tokens=final_prompt_tokens,
-                            completion_tokens=final_completion_tokens,
-                            request_body=request_body,
-                            response_body={"content": full_content},
-                        )
-
-        except Exception:
+        except Exception as e:
             logger.exception("Error in Ollama chat stream")
-            error_response = {
-                "error": "Stream interrupted",
-                "done": True,
-            }
-            yield json.dumps(error_response) + "\n"
+            yield json.dumps({"error": "Stream interrupted", "done": True}) + "\n"
+            await recorder.finish(
+                status="error",
+                error_code=getattr(getattr(e, "code", None), "value", "stream_error"),
+                error_message=str(e),
+            )
+        finally:
+            await recorder.finish_disconnected(stream)
 
     return StreamingResponse(
         generate(),
@@ -452,7 +450,7 @@ async def _stream_ollama_chat(
 async def ollama_generate(
     request: Request,
     body: OllamaGenerateRequest,
-    auth: Annotated[AuthResult, Depends(get_auth)],
+    auth: Annotated[AuthResult, Depends(get_inference_auth)],
     dispatcher: Annotated[Dispatcher, Depends(get_dispatcher)],
     enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
     pii_scrubber: Annotated[PIIScrubber | None, Depends(get_pii_scrubber)],
@@ -552,9 +550,8 @@ async def ollama_generate(
     if body.format is not None:
         request_kwargs["response_format"] = _normalize_ollama_format(body.format)
 
-    # Apply per-client target endpoint if configured
-    if auth.target_endpoint:
-        request_kwargs["preferred_provider"] = auth.target_endpoint
+    # Apply per-key and per-environment routing restrictions
+    request_kwargs.update(await resolve_access_scope(request, auth, request_kwargs.get("model")))
 
     if options.get("temperature") is not None:
         request_kwargs["temperature"] = options["temperature"]
@@ -567,7 +564,7 @@ async def ollama_generate(
 
     # Check policies
     try:
-        enforcer.enforce(
+        await enforcer.enforce(
             internal_request,
             rate_limit_key=client_id,
             allowed_models=auth.allowed_models,
@@ -587,12 +584,14 @@ async def ollama_generate(
 
     if body.stream:
         return await _stream_ollama_generate(
+            request,
             dispatcher,
             internal_request,
             body.model,
             ctx,
             audit_logger,
             request_body=audit_request_body,
+            enforcer=enforcer,
         )
 
     # Non-streaming
@@ -646,24 +645,41 @@ async def ollama_generate(
 
 
 async def _stream_ollama_generate(
+    request: Request,
     dispatcher: Dispatcher,
     internal_request: InternalRequest,
     model: str,
     ctx,
     audit_logger: AuditLogger | None,
     request_body: dict | None = None,
+    enforcer: PolicyEnforcer | None = None,
 ) -> StreamingResponse:
     """Stream Ollama generate response."""
+    recorder = StreamRecorder(
+        ctx=ctx,
+        internal_request=internal_request,
+        model=model,
+        task="generate",
+        audit_logger=audit_logger,
+        enforcer=enforcer,
+        request_body=request_body,
+    )
+
+    # Endpoint chosen and first chunk received before the response starts,
+    # so failures up to here return a real HTTP error
+    stream = await recorder.start(request, dispatcher)
 
     async def generate() -> AsyncGenerator[bytes, None]:
-        provider_name = None
-
         try:
-            provider_name, stream = await dispatcher.dispatch_stream(internal_request)
-
-            full_content = ""
             async for chunk in stream:
-                full_content += chunk.delta or ""
+                recorder.observe(chunk)
+
+                if recorder.is_error(chunk):
+                    error = {"error": chunk.error or "Stream interrupted", "done": True}
+                    yield json.dumps(error) + "\n"
+                    await recorder.finish_error_chunk(chunk)
+                    return
+
                 response = {
                     "model": model,
                     "created_at": _now_iso(),
@@ -675,27 +691,21 @@ async def _stream_ollama_generate(
                     response["prompt_eval_count"] = chunk.usage.prompt_tokens if chunk.usage else 0
                     response["eval_count"] = chunk.usage.completion_tokens if chunk.usage else 0
 
-                    if audit_logger and provider_name:
-                        await audit_logger.log_request(
-                            request_id=ctx.request_id,
-                            client_id=internal_request.client_id,
-                            task="generate",
-                            model=model,
-                            endpoint=provider_name,
-                            status="success",
-                            stream=True,
-                            latency_ms=ctx.total_latency_ms,
-                            prompt_tokens=chunk.usage.prompt_tokens if chunk.usage else 0,
-                            completion_tokens=chunk.usage.completion_tokens if chunk.usage else 0,
-                            request_body=request_body,
-                            response_body={"content": full_content},
-                        )
-
                 yield json.dumps(response) + "\n"
 
-        except Exception:
+                if chunk.finish_reason:
+                    await recorder.finish()
+
+        except Exception as e:
             logger.exception("Error in Ollama generate stream")
             yield json.dumps({"error": "Stream interrupted", "done": True}) + "\n"
+            await recorder.finish(
+                status="error",
+                error_code=getattr(getattr(e, "code", None), "value", "stream_error"),
+                error_message=str(e),
+            )
+        finally:
+            await recorder.finish_disconnected(stream)
 
     return StreamingResponse(
         generate(),
@@ -819,9 +829,8 @@ async def _run_embeddings(
         "client_id": client_id,
     }
 
-    # Apply per-client target endpoint if configured
-    if auth.target_endpoint:
-        request_kwargs["preferred_provider"] = auth.target_endpoint
+    # Apply per-key and per-environment routing restrictions
+    request_kwargs.update(await resolve_access_scope(request, auth, request_kwargs.get("model")))
 
     internal_request = InternalRequest(**request_kwargs)
 
@@ -885,7 +894,7 @@ async def _run_embeddings(
 async def ollama_embeddings(
     request: Request,
     body: OllamaEmbeddingsRequest,
-    auth: Annotated[AuthResult, Depends(get_auth)],
+    auth: Annotated[AuthResult, Depends(get_inference_auth)],
     dispatcher: Annotated[Dispatcher, Depends(get_dispatcher)],
     enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
     pii_scrubber: Annotated[PIIScrubber | None, Depends(get_pii_scrubber)],
@@ -916,7 +925,7 @@ async def ollama_embeddings(
 async def ollama_embed(
     request: Request,
     body: OllamaEmbedRequest,
-    auth: Annotated[AuthResult, Depends(get_auth)],
+    auth: Annotated[AuthResult, Depends(get_inference_auth)],
     dispatcher: Annotated[Dispatcher, Depends(get_dispatcher)],
     enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
     pii_scrubber: Annotated[PIIScrubber | None, Depends(get_pii_scrubber)],

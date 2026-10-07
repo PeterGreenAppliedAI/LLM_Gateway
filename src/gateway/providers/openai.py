@@ -13,7 +13,6 @@ Per NEXT_STEPS.md Phase 1: Cloud Provider Support
 
 import asyncio
 import json
-import os
 import time
 from collections.abc import AsyncIterator
 from typing import Any
@@ -38,7 +37,15 @@ from gateway.models.internal import (
     StreamChunk,
     ToolCall,
 )
+from gateway.providers.auth import resolve_api_key
 from gateway.providers.base import ProviderAdapter
+from gateway.providers.streaming import (
+    classify_exception,
+    error_chunk,
+    iter_lines_with_timeouts,
+    parse_openai_sse,
+    upstream_http_error,
+)
 
 
 class OpenAIAdapter(ProviderAdapter):
@@ -63,6 +70,7 @@ class OpenAIAdapter(ProviderAdapter):
         """
         super().__init__(config=config, provider_type=ProviderType.OPENAI)
         self._client: httpx.AsyncClient | None = None
+        self._media_client: httpx.AsyncClient | None = None
         self._client_lock = asyncio.Lock()
 
         # Resolve API key from config or environment
@@ -73,36 +81,9 @@ class OpenAIAdapter(ProviderAdapter):
 
     def _resolve_api_key(self, config: ProviderConfig) -> str | None:
         """Resolve API key from config or environment variable."""
-        # Direct api_key in config
-        api_key = getattr(config, "api_key", None)
-        if api_key:
-            # Handle ${ENV_VAR} syntax
-            if api_key.startswith("${") and api_key.endswith("}"):
-                env_var = api_key[2:-1]
-                return os.environ.get(env_var)
-            return api_key
-
-        # api_key_env specifies which env var to use
-        api_key_env = getattr(config, "api_key_env", None)
-        if api_key_env:
-            return os.environ.get(api_key_env)
-
-        # Default env vars by common provider names
-        name_lower = config.name.lower()
-        if "openrouter" in name_lower:
-            return os.environ.get("OPENROUTER_API_KEY")
-        elif "openai" in name_lower:
-            return os.environ.get("OPENAI_API_KEY")
-        elif "anthropic" in name_lower:
-            return os.environ.get("ANTHROPIC_API_KEY")
-        elif "groq" in name_lower:
-            return os.environ.get("GROQ_API_KEY")
-        elif "together" in name_lower:
-            return os.environ.get("TOGETHER_API_KEY")
-        elif "fireworks" in name_lower:
-            return os.environ.get("FIREWORKS_API_KEY")
-
-        return None
+        return resolve_api_key(
+            config.name, getattr(config, "api_key", None), getattr(config, "api_key_env", None)
+        )
 
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create HTTP client with authentication headers (thread-safe)."""
@@ -118,16 +99,39 @@ class OpenAIAdapter(ProviderAdapter):
 
                 self._client = httpx.AsyncClient(
                     base_url=self.base_url,
-                    timeout=httpx.Timeout(self.timeout, connect=self.connect_timeout),
+                    timeout=self.http_timeout(),
+                    limits=self.http_limits(),
                     headers=headers,
                 )
             return self._client
 
+    async def media_client(self) -> httpx.AsyncClient:
+        """Client for media routes: auth and custom headers, no JSON Content-Type.
+
+        The main client's default Content-Type: application/json would win over
+        httpx's multipart header and break transcription uploads.
+        """
+        async with self._client_lock:
+            if self._media_client is None or self._media_client.is_closed:
+                headers = dict(self._custom_headers)
+                if self._api_key:
+                    headers["Authorization"] = f"Bearer {self._api_key}"
+                self._media_client = httpx.AsyncClient(
+                    base_url=self.base_url,
+                    timeout=self.http_timeout(),
+                    limits=self.http_limits(),
+                    headers=headers,
+                )
+            return self._media_client
+
     async def close(self) -> None:
-        """Close the HTTP client."""
+        """Close the HTTP clients."""
         if self._client and not self._client.is_closed:
             await self._client.aclose()
             self._client = None
+        if self._media_client and not self._media_client.is_closed:
+            await self._media_client.aclose()
+            self._media_client = None
 
     # =========================================================================
     # Required Methods
@@ -194,7 +198,7 @@ class OpenAIAdapter(ProviderAdapter):
             return self._parse_chat_response(request, data, latency_ms)
 
         except httpx.TimeoutException as e:
-            return self._error_response(request, f"Timeout: {e}", "timeout")
+            return self._timeout_response(request, e)
         except httpx.HTTPStatusError as e:
             error_detail = self._parse_error_response(e.response)
             return self._error_response(
@@ -230,7 +234,7 @@ class OpenAIAdapter(ProviderAdapter):
             return self._parse_completion_response(request, data, latency_ms)
 
         except httpx.TimeoutException as e:
-            return self._error_response(request, f"Timeout: {e}", "timeout")
+            return self._timeout_response(request, e)
         except httpx.HTTPStatusError as e:
             # If /v1/completions not supported, fall back to chat
             if e.response.status_code == 404:
@@ -267,8 +271,9 @@ class OpenAIAdapter(ProviderAdapter):
 
             latency_ms = (time.perf_counter() - start_time) * 1000
 
-            # Extract embeddings from response
-            embeddings = [item["embedding"] for item in data.get("data", [])]
+            # Order by index so output i always belongs to input i
+            items = sorted(data.get("data", []), key=lambda item: item.get("index", 0))
+            embeddings = [item["embedding"] for item in items]
 
             usage_data = data.get("usage", {})
 
@@ -287,7 +292,7 @@ class OpenAIAdapter(ProviderAdapter):
             )
 
         except httpx.TimeoutException as e:
-            return self._error_response(request, f"Timeout: {e}", "timeout")
+            return self._timeout_response(request, e)
         except httpx.HTTPStatusError as e:
             error_detail = self._parse_error_response(e.response)
             return self._error_response(
@@ -304,25 +309,6 @@ class OpenAIAdapter(ProviderAdapter):
     # Streaming
     # =========================================================================
 
-    # Per-chunk timeout: if no chunk arrives within this window, the stream is dead
-    STREAM_CHUNK_TIMEOUT = 120.0  # seconds between chunks
-
-    async def _iter_lines_with_timeout(self, response: httpx.Response) -> AsyncIterator[str]:
-        """Iterate response lines with a per-chunk timeout."""
-        aiter = response.aiter_lines().__aiter__()
-        while True:
-            try:
-                line = await asyncio.wait_for(
-                    aiter.__anext__(),
-                    # At least as patient as the endpoint's configured
-                    # timeout: cold-loading a large model can stall the
-                    # first chunk far beyond the 120s floor
-                    timeout=max(self.STREAM_CHUNK_TIMEOUT, self.timeout),
-                )
-                yield line
-            except StopAsyncIteration:
-                break
-
     async def chat_stream(self, request: InternalRequest) -> AsyncIterator[StreamChunk]:
         """Stream chat completion via /v1/chat/completions with stream=true."""
         try:
@@ -336,74 +322,56 @@ class OpenAIAdapter(ProviderAdapter):
             async with client.stream(
                 "POST", "/v1/chat/completions", json=openai_request
             ) as response:
-                response.raise_for_status()
-                index = 0
-                # The finish chunk is held back: usage arrives AFTER it, in a
-                # frame with empty choices. Attach usage, then emit as final.
-                pending_final: StreamChunk | None = None
-
-                async for line in self._iter_lines_with_timeout(response):
-                    if not line or not line.startswith("data: "):
-                        continue
-
-                    data_str = line[6:]  # Remove "data: " prefix
-                    if data_str == "[DONE]":
-                        break
-
-                    try:
-                        chunk_data = json.loads(data_str)
-                    except json.JSONDecodeError:
-                        continue
-
-                    usage = None
-                    usage_data = chunk_data.get("usage")
-                    if usage_data:
-                        usage = UsageStats(
-                            prompt_tokens=usage_data.get("prompt_tokens", 0),
-                            completion_tokens=usage_data.get("completion_tokens", 0),
-                            total_tokens=usage_data.get("total_tokens", 0),
-                        )
-
-                    choices = chunk_data.get("choices", [])
-                    if not choices:
-                        # Usage-only frame (stream_options.include_usage)
-                        if usage and pending_final:
-                            pending_final = pending_final.model_copy(update={"usage": usage})
-                        continue
-
-                    choice = choices[0]
-                    delta = choice.get("delta", {})
-                    content = delta.get("content", "")
-                    finish_reason_str = choice.get("finish_reason")
-
-                    finish_reason = None
-                    if finish_reason_str:
-                        finish_reason = self._map_finish_reason(finish_reason_str)
-
-                    chunk = StreamChunk(
-                        request_id=request.request_id,
-                        index=index,
-                        delta=content,
-                        finish_reason=finish_reason,
-                        usage=usage,
-                    )
-                    index += 1
-
-                    if finish_reason is not None:
-                        pending_final = chunk
-                        continue
+                if response.status_code >= 400:
+                    code, message = await upstream_http_error(response)
+                    yield error_chunk(request, code, message)
+                    return
+                lines = iter_lines_with_timeouts(response, self.timeout, self.stream_idle_timeout)
+                async for chunk in parse_openai_sse(lines, request, self._map_finish_reason):
                     yield chunk
 
-                if pending_final is not None:
-                    yield pending_final
+        except Exception as e:
+            yield error_chunk(request, *classify_exception(e))
 
-        except Exception:
-            yield StreamChunk(
-                request_id=request.request_id,
-                index=0,
-                delta="",
-                finish_reason=FinishReason.ERROR,
-            )
+    async def generate_stream(self, request: InternalRequest) -> AsyncIterator[StreamChunk]:
+        """Stream a completion via /v1/completions with stream=true.
+
+        Like generate(): if the server has no /v1/completions (404), fall
+        back to streaming the prompt through chat.
+        """
+        fall_back_to_chat = False
+        try:
+            client = await self._get_client()
+            openai_request = self._build_completion_request(request)
+            openai_request["stream"] = True
+            openai_request["stream_options"] = {"include_usage": True}
+
+            async with client.stream("POST", "/v1/completions", json=openai_request) as response:
+                if response.status_code == 404:
+                    fall_back_to_chat = True
+                elif response.status_code >= 400:
+                    code, message = await upstream_http_error(response)
+                    yield error_chunk(request, code, message)
+                    return
+                else:
+                    lines = iter_lines_with_timeouts(
+                        response, self.timeout, self.stream_idle_timeout
+                    )
+                    async for chunk in parse_openai_sse(lines, request, self._map_finish_reason):
+                        yield chunk
+
+        except Exception as e:
+            yield error_chunk(request, *classify_exception(e))
+            return
+
+        if fall_back_to_chat:
+            chat_request = request
+            if request.prompt and not request.messages:
+                chat_request = request.model_copy(
+                    update={"messages": [Message(role=MessageRole.USER, content=request.prompt)]}
+                )
+            async for chunk in self.chat_stream(chat_request):
+                yield chunk
 
     # =========================================================================
     # Provider Metadata

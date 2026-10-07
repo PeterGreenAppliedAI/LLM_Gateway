@@ -9,12 +9,14 @@ backward compatibility during the migration period.
 """
 
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from gateway.catalog.models import ModelCatalog
 from gateway.config import EndpointConfig, GatewayConfig, ProviderConfig
+from gateway.dispatch.circuit import CircuitBreaker, CircuitState
 from gateway.models.common import HealthStatus
 from gateway.providers import ProviderAdapter, create_adapter
+from gateway.state.concurrency import ConcurrencyBackend, InMemoryConcurrency
 
 
 class ProviderHealth:
@@ -31,7 +33,7 @@ class ProviderHealth:
     def record_healthy(self) -> None:
         """Record a successful health check."""
         self.status = HealthStatus.HEALTHY
-        self.last_check = datetime.now(timezone.utc)
+        self.last_check = datetime.now(UTC)
         self.last_healthy = self.last_check
         self.consecutive_failures = 0
         self.error_message = None
@@ -39,7 +41,7 @@ class ProviderHealth:
     def record_unhealthy(self, status: HealthStatus, error: str | None = None) -> None:
         """Record a failed health check."""
         self.status = status
-        self.last_check = datetime.now(timezone.utc)
+        self.last_check = datetime.now(UTC)
         self.consecutive_failures += 1
         self.error_message = error
 
@@ -51,7 +53,7 @@ class ProviderHealth:
         """Get time since last healthy state."""
         if self.last_healthy is None:
             return None
-        return datetime.now(timezone.utc) - self.last_healthy
+        return datetime.now(UTC) - self.last_healthy
 
 
 class ProviderRegistry:
@@ -65,15 +67,22 @@ class ProviderRegistry:
     - Model catalog integration
     """
 
-    def __init__(self, config: GatewayConfig):
+    def __init__(self, config: GatewayConfig, endpoint_slots: ConcurrencyBackend | None = None):
         """Initialize registry from gateway config.
 
         Args:
             config: Validated gateway configuration
+            endpoint_slots: Shared admission counts (gateway.state); defaults
+                to this process's own counts
         """
         self._config = config
         self._adapters: dict[str, ProviderAdapter] = {}
         self._health: dict[str, ProviderHealth] = {}
+        self._breakers: dict[str, CircuitBreaker] = {}
+        # In-process slot counts; a shared backend can replace it (D-010)
+        self._admission: ConcurrencyBackend = endpoint_slots or InMemoryConcurrency(
+            batch_max_share=config.admission.batch_max_share
+        )
         self._endpoint_configs: dict[str, EndpointConfig] = {}
         self._health_task: asyncio.Task | None = None
         self._shutdown = False
@@ -82,6 +91,17 @@ class ProviderRegistry:
         # Health check settings
         self._health_interval_seconds: float = 30.0
         self._health_timeout_seconds: float = 10.0
+
+    @property
+    def admission(self) -> ConcurrencyBackend:
+        """Per-endpoint concurrency slots (dispatch/admission.py)."""
+        return self._admission
+
+    def queue_wait_seconds(self, priority: str = "interactive") -> float:
+        """How long a request may wait for an endpoint slot."""
+        if priority == "batch":
+            return self._config.admission.batch_max_queue_wait_seconds
+        return self._config.admission.max_queue_wait_seconds
 
     @property
     def catalog(self) -> ModelCatalog:
@@ -107,6 +127,8 @@ class ProviderRegistry:
         adapter = create_adapter(config)
         self._adapters[config.name] = adapter
         self._health[config.name] = ProviderHealth(config.name)
+        self._breakers[config.name] = CircuitBreaker(self._config.circuit_breaker)
+        self._admission.set_capacity(config.name, config.max_concurrent)
 
     async def _register_endpoint(self, config: EndpointConfig) -> None:
         """Create and register an adapter from endpoint config."""
@@ -117,11 +139,19 @@ class ProviderRegistry:
             base_url=config.url,
             enabled=config.enabled,
             timeout=config.timeout,
+            connect_timeout=config.connect_timeout,
+            stream_idle_timeout=config.stream_idle_timeout,
             max_retries=config.max_retries,
+            max_concurrent=config.max_concurrent,
+            api_key=config.api_key,
+            api_key_env=config.api_key_env,
+            headers=config.headers,
         )
         adapter = create_adapter(provider_config)
         self._adapters[config.name] = adapter
         self._health[config.name] = ProviderHealth(config.name)
+        self._breakers[config.name] = CircuitBreaker(self._config.circuit_breaker)
+        self._admission.set_capacity(config.name, config.max_concurrent)
         self._endpoint_configs[config.name] = config
 
     def get(self, name: str) -> ProviderAdapter | None:
@@ -157,6 +187,38 @@ class ProviderRegistry:
         """
         health = self._health.get(name)
         return health is not None and health.is_available()
+
+    # ------------------------------------------------------------------
+    # Circuit breaker (request outcomes + health loop; see dispatch/circuit.py)
+    # ------------------------------------------------------------------
+
+    def allow_request(self, name: str) -> bool:
+        """Whether a request may use this endpoint now. Claims the half-open probe."""
+        breaker = self._breakers.get(name)
+        return breaker.allow_request() if breaker else name in self._adapters
+
+    def record_success(self, name: str) -> None:
+        if name in self._breakers:
+            self._breakers[name].record_success()
+
+    def record_failure(self, name: str) -> None:
+        """A retryable failure: connection error, timeout or upstream 5xx (never 4xx)."""
+        if name in self._breakers:
+            self._breakers[name].record_failure()
+
+    def trip(self, name: str) -> None:
+        """Open the circuit now (the health loop saw the endpoint fail)."""
+        if name in self._breakers:
+            self._breakers[name].trip()
+
+    def release_probe(self, name: str) -> None:
+        """A request that claimed the probe ended without a verdict."""
+        if name in self._breakers:
+            self._breakers[name].release_probe()
+
+    def circuit_state(self, name: str) -> CircuitState | None:
+        breaker = self._breakers.get(name)
+        return breaker.state if breaker else None
 
     def list_providers(self) -> list[str]:
         """List all registered provider names."""
@@ -308,15 +370,20 @@ class ProviderRegistry:
 
             if status == HealthStatus.HEALTHY:
                 self._health[name].record_healthy()
+                self._breakers[name].record_success()
             else:
                 self._health[name].record_unhealthy(status)
+                if status == HealthStatus.UNHEALTHY:
+                    self.trip(name)
 
-        except asyncio.TimeoutError:
+        except TimeoutError:
             self._health[name].record_unhealthy(
                 HealthStatus.UNHEALTHY, error="Health check timed out"
             )
+            self.trip(name)
         except Exception as e:
             self._health[name].record_unhealthy(HealthStatus.UNHEALTHY, error=str(e))
+            self.trip(name)
 
     async def check_health(self, name: str) -> HealthStatus:
         """Check health of a specific provider (on-demand).

@@ -12,6 +12,7 @@ Per PRD Section 10:
 - Block execution if provider unhealthy
 """
 
+from contextvars import ContextVar
 from dataclasses import dataclass
 
 from pydantic import BaseModel, Field
@@ -21,6 +22,27 @@ from gateway.models.internal import InternalRequest
 from gateway.policy.rate_limiter import RateLimitConfig, RateLimiter, RateLimitExceeded
 from gateway.policy.token_budget import TokenBudgetConfig, TokenBudgetExceeded, TokenBudgetTracker
 from gateway.policy.token_limiter import TokenLimitConfig, TokenLimiter, TokenLimitExceeded
+from gateway.state.ratelimit import RateWindowStore
+
+# Budget reservations made during the current request, as (reservation_id,
+# client). get_inference_auth installs the list and releases what's left
+# when the response is done (D-043).
+_BUDGET_HOLDS: ContextVar[list[tuple[str, str]] | None] = ContextVar("budget_holds", default=None)
+
+# Tasks whose cost is the input alone (media is metered in its own units, D-021)
+_NO_TEXT_OUTPUT = {
+    TaskType.EMBEDDINGS,
+    TaskType.SPEECH,
+    TaskType.TRANSCRIPTION,
+    TaskType.TRANSLATION,
+}
+
+
+def start_budget_holds() -> list[tuple[str, str]]:
+    """Begin collecting this request's budget reservations; returns the list."""
+    holds: list[tuple[str, str]] = []
+    _BUDGET_HOLDS.set(holds)
+    return holds
 
 
 class PolicyViolation(Exception):
@@ -85,17 +107,21 @@ class PolicyEnforcer:
 
     Usage:
         enforcer = PolicyEnforcer(config)
-        enforcer.enforce(request, rate_limit_key="client_123")
+        await enforcer.enforce(request, rate_limit_key="client_123")
     """
 
-    def __init__(self, config: PolicyConfig | None = None):
+    def __init__(
+        self, config: PolicyConfig | None = None, rate_store: RateWindowStore | None = None
+    ):
         """Initialize policy enforcer.
 
         Args:
             config: Policy configuration. Uses defaults if not provided.
+            rate_store: Where rate-limit windows are counted (gateway.state);
+                defaults to this process's memory
         """
         self._config = config or PolicyConfig()
-        self._rate_limiter = RateLimiter(self._config.rate_limit)
+        self._rate_limiter = RateLimiter(self._config.rate_limit, rate_store)
         self._token_limiter = TokenLimiter(self._config.token_limit)
         self._token_budget = TokenBudgetTracker(self._config.token_budget)
 
@@ -109,7 +135,7 @@ class PolicyEnforcer:
         """Check if policy enforcement is enabled."""
         return self._config.enabled
 
-    def enforce(
+    async def enforce(
         self,
         request: InternalRequest,
         rate_limit_key: str | None = None,
@@ -142,7 +168,7 @@ class PolicyEnforcer:
 
         # 1. Check rate limits (with per-key override)
         try:
-            rate_state = self._rate_limiter.acquire(key, rpm_override=rate_limit_rpm)
+            rate_state = await self._rate_limiter.acquire(key, rpm_override=rate_limit_rpm)
         except RateLimitExceeded as e:
             raise PolicyViolation(
                 message=str(e),
@@ -184,15 +210,21 @@ class PolicyEnforcer:
                     code="endpoint_not_allowed",
                 )
 
-        # 5. Check token budget (daily quotas)
+        # 5. Token budget (daily quotas): reserve the estimated cost now, so
+        # concurrent requests can't all pass against the same remaining budget
+        # (D-043). Settled with actual usage, or released if the request fails.
         if self._token_budget.enabled:
             try:
-                self._token_budget.check_budget(
+                self._token_budget.reserve(
+                    reservation_id=request.request_id,
                     key=key,
                     model=request.model or "",
-                    estimated_tokens=request.max_tokens or 0,
+                    estimated_tokens=self._estimate_tokens(request, validated_max_tokens),
                     daily_limit_override=None,  # TODO: per-key override from DB
                 )
+                holds = _BUDGET_HOLDS.get()
+                if holds is not None:
+                    holds.append((request.request_id, key))
             except TokenBudgetExceeded as e:
                 raise PolicyViolation(
                     message=str(e),
@@ -232,7 +264,7 @@ class PolicyEnforcer:
             adjusted_max_tokens=adjusted,
         )
 
-    def check_rate_limit(self, key: str) -> PolicyCheckResult:
+    async def check_rate_limit(self, key: str) -> PolicyCheckResult:
         """Check rate limit only (without consuming).
 
         Args:
@@ -244,7 +276,7 @@ class PolicyEnforcer:
         if not self._config.enabled or not self._rate_limiter.enabled:
             return PolicyCheckResult(allowed=True)
 
-        state = self._rate_limiter.check(key)
+        state = await self._rate_limiter.check(key)
 
         return PolicyCheckResult(
             allowed=state.requests_remaining_minute > 0,
@@ -282,27 +314,59 @@ class PolicyEnforcer:
         """Get the default max_tokens value."""
         return self._token_limiter.default_max_tokens
 
-    def reset_rate_limit(self, key: str) -> None:
+    async def reset_rate_limit(self, key: str) -> None:
         """Reset rate limit for a key (admin operation).
 
         Args:
             key: Rate limit key to reset
         """
-        self._rate_limiter.reset(key)
+        await self._rate_limiter.reset(key)
 
-    def reset_all_rate_limits(self) -> None:
+    async def reset_all_rate_limits(self) -> None:
         """Reset all rate limits (admin operation)."""
-        self._rate_limiter.reset_all()
+        await self._rate_limiter.reset_all()
 
     def record_token_usage(self, key: str, model: str, tokens: int) -> None:
         """Record actual token usage after a response completes.
+
+        Settles this request's budget reservation (D-043), replacing the
+        estimate with what was actually used.
 
         Args:
             key: Client ID or rate limit key
             model: Model name used
             tokens: Total tokens consumed (prompt + completion)
         """
-        self._token_budget.record_usage(key, model, tokens)
+        reservation_id = None
+        for rid, holder in _BUDGET_HOLDS.get() or ():
+            if holder == key:
+                reservation_id = rid
+                break
+        self._token_budget.record_usage(key, model, tokens, reservation_id=reservation_id)
+
+    def release_budget_holds(self, holds: list[tuple[str, str]]) -> None:
+        """End of request: drop holds never settled (failed or abandoned requests)."""
+        for rid, _ in holds:
+            self._token_budget.release(rid)
+
+    def _estimate_tokens(self, request: InternalRequest, max_tokens: int | None) -> int:
+        """What a request may cost before it runs: its prompt plus the output it may produce.
+
+        Prompt: ~4 characters per token over all text sent. Output: max_tokens,
+        or the default when unset (an unset max_tokens used to estimate zero,
+        so it never counted against the budget). Embeddings and media produce
+        no text output.
+        """
+        chars = 0
+        for message in request.messages or []:
+            chars += len(message.content or "")
+        for item in request.input_data or []:
+            chars += len(item) if isinstance(item, str) else 0
+        chars += len(getattr(request, "prompt", None) or "")
+        prompt_estimate = chars // 4 + 1
+        if request.task in _NO_TEXT_OUTPUT:
+            return prompt_estimate
+        return prompt_estimate + (max_tokens or self._token_limiter.default_max_tokens)
 
     @property
     def token_budget(self) -> TokenBudgetTracker:

@@ -11,6 +11,9 @@ endpoints:
     enabled: true
     timeout: 120.0
     max_retries: 3
+    # Requests sent at once; match OLLAMA_NUM_PARALLEL (vLLM: --max-num-seqs).
+    # Extra requests overflow to the next endpoint or wait (D-032).
+    # max_concurrent: 4
     labels:
       tier: primary
       location: local
@@ -22,6 +25,7 @@ endpoints:
   #   enabled: true
   #   timeout: 120.0
   #   max_retries: 3
+  #   max_concurrent: 4
   #   labels:
   #     tier: secondary
   #     gpu: "4090"
@@ -42,3 +46,7 @@ resolution:
   endpoint_priority:
     - ollama-local
   ambiguous_behavior: first_priority
+  # priority (default): the first endpoint by priority, overflowing in order
+  # when it is at max_concurrent. least_loaded: whichever has the smallest
+  # share of max_concurrent in use (spreads load across equal boxes).
+  strategy: priority

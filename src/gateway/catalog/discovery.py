@@ -1,11 +1,16 @@
 """Model discovery service for querying endpoints.
 
 Provides background discovery of models from various endpoint types
-(Ollama, vLLM, TRT-LLM, SGLang).
+(Ollama, vLLM, OpenAI-compatible servers, TRT-LLM, SGLang).
+
+Only text models (chat, completion, embedding) enter this catalog. Media
+endpoints' voices and models are tracked by the media catalog (D-028), so
+an endpoint declaring media capabilities is skipped here unless it sets
+`serves_text: true` (D-036).
 """
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import httpx
 
@@ -13,8 +18,23 @@ from gateway.catalog.models import DiscoveredModel, ModelCatalog
 from gateway.config import EndpointConfig
 from gateway.models.common import ProviderType
 from gateway.observability import get_logger
+from gateway.providers.auth import auth_headers
 
 logger = get_logger(__name__)
+
+# Model `task` labels that mark a media model (speaches and Hugging Face style)
+MEDIA_TASKS = frozenset(
+    {
+        "automatic-speech-recognition",
+        "speech-to-text",
+        "text-to-speech",
+        "text-to-audio",
+        "text-to-image",
+        "image-to-image",
+        "text-to-video",
+        "image-to-video",
+    }
+)
 
 
 class ModelDiscoveryService:
@@ -103,6 +123,10 @@ class ModelDiscoveryService:
         for endpoint in self._endpoints:
             if not endpoint.enabled:
                 continue
+            if not endpoint.text_models:
+                # A Kokoro/Whisper server's models aren't chat models
+                self._catalog.remove_endpoint_models(endpoint.name)
+                continue
             tasks.append(self._discover_endpoint(endpoint))
 
         if tasks:
@@ -116,7 +140,7 @@ class ModelDiscoveryService:
                 else:
                     results[endpoint.name] = result
 
-        self._catalog.last_discovery = datetime.now(timezone.utc)
+        self._catalog.last_discovery = datetime.now(UTC)
         return results
 
     async def _discover_endpoint(self, endpoint: EndpointConfig) -> list[str]:
@@ -130,8 +154,8 @@ class ModelDiscoveryService:
         """
         if endpoint.type == ProviderType.OLLAMA:
             return await self._discover_ollama(endpoint)
-        elif endpoint.type == ProviderType.VLLM:
-            return await self._discover_vllm(endpoint)
+        elif endpoint.type in (ProviderType.VLLM, ProviderType.OPENAI):
+            return await self._discover_openai_compatible(endpoint)
         elif endpoint.type == ProviderType.TRTLLM:
             return await self._discover_trtllm(endpoint)
         elif endpoint.type == ProviderType.SGLANG:
@@ -211,26 +235,24 @@ class ModelDiscoveryService:
             logger.warning(f"Error discovering from {endpoint.name}: {e}")
             return []
 
-    async def _discover_vllm(self, endpoint: EndpointConfig) -> list[str]:
-        """Discover models from vLLM endpoint.
+    async def _discover_openai_compatible(self, endpoint: EndpointConfig) -> list[str]:
+        """Discover models from GET /v1/models (vLLM, LM Studio, llama.cpp, LocalAI, OpenAI).
 
-        vLLM exposes GET /v1/models which returns OpenAI-compatible format:
-        {
-            "data": [
-                {
-                    "id": "meta-llama/Llama-3.1-8B-Instruct",
-                    "object": "model",
-                    "owned_by": "vllm"
-                }
-            ]
-        }
+        Response (OpenAI format):
+        {"data": [{"id": "meta-llama/Llama-3.1-8B-Instruct", "object": "model"}]}
+
+        Sends the endpoint's credentials (D-036). Models some servers label
+        with a media `task` (speaches: "text-to-speech") are skipped.
         """
         if self._client is None:
             return []
 
         try:
-            url = f"{endpoint.url}/v1/models"
-            response = await self._client.get(url)
+            url = f"{endpoint.url.rstrip('/')}/v1/models"
+            headers = auth_headers(
+                endpoint.name, endpoint.api_key, endpoint.api_key_env, endpoint.headers
+            )
+            response = await self._client.get(url, headers=headers)
             response.raise_for_status()
             data = response.json()
 
@@ -240,14 +262,9 @@ class ModelDiscoveryService:
             model_names = []
             for model_data in data.get("data", []):
                 name = model_data.get("id")
-                if not name:
+                if not name or model_data.get("task") in MEDIA_TASKS:
                     continue
-
-                model = DiscoveredModel(
-                    name=name,
-                    endpoint=endpoint.name,
-                )
-                self._catalog.add_model(model)
+                self._catalog.add_model(DiscoveredModel(name=name, endpoint=endpoint.name))
                 model_names.append(name)
 
             logger.debug(f"Discovered {len(model_names)} models from {endpoint.name}")
@@ -313,7 +330,7 @@ class ModelDiscoveryService:
         SGLang exposes OpenAI-compatible /v1/models endpoint.
         """
         # SGLang uses same API as vLLM
-        return await self._discover_vllm(endpoint)
+        return await self._discover_openai_compatible(endpoint)
 
     async def discover_endpoint(self, endpoint_name: str) -> list[str]:
         """Discover models from a specific endpoint by name.
@@ -325,7 +342,7 @@ class ModelDiscoveryService:
             List of discovered model names, or empty if endpoint not found
         """
         for endpoint in self._endpoints:
-            if endpoint.name == endpoint_name and endpoint.enabled:
+            if endpoint.name == endpoint_name and endpoint.enabled and endpoint.text_models:
                 return await self._discover_endpoint(endpoint)
         return []
 

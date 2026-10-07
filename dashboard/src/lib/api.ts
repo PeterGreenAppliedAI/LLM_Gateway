@@ -1,7 +1,9 @@
-import type { Stats, Request, RequestDetail, Catalog, HealthResponse, SecurityAlert, SecurityStats, SecurityResult, ApiKeyInfo, BudgetConfig, BudgetUsage, SecurityScan, LabelStats, PIIStats, PIIEvent } from '../types'
+import type { Stats, Request, RequestDetail, Catalog, HealthResponse, SecurityAlert, SecurityStats, SecurityResult, ApiKeyInfo, BudgetConfig, BudgetUsage, SecurityScan, LabelStats, PIIStats, PIIEvent, PIIConfig, MediaEndpoint } from '../types'
 
 // API base URL - gateway server
-export const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8001'
+// Unset: the dev server talks to a local gateway. Empty string: same origin
+// (the Docker image proxies the API behind the dashboard, D-044).
+export const API_BASE = (import.meta.env.VITE_API_URL ?? 'http://localhost:8001').replace(/\/$/, '')
 
 // Gateway API key: entered in the header, kept in localStorage, sent on every request
 const API_KEY_STORAGE = 'gateway_api_key'
@@ -84,7 +86,14 @@ export async function fetchApiKeys(): Promise<{ keys: ApiKeyInfo[]; total: numbe
   return res.json()
 }
 
-export async function createApiKey(body: { name: string; client_id: string; description?: string }): Promise<{ key: string; key_id: number; prefix: string }> {
+export async function createApiKey(body: {
+  name: string
+  client_id: string
+  description?: string
+  rate_limit_rpm?: number
+  max_concurrent?: number
+  priority?: 'interactive' | 'batch'
+}): Promise<{ key: string; key_id: number; prefix: string }> {
   const res = await apiFetch(`${API_BASE}/api/keys`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -194,3 +203,70 @@ export async function fetchPIIEvents(limit = 50, piiType?: string): Promise<{ ev
   if (!res.ok) return { events: [], total: 0 }
   return res.json()
 }
+
+export async function fetchPIIConfig(): Promise<PIIConfig | null> {
+  const res = await apiFetch(`${API_BASE}/api/pii/config`)
+  if (!res.ok) return null
+  return res.json()
+}
+
+// Resolves with the new config, or rejects with the gateway's error message
+export async function updatePIIConfig(body: { scrub_enabled: boolean; scrub_routes: string[] }): Promise<PIIConfig> {
+  const res = await apiFetch(`${API_BASE}/api/pii/config`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) {
+    throw new Error(data?.error?.message || data?.detail?.[0]?.msg || `Request failed (${res.status})`)
+  }
+  return data
+}
+
+// ---- Media (voice) ----
+
+export async function fetchMediaCatalog(refresh = false): Promise<MediaEndpoint[]> {
+  const res = refresh
+    ? await apiFetch(`${API_BASE}/api/media/catalog/refresh`, { method: 'POST' })
+    : await apiFetch(`${API_BASE}/api/media/catalog`)
+  if (!res.ok) return []
+  return (await res.json()).endpoints
+}
+
+async function errorMessage(res: Response): Promise<string> {
+  const data = await res.json().catch(() => null)
+  return data?.error?.message || data?.detail?.[0]?.msg || `Request failed (${res.status})`
+}
+
+/** Text-to-speech through the gateway's real route (audited and metered). */
+export async function synthesizeSpeech(body: Record<string, unknown>): Promise<{ audio: Blob; ms: number }> {
+  const started = performance.now()
+  const res = await apiFetch(`${API_BASE}/v1/audio/speech`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) throw new Error(await errorMessage(res))
+  const audio = await res.blob()
+  return { audio, ms: performance.now() - started }
+}
+
+/** Speech-to-text (task 'transcriptions' or 'translations') through the gateway. */
+export async function transcribeAudio(
+  task: 'transcriptions' | 'translations',
+  file: Blob,
+  filename: string,
+  fields: Record<string, string>,
+): Promise<{ text: string; contentType: string; ms: number }> {
+  const form = new FormData()
+  form.append('file', file, filename)
+  for (const [key, value] of Object.entries(fields)) {
+    if (value) form.append(key, value)
+  }
+  const started = performance.now()
+  const res = await apiFetch(`${API_BASE}/v1/audio/${task}`, { method: 'POST', body: form })
+  if (!res.ok) throw new Error(await errorMessage(res))
+  return { text: await res.text(), contentType: res.headers.get('content-type') || '', ms: performance.now() - started }
+}
+

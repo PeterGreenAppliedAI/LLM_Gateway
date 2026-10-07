@@ -19,6 +19,10 @@ class TaskType(str, Enum):
     CLASSIFY = "classify"
     EMBEDDINGS = "embeddings"
     GENERATE = "generate"  # Generic text generation
+    # Media (D-020): OpenAI audio routes
+    SPEECH = "speech"  # text-to-speech
+    TRANSCRIPTION = "transcription"  # speech-to-text
+    TRANSLATION = "translation"  # speech-to-English-text
 
 
 class FinishReason(str, Enum):
