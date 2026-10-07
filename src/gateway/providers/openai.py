@@ -126,7 +126,8 @@ class OpenAIAdapter(ProviderAdapter):
 
                 self._client = httpx.AsyncClient(
                     base_url=self.base_url,
-                    timeout=httpx.Timeout(self.timeout, connect=self.connect_timeout),
+                    timeout=self.http_timeout(),
+                    limits=self.http_limits(),
                     headers=headers,
                 )
             return self._client
@@ -144,7 +145,8 @@ class OpenAIAdapter(ProviderAdapter):
                     headers["Authorization"] = f"Bearer {self._api_key}"
                 self._media_client = httpx.AsyncClient(
                     base_url=self.base_url,
-                    timeout=httpx.Timeout(self.timeout, connect=self.connect_timeout),
+                    timeout=self.http_timeout(),
+                    limits=self.http_limits(),
                     headers=headers,
                 )
             return self._media_client
@@ -223,7 +225,7 @@ class OpenAIAdapter(ProviderAdapter):
             return self._parse_chat_response(request, data, latency_ms)
 
         except httpx.TimeoutException as e:
-            return self._error_response(request, f"Timeout: {e}", "timeout")
+            return self._timeout_response(request, e)
         except httpx.HTTPStatusError as e:
             error_detail = self._parse_error_response(e.response)
             return self._error_response(
@@ -259,7 +261,7 @@ class OpenAIAdapter(ProviderAdapter):
             return self._parse_completion_response(request, data, latency_ms)
 
         except httpx.TimeoutException as e:
-            return self._error_response(request, f"Timeout: {e}", "timeout")
+            return self._timeout_response(request, e)
         except httpx.HTTPStatusError as e:
             # If /v1/completions not supported, fall back to chat
             if e.response.status_code == 404:
@@ -317,7 +319,7 @@ class OpenAIAdapter(ProviderAdapter):
             )
 
         except httpx.TimeoutException as e:
-            return self._error_response(request, f"Timeout: {e}", "timeout")
+            return self._timeout_response(request, e)
         except httpx.HTTPStatusError as e:
             error_detail = self._parse_error_response(e.response)
             return self._error_response(

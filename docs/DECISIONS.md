@@ -788,3 +788,51 @@ is observe-only).
   - 503 + Retry-After over HTTP.
 
   Also `test_full_engine_overflows_and_slot_is_released` (voice).
+
+## D-033: Connection pool sizing and per-key burst scaling (phase 2d/2e)
+
+- **Status:** Implemented, 2026-10-07
+- **Problem 1, the pool:** every endpoint's httpx client used the default pool (100
+  connections, 20 kept alive). Its pool wait inherited the read timeout, which can be up to an
+  hour. Two consequences:
+  - Past 100 concurrent requests, requests queued silently *inside httpx*, invisible to
+    admission control and metrics.
+  - With only 20 keep-alive connections, a burst of 40 paid TCP setup for half of them on
+    every wave.
+- **Fix 1:**
+  - With `max_concurrent` set, the pool is `max_concurrent + 4`, all kept alive. Admission
+    (D-032) already keeps requests at or below `max_concurrent`; the +4 covers health checks
+    and model discovery.
+  - Unlimited endpoints keep httpx's 100/20, so nothing changes without opting in.
+  - **Pool wait is 5 s.**
+  - A `PoolTimeout` becomes error code `pool_timeout`, distinct from `timeout`. It is
+    retryable (another endpoint has its own pool) but gives the circuit breaker no verdict:
+    a full gateway pool says nothing about the engine. Counting it would let the gateway's own
+    saturation open circuits on healthy GPUs.
+  - **Why no `max_connections` knob:** a second number that must agree with `max_concurrent`
+    is a misconfiguration waiting to happen. Derive it, and add a knob only if someone needs a
+    different value.
+- **Problem 2, the burst limit:** `burst_limit` (10 per 10 s) and `requests_per_hour` (1000)
+  were global and ignored a key's `rate_limit_rpm`. A key granted 600 RPM was refused after its
+  11th request in 10 s, so it got 60 RPM in practice, and it was cut off after 1000 per hour.
+- **Fix 2:** a per-key RPM override scales burst and hourly limits by the same factor
+  (`RateLimiter.limits_for`):
+  - 600 RPM → 100 per 10 s and 10 000 per hour;
+  - 3 RPM → burst 1;
+  - keys without an override are unchanged.
+- **Alternatives considered:** per-key `burst` and `rph` overrides on the key. They give
+  more knobs, but every key with a raised RPM would also need two more numbers set correctly.
+  Proportional scaling makes the common case right with no extra config. Explicit overrides
+  can be added later if a key needs a different shape.
+- **Still open:** keyless clients share one `default` bucket. Bucketing them per client IP
+  needs trusted proxy headers (behind a reverse proxy, every client has the proxy's IP), so
+  it's deferred to the request-handling phase rather than shipped wrong.
+- **What didn't work:** nothing broke this round.
+- **What works now:** `tests/test_capacity_limits.py` (14 tests):
+  - limits derived from `max_concurrent` and checked on the live httpx pool for the Ollama,
+    vLLM and OpenAI adapters;
+  - the 5 s pool wait;
+  - `pool_timeout` classification;
+  - 10 pool timeouts fail over without opening the circuit;
+  - burst and hourly scaling, including the 600 RPM regression;
+  - `check()` reporting the scaled limits.

@@ -64,7 +64,8 @@ class VLLMAdapter(ProviderAdapter):
             if self._client is None or self._client.is_closed:
                 self._client = httpx.AsyncClient(
                     base_url=self.base_url,
-                    timeout=httpx.Timeout(self.timeout, connect=self.connect_timeout),
+                    timeout=self.http_timeout(),
+                    limits=self.http_limits(),
                 )
             return self._client
 
@@ -149,7 +150,7 @@ class VLLMAdapter(ProviderAdapter):
             return self._parse_chat_response(request, data, latency_ms)
 
         except httpx.TimeoutException as e:
-            return self._error_response(request, f"Timeout: {e}", "timeout")
+            return self._timeout_response(request, e)
         except httpx.HTTPStatusError as e:
             return self._error_response(
                 request,
@@ -199,7 +200,7 @@ class VLLMAdapter(ProviderAdapter):
             )
 
         except httpx.TimeoutException as e:
-            return self._error_response(request, f"Timeout: {e}", "timeout")
+            return self._timeout_response(request, e)
         except httpx.HTTPStatusError as e:
             return self._error_response(
                 request,
@@ -229,7 +230,7 @@ class VLLMAdapter(ProviderAdapter):
             return self._parse_completion_response(request, data, latency_ms)
 
         except httpx.TimeoutException as e:
-            return self._error_response(request, f"Timeout: {e}", "timeout")
+            return self._timeout_response(request, e)
         except httpx.HTTPStatusError as e:
             return self._error_response(
                 request,

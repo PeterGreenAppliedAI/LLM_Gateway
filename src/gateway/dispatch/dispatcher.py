@@ -554,10 +554,7 @@ class Dispatcher:
             # fall through to the next provider. Upstream 4xx means the
             # request itself is wrong (bad model, invalid params) — retrying
             # elsewhere just masks the real error, so propagate it.
-            if self._is_retryable_error(response.error_code):
-                self._registry.record_failure(provider_name)
-            else:
-                self._registry.record_success(provider_name)  # 4xx: alive, request wrong
+            self._record_outcome(provider_name, response.error_code)
             if self._is_retryable_error(response.error_code) and not raise_on_error:
                 logger.warning(
                     "Provider returned retryable error",
@@ -612,7 +609,22 @@ class Dispatcher:
             "unknown_error",
             "empty_response",
             "upstream_error",
+            "pool_timeout",
         }
+
+    def _record_outcome(self, name: str, error_code: str | None) -> None:
+        """Feed an error response to the endpoint's circuit breaker.
+
+        Retryable errors count as failures; upstream 4xx means the engine is
+        alive (the request was wrong). A full gateway connection pool says
+        nothing about the engine, so it gives no verdict.
+        """
+        if error_code == "pool_timeout":
+            self._registry.release_probe(name)
+        elif self._is_retryable_error(error_code):
+            self._registry.record_failure(name)
+        else:
+            self._registry.record_success(name)
 
     async def _execute_request(
         self, adapter: ProviderAdapter, request: InternalRequest
@@ -805,10 +817,7 @@ class Dispatcher:
             and not first_chunk.tool_calls
         ):
             await _close_quietly(stream_iter)
-            if self._is_retryable_error(first_chunk.error_code):
-                self._registry.record_failure(try_name)
-            else:
-                self._registry.record_success(try_name)  # 4xx: alive, request wrong
+            self._record_outcome(try_name, first_chunk.error_code)
             message = first_chunk.error or "stream failed"
             # Same rule as non-streaming: upstream 4xx means the request
             # itself is wrong, so trying elsewhere only hides the cause.

@@ -76,6 +76,8 @@ def classify_exception(exc: BaseException) -> tuple[str, str]:
     """
     if isinstance(exc, StreamStalled):
         return "timeout", str(exc)
+    if isinstance(exc, httpx.PoolTimeout):
+        return "pool_timeout", f"Gateway connection pool exhausted: {exc}"
     if isinstance(exc, (httpx.TimeoutException, asyncio.TimeoutError)):
         return "timeout", f"Timeout: {exc}" if str(exc) else "Timeout"
     if isinstance(exc, httpx.ConnectError):

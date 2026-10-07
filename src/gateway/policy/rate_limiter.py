@@ -10,6 +10,7 @@ Uses a simple in-memory sliding window approach. For distributed deployments,
 swap in a Redis-backed implementation.
 """
 
+import math
 import re
 import time
 from collections import defaultdict
@@ -145,7 +146,7 @@ class RateLimiter:
         """Check if rate limiting is enabled."""
         return self._config.enabled
 
-    def check(self, key: str) -> RateLimitState:
+    def check(self, key: str, rpm_override: int | None = None) -> RateLimitState:
         """Check current rate limit state without recording a request.
 
         Args:
@@ -157,6 +158,7 @@ class RateLimiter:
         key = self._sanitize_key(key)
         now = time.time()
         self._cleanup_old_requests(key, now)
+        burst_limit, rpm, hour_limit = self.limits_for(rpm_override)
 
         requests = self._requests[key]
 
@@ -166,13 +168,29 @@ class RateLimiter:
         hour_count = sum(1 for ts in requests if now - ts < self.HOUR_WINDOW)
 
         return RateLimitState(
-            requests_remaining_minute=max(0, self._config.requests_per_minute - minute_count),
-            requests_remaining_hour=max(0, self._config.requests_per_hour - hour_count),
-            burst_remaining=max(0, self._config.burst_limit - burst_count),
+            requests_remaining_minute=max(0, rpm - minute_count),
+            requests_remaining_hour=max(0, hour_limit - hour_count),
+            burst_remaining=max(0, burst_limit - burst_count),
             reset_minute=now + self.MINUTE_WINDOW,
             reset_hour=now + self.HOUR_WINDOW,
             reset_burst=now + self.BURST_WINDOW,
         )
+
+    def limits_for(self, rpm_override: int | None) -> tuple[int, int, int]:
+        """(burst, per-minute, per-hour) limits for a key (D-033).
+
+        A per-key RPM override scales the burst and hourly limits by the
+        same factor. Before, a key granted 600 RPM still hit the global
+        10-per-10s burst cap (60 RPM in practice) and the 1000/hour cap.
+        """
+        base_rpm = self._config.requests_per_minute
+        rpm = rpm_override or base_rpm
+        if rpm == base_rpm:
+            return self._config.burst_limit, rpm, self._config.requests_per_hour
+        scale = rpm / base_rpm
+        burst = max(1, math.ceil(self._config.burst_limit * scale))
+        hour = max(rpm, math.ceil(self._config.requests_per_hour * scale))
+        return burst, rpm, hour
 
     def acquire(self, key: str, rpm_override: int | None = None) -> RateLimitState:
         """Record a request and check if it's allowed.
@@ -187,12 +205,12 @@ class RateLimiter:
         Raises:
             RateLimitExceeded: If any rate limit is exceeded
         """
+        burst_limit, effective_rpm, hour_limit = self.limits_for(rpm_override)
         if not self._config.enabled:
-            rpm = rpm_override or self._config.requests_per_minute
             return RateLimitState(
-                requests_remaining_minute=rpm,
-                requests_remaining_hour=self._config.requests_per_hour,
-                burst_remaining=self._config.burst_limit,
+                requests_remaining_minute=effective_rpm,
+                requests_remaining_hour=hour_limit,
+                burst_remaining=burst_limit,
                 reset_minute=time.time() + self.MINUTE_WINDOW,
                 reset_hour=time.time() + self.HOUR_WINDOW,
                 reset_burst=time.time() + self.BURST_WINDOW,
@@ -206,22 +224,19 @@ class RateLimiter:
 
         requests = self._requests[key]
 
-        # Use per-key RPM override if provided, otherwise config default
-        effective_rpm = rpm_override or self._config.requests_per_minute
-
         # Count requests in each window
         burst_count = sum(1 for ts in requests if now - ts < self.BURST_WINDOW)
         minute_count = sum(1 for ts in requests if now - ts < self.MINUTE_WINDOW)
         hour_count = sum(1 for ts in requests if now - ts < self.HOUR_WINDOW)
 
         # Check burst limit first (most restrictive for spikes)
-        if burst_count >= self._config.burst_limit:
+        if burst_count >= burst_limit:
             oldest_burst = min((ts for ts in requests if now - ts < self.BURST_WINDOW), default=now)
             retry_after = self.BURST_WINDOW - (now - oldest_burst)
             raise RateLimitExceeded(
-                f"Burst limit exceeded: {self._config.burst_limit} requests per {self.BURST_WINDOW}s",
+                f"Burst limit exceeded: {burst_limit} requests per {self.BURST_WINDOW}s",
                 key=key,
-                limit=self._config.burst_limit,
+                limit=burst_limit,
                 window_seconds=self.BURST_WINDOW,
                 retry_after=max(0.1, retry_after),
             )
@@ -241,13 +256,13 @@ class RateLimiter:
             )
 
         # Check hour limit
-        if hour_count >= self._config.requests_per_hour:
+        if hour_count >= hour_limit:
             oldest_hour = min((ts for ts in requests if now - ts < self.HOUR_WINDOW), default=now)
             retry_after = self.HOUR_WINDOW - (now - oldest_hour)
             raise RateLimitExceeded(
-                f"Rate limit exceeded: {self._config.requests_per_hour} requests per hour",
+                f"Rate limit exceeded: {hour_limit} requests per hour",
                 key=key,
-                limit=self._config.requests_per_hour,
+                limit=hour_limit,
                 window_seconds=self.HOUR_WINDOW,
                 retry_after=max(0.1, retry_after),
             )
@@ -257,8 +272,8 @@ class RateLimiter:
 
         return RateLimitState(
             requests_remaining_minute=effective_rpm - minute_count - 1,
-            requests_remaining_hour=self._config.requests_per_hour - hour_count - 1,
-            burst_remaining=self._config.burst_limit - burst_count - 1,
+            requests_remaining_hour=hour_limit - hour_count - 1,
+            burst_remaining=burst_limit - burst_count - 1,
             reset_minute=now + self.MINUTE_WINDOW,
             reset_hour=now + self.HOUR_WINDOW,
             reset_burst=now + self.BURST_WINDOW,

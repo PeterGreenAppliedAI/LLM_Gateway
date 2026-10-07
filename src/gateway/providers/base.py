@@ -22,6 +22,8 @@ Per rule.md:
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 
+import httpx
+
 from gateway.config import ProviderConfig
 from gateway.models.common import (
     HealthStatus,
@@ -31,6 +33,17 @@ from gateway.models.common import (
     ProviderType,
 )
 from gateway.models.internal import InternalRequest, InternalResponse, StreamChunk
+
+# Connection pool sizing (D-033). With max_concurrent set, admission keeps
+# requests at or below it, so the pool needs only a little headroom for
+# health checks and model discovery; every connection may stay alive, so
+# a burst doesn't pay TCP setup again. Unset keeps httpx's defaults.
+POOL_HEADROOM = 4
+DEFAULT_MAX_CONNECTIONS = 100
+DEFAULT_MAX_KEEPALIVE = 20
+# A request waiting this long for a pooled connection fails fast instead of
+# inheriting the read timeout (up to an hour)
+POOL_TIMEOUT_SECONDS = 5.0
 
 
 class ProviderAdapter(ABC):
@@ -57,6 +70,7 @@ class ProviderAdapter(ABC):
         self.connect_timeout = config.connect_timeout
         self.stream_idle_timeout = config.stream_idle_timeout
         self.max_retries = config.max_retries
+        self.max_concurrent = config.max_concurrent
 
     # =========================================================================
     # Required Methods (per PRD Section 12)
@@ -251,6 +265,29 @@ class ProviderAdapter(ABC):
     # =========================================================================
     # Error Handling (DRY - shared across all adapters)
     # =========================================================================
+
+    def http_limits(self) -> httpx.Limits:
+        """Connection pool limits for this endpoint's clients."""
+        if self.max_concurrent is None:
+            return httpx.Limits(
+                max_connections=DEFAULT_MAX_CONNECTIONS,
+                max_keepalive_connections=DEFAULT_MAX_KEEPALIVE,
+            )
+        size = self.max_concurrent + POOL_HEADROOM
+        return httpx.Limits(max_connections=size, max_keepalive_connections=size)
+
+    def http_timeout(self) -> httpx.Timeout:
+        return httpx.Timeout(self.timeout, connect=self.connect_timeout, pool=POOL_TIMEOUT_SECONDS)
+
+    def _timeout_response(
+        self, request: InternalRequest, exc: httpx.TimeoutException
+    ) -> InternalResponse:
+        """A timeout, telling the gateway's own pool exhaustion apart from a slow engine."""
+        if isinstance(exc, httpx.PoolTimeout):
+            return self._error_response(
+                request, f"Gateway connection pool exhausted: {exc}", "pool_timeout"
+            )
+        return self._error_response(request, f"Timeout: {exc}", "timeout")
 
     def _error_response(
         self, request: InternalRequest, error: str, error_code: str

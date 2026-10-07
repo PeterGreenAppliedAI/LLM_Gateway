@@ -213,7 +213,10 @@ class MediaDispatcher:
             client = await adapter.media_client()
             response = await client.send(build(client, model), stream=True)
         except (httpx.HTTPError, OSError) as e:
-            self._registry.record_failure(name)
+            if isinstance(e, httpx.PoolTimeout):
+                self._registry.release_probe(name)  # gateway pool full, engine fine
+            else:
+                self._registry.record_failure(name)
             errors.append(f"{name}: {type(e).__name__}: {e}")
             logger.warning("Media endpoint failed", endpoint=name, error=str(e))
             return None
