@@ -72,17 +72,39 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     app.state.settings = settings
 
+    # Access mode (D-042)
+    from gateway.security.access import production_problems
+
     auth = app.state.config.auth
+    if settings.profile == "production":
+        problems = production_problems(app.state.config, settings)
+        if problems:
+            raise RuntimeError(
+                "GATEWAY_PROFILE=production refuses to start: " + "; ".join(problems)
+            )
+    if settings.dev_mode:
+        logger.warning(
+            "TEST MODE (GATEWAY_DEV_MODE): keyless requests and dashboard access are allowed "
+            "from these networks, whatever the auth config says. Not for production.",
+            networks=settings.dev_networks,
+        )
+    elif not auth.enabled:
+        logger.info(
+            "Solo mode: authentication is off, so only requests from these networks are "
+            "accepted. Enable auth to serve other machines.",
+            networks=auth.anonymous.allowed_networks,
+        )
     if auth.enabled and auth.anonymous.enabled and auth.anonymous.unrestricted:
         logger.warning(
-            "Keyless inference is unrestricted: any client can omit its key to bypass "
-            "per-key model/endpoint allowlists and rate limits. Set auth.anonymous.enabled: "
-            "false or restrict auth.anonymous in gateway.yaml."
+            "Keyless inference is unrestricted: any client in auth.anonymous.allowed_networks "
+            "can omit its key to bypass per-key model/endpoint allowlists and rate limits. "
+            "Restrict auth.anonymous in gateway.yaml.",
+            networks=auth.anonymous.allowed_networks,
         )
-    if auth.enabled and not settings.admin_api_key:
+    if auth.enabled and not settings.admin_api_key and not settings.dev_mode:
         logger.warning(
-            "GATEWAY_ADMIN_API_KEY is not set: any valid client key can manage keys, "
-            "budgets, and security labels."
+            "GATEWAY_ADMIN_API_KEY is not set: the dashboard and management APIs are "
+            "disabled until it is."
         )
 
     # Initialize PII scrubber first: stores below redact with it, so raw PII

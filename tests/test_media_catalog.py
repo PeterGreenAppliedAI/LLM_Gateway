@@ -262,7 +262,7 @@ async def test_voices_listing_respects_key_scope():
         auth=AuthConfig(
             enabled=True,
             api_keys=[ApiKeyConfig(key="client-key-1234567890", client_id="app")],
-            anonymous={"allowed_endpoints": ["a"]},
+            anonymous={"enabled": True, "allowed_endpoints": ["a"]},
         ),
     )
     voices = TestClient(app).get("/v1/audio/voices").json()["voices"]

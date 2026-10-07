@@ -39,6 +39,7 @@ from gateway.observability.logging import clear_request_context, set_request_con
 from gateway.policy import PolicyEnforcer, PolicyViolation
 from gateway.policy.token_budget import TokenBudgetTracker
 from gateway.security import AsyncSecurityAnalyzer, PIIScrubber, Sanitizer
+from gateway.security.access import DEV_CLIENT_ID, dev_mode_allows, from_networks
 from gateway.state.concurrency import ConcurrencyBackend, InMemoryConcurrency
 from gateway.storage import AuditLogger
 
@@ -350,6 +351,25 @@ async def authenticate(
 ADMIN_CLIENT_ID = "admin"
 
 
+def _solo_client(request: Request, config: GatewayConfig) -> str:
+    """Auth is off: allow this machine (and auth.anonymous.allowed_networks) only.
+
+    Raises:
+        PolicyError: The request comes from anywhere else.
+    """
+    if dev_mode_allows(request):
+        return DEV_CLIENT_ID
+    if from_networks(request, config.auth.anonymous.allowed_networks):
+        return "default"
+    raise PolicyError(
+        message="Authentication is off, so this gateway only accepts requests from "
+        f"{', '.join(config.auth.anonymous.allowed_networks)}. To serve other machines, "
+        "enable auth (auth.enabled: true) or add their network to "
+        "auth.anonymous.allowed_networks.",
+        code=ErrorCode.NETWORK_NOT_ALLOWED,
+    )
+
+
 def _extract_api_key(authorization: str | None, x_api_key: str | None) -> str | None:
     """Pull the API key from a Bearer header or X-API-Key."""
     if authorization:
@@ -392,10 +412,12 @@ async def require_api_key(
     """
     config = get_config(request)
     if not config.auth.enabled:
-        return "default"
+        return _solo_client(request, config)
 
     api_key = _extract_api_key(authorization, x_api_key)
     if not api_key:
+        if dev_mode_allows(request):
+            return DEV_CLIENT_ID
         raise AuthenticationError(message="API key required")
 
     # The admin key is a superset of a client key: the dashboard sends one
@@ -428,13 +450,24 @@ async def require_admin(
     from gateway.settings import get_settings
 
     settings = get_settings()
-
-    # If no admin key configured, fall back to standard auth — but still
-    # require a real key (no anonymous admin)
-    if not settings.admin_api_key:
-        return await require_api_key(request, authorization, x_api_key)
-
+    config = get_config(request)
     api_key = _extract_api_key(authorization, x_api_key)
+
+    if not api_key and dev_mode_allows(request):
+        return ADMIN_CLIENT_ID  # test mode: the local tester is the operator
+    if not config.auth.enabled and not settings.admin_api_key:
+        _solo_client(request, config)  # solo mode: this machine only
+        return ADMIN_CLIENT_ID
+
+    # With auth on, operator access needs the operator credential. Falling
+    # back to any client key (as before D-042) gave every key holder the
+    # dashboard, key management and budgets.
+    if not settings.admin_api_key:
+        raise PolicyError(
+            message="Admin routes are disabled: set GATEWAY_ADMIN_API_KEY to use the dashboard "
+            "and management APIs (or GATEWAY_DEV_MODE=true to try things locally)",
+            code=ErrorCode.ADMIN_KEY_REQUIRED,
+        )
     if not api_key:
         raise AuthenticationError(message="Admin authentication required")
 
@@ -485,6 +518,10 @@ async def authenticate_with_environment(
     """
     config = get_config(request)
 
+    # Solo mode (auth off): no keys, but only from this machine (D-042)
+    if not config.auth.enabled:
+        return AuthResult(_solo_client(request, config))
+
     # Extract API key from headers
     api_key = None
 
@@ -501,11 +538,16 @@ async def authenticate_with_environment(
     # policy decides whether that's allowed and what it may reach —
     # otherwise dropping the key would escape every per-key restriction.
     if not api_key:
-        if not config.auth.enabled:
-            return AuthResult("default", None, None)
+        if dev_mode_allows(request):
+            return AuthResult(DEV_CLIENT_ID)  # test mode (D-042): audited as "dev"
         anonymous = config.auth.anonymous
         if not anonymous.enabled:
             raise AuthenticationError(message="API key required")
+        if not from_networks(request, anonymous.allowed_networks):
+            raise AuthenticationError(
+                message="API key required (keyless access is only allowed from "
+                "auth.anonymous.allowed_networks)"
+            )
         return AuthResult(
             client_id="default",
             allowed_models=anonymous.allowed_models,

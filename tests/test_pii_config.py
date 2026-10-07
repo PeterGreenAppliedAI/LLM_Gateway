@@ -50,7 +50,11 @@ def app(engine, monkeypatch):
     app.include_router(dashboard_router)
     app.state.config = GatewayConfig(
         providers=[ProviderConfig(name="ep", type=ProviderType.OLLAMA, base_url="http://x:1")],
-        auth=AuthConfig(enabled=True, api_keys=[ApiKeyConfig(key=CLIENT, client_id="app")]),
+        auth=AuthConfig(
+            enabled=True,
+            api_keys=[ApiKeyConfig(key=CLIENT, client_id="app")],
+            anonymous={"enabled": True},  # keyless chat below (opt-in since D-042)
+        ),
     )
     app.state.registry = None
     app.state.enforcer = None

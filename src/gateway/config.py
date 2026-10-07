@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Annotated, Any, Literal
 
 import yaml
-from pydantic import AfterValidator, BaseModel, Field, model_validator
+from pydantic import AfterValidator, BaseModel, Field, field_validator, model_validator
 
 from gateway.models.common import ProviderType
 
@@ -272,15 +272,21 @@ class ApiKeyConfig(BaseModel):
 
 
 class AnonymousAccessConfig(BaseModel):
-    """Policy for keyless inference requests when auth is enabled.
+    """Policy for keyless requests (D-042).
 
-    Stock Ollama/OpenAI clients send no key, so keyless inference stays
-    allowed by default. Without restrictions here, though, any client can
-    drop its key to escape that key's allowlists and rate limit — set
-    enabled: false, or restrict what keyless traffic may reach.
+    With auth enabled, keyless inference is off unless enabled here, and
+    then only from allowed_networks. With auth disabled (solo mode),
+    allowed_networks is where the gateway accepts requests from at all.
+    Restrict what keyless traffic may reach with the fields below; otherwise
+    a client can drop its key to escape that key's allowlists and limits.
     """
 
-    enabled: bool = Field(default=True, description="Allow keyless inference requests")
+    enabled: bool = Field(default=False, description="Allow keyless inference requests")
+    allowed_networks: list[str] = Field(
+        default_factory=lambda: ["127.0.0.0/8", "::1/128"],
+        max_length=100,
+        description="Where keyless requests may come from (CIDR). Default: this machine.",
+    )
     allowed_models: list[str] | None = Field(
         default=None, max_length=500, description="Glob patterns keyless requests may use"
     )
@@ -293,6 +299,14 @@ class AnonymousAccessConfig(BaseModel):
     max_concurrent: int | None = Field(
         default=None, ge=1, le=10000, description="In-flight requests, all keyless traffic combined"
     )
+
+    @field_validator("allowed_networks")
+    @classmethod
+    def _valid_networks(cls, value: list[str]) -> list[str]:
+        from gateway.security.access import parse_networks
+
+        parse_networks(value)  # raises on a malformed entry
+        return value
 
     @property
     def unrestricted(self) -> bool:

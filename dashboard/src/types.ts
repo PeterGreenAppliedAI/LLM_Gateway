@@ -71,6 +71,7 @@ export interface HealthResponse {
   providers_configured: number
   providers_healthy: number
   providers: { name: string; status: string; healthy: boolean }[]
+  access?: { mode: 'keys' | 'solo' | 'dev'; keyless_from: string[]; admin_key_configured?: boolean } | null
 }
 
 export interface SecurityAlert {

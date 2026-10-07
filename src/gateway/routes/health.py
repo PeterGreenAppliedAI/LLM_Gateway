@@ -50,6 +50,17 @@ class HealthResponse(BaseModel):
     # Audit intent log (D-038): mode, backlog not yet in the database, its
     # age, and whether the database is reachable
     audit: dict | None = None
+    # Access mode (D-042): keys | solo | dev, and who may skip keys
+    access: dict | None = None
+
+
+def _access_status(config: GatewayConfig | None) -> dict | None:
+    if config is None:
+        return None
+    from gateway.security.access import access_status
+    from gateway.settings import get_settings
+
+    return access_status(config, get_settings())
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -88,6 +99,7 @@ async def health_check(request: Request) -> HealthResponse:
         shared_state=shared.status
         if (shared := getattr(request.app.state, "shared_state", None))
         else None,
+        access=_access_status(config),
         audit=intent_log.status()
         if (intent_log := getattr(request.app.state, "intent_log", None))
         else ({"mode": "sync"} if getattr(request.app.state, "audit_logger", None) else None),

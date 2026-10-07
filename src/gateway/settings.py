@@ -1,10 +1,10 @@
 """Application settings using Pydantic Settings."""
 
 from functools import lru_cache
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import Field, SecretStr
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, SecretStr, field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class DatabaseSettings(BaseSettings):
@@ -234,6 +234,32 @@ class Settings(BaseSettings):
         pattern=r"^[a-zA-Z0-9_-]{1,32}$",
         description="Key prefix, so several gateways can share one Redis",
     )
+
+    # Access (D-042)
+    dev_mode: bool = Field(
+        default=False,
+        description="Test mode: keyless inference and dashboard from dev_networks, whatever "
+        "the auth config says. Never in production.",
+    )
+    dev_networks: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["127.0.0.0/8", "::1/128"],
+        description="Where test mode accepts keyless requests (comma-separated CIDRs)",
+    )
+    profile: Literal["default", "production"] = Field(
+        default="default",
+        description="production: refuse to start without auth, an admin key and restricted "
+        "keyless access, or with test mode on",
+    )
+
+    @field_validator("dev_networks", mode="before")
+    @classmethod
+    def _split_networks(cls, value):
+        if isinstance(value, str):
+            value = [v.strip() for v in value.split(",") if v.strip()]
+        from gateway.security.access import parse_networks
+
+        parse_networks(value)
+        return value
 
     # CORS
     cors_origins: list[str] = Field(

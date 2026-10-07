@@ -248,7 +248,7 @@ class TestSpeech:
             auth=AuthConfig(
                 enabled=True,
                 api_keys=[ApiKeyConfig(key=key, client_id="app")],
-                anonymous={"allowed_endpoints": ["somewhere-else"]},
+                anonymous={"enabled": True, "allowed_endpoints": ["somewhere-else"]},
             ),
         )
         resp = TestClient(app).post("/v1/audio/speech", json=SPEECH)

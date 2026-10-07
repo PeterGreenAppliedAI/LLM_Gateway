@@ -511,22 +511,24 @@ class TestAuthSplit:
             auth=AuthConfig(
                 enabled=True,
                 api_keys=[ApiKeyConfig(key="test-api-key-12345678", client_id="tester")],
+                # Keyless inference is opt-in since D-042 (LocalClaw-style clients)
+                anonymous={"enabled": True},
             ),
         )
         app.state.registry = None
         app.state.enforcer = None
         return app
 
-    def test_dashboard_requires_key(self, auth_app):
+    def test_dashboard_requires_admin_key_to_be_configured(self, auth_app):
+        """D-042: with auth on and no GATEWAY_ADMIN_API_KEY, operator routes are off.
+
+        Before, any valid client key got the dashboard, key management and budgets.
+        """
         client = TestClient(auth_app)
-        assert client.get("/api/stats").status_code == 401
-        assert (
-            client.get("/api/stats", headers={"X-API-Key": "wrong-key-12345678"}).status_code == 401
-        )
-        assert (
-            client.get("/api/stats", headers={"X-API-Key": "test-api-key-12345678"}).status_code
-            == 200
-        )
+        for headers in ({}, {"X-API-Key": "test-api-key-12345678"}):
+            resp = client.get("/api/stats", headers=headers)
+            assert resp.status_code == 403
+            assert resp.json()["error"]["code"] == "admin_key_required"
 
     def test_inference_stays_anonymous(self, auth_app):
         dispatcher = AsyncMock(spec=Dispatcher)
@@ -759,6 +761,7 @@ class TestEnvironmentScope:
                 api_keys=[
                     ApiKeyConfig(key=self.PROD_KEY, client_id="prod-app", environment="prod")
                 ],
+                anonymous={"enabled": True},  # keyless cases below (opt-in since D-042)
             ),
         )
         app.state.registry = None

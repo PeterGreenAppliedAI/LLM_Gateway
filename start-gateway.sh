@@ -3,6 +3,16 @@
 
 cd "$(dirname "$0")" || exit 1
 
+# --dev: test mode (D-042). Keyless requests and the dashboard work from this
+# machine without keys, even if config/gateway.yaml enables auth. Uses its own
+# database so test traffic stays out of the real audit trail and budgets.
+# Let other test machines in with GATEWAY_DEV_NETWORKS=192.168.1.0/24.
+DEV=false
+if [ "$1" = "--dev" ]; then
+  DEV=true
+  shift
+fi
+
 # Load secrets from gitignored .env (API keys, etc.)
 if [ -f .env ]; then
   set -a
@@ -20,8 +30,15 @@ for var in GATEWAY_KEY_ESTIMATOR GATEWAY_KEY_DISCORD GATEWAY_KEY_DEV; do
   fi
 done
 
-# Database
-export GATEWAY_DB_URL="sqlite+aiosqlite:///data/gateway.db"
+# Database (test mode gets its own)
+if [ "$DEV" = true ]; then
+  export GATEWAY_DEV_MODE=true
+  export GATEWAY_DB_URL="sqlite+aiosqlite:///data/dev.db"
+  export GATEWAY_DB_AUDIT_JOURNAL_PATH="data/dev-audit-journal"
+  echo "TEST MODE: keyless access from this machine, database data/dev.db" >&2
+else
+  export GATEWAY_DB_URL="sqlite+aiosqlite:///data/gateway.db"
+fi
 export GATEWAY_DB_STORE_REQUEST_BODY=true
 export GATEWAY_DB_STORE_RESPONSE_BODY=true
 

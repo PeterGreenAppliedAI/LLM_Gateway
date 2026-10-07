@@ -42,6 +42,8 @@ class ErrorCode(str, Enum):
     MODEL_NOT_ALLOWED = "model_not_allowed"
     ENDPOINT_NOT_ALLOWED = "endpoint_not_allowed"
     ENVIRONMENT_NOT_ALLOWED = "environment_not_allowed"
+    NETWORK_NOT_ALLOWED = "network_not_allowed"
+    ADMIN_KEY_REQUIRED = "admin_key_required"
     TOKEN_BUDGET_EXCEEDED = "token_budget_exceeded"
 
     # Dispatch & Routing

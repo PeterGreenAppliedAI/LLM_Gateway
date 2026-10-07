@@ -268,7 +268,8 @@ class TestAuthentication:
     def test_auth_optional_uses_default_client(
         self, auth_client: TestClient, app_with_auth: FastAPI
     ):
-        """Auth is optional - requests without key use 'default' client."""
+        """With keyless access enabled, requests without a key use the 'default' client."""
+        app_with_auth.state.config.auth.anonymous.enabled = True  # opt-in since D-042
         mock_registry = MagicMock(spec=ProviderRegistry)
         # Note: the get_dispatcher patch below has no effect (FastAPI captured the
         # real dependency at import); the real dispatcher runs on this registry
