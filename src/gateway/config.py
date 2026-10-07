@@ -109,6 +109,13 @@ MediaCapability = Literal["tts", "stt", "image", "video"]
 MEDIA_CAPABLE_TYPES = frozenset({ProviderType.OPENAI, ProviderType.VLLM})
 
 
+class CircuitBreakerConfig(BaseModel):
+    """Per-endpoint circuit breaker (dispatch/circuit.py)."""
+
+    failure_threshold: int = Field(default=5, ge=1, le=100)
+    cooldown_seconds: float = Field(default=15.0, gt=0, le=3600)
+
+
 class MediaTokenEquivalents(BaseModel):
     """Token-equivalents per native media unit, for budgets (D-021).
 
@@ -337,6 +344,7 @@ class GatewayConfig(BaseModel):
     # Embedding admission queue
     embedding_queue: EmbeddingQueueYamlConfig = Field(default_factory=EmbeddingQueueYamlConfig)
     media: MediaConfig = Field(default_factory=MediaConfig)
+    circuit_breaker: CircuitBreakerConfig = Field(default_factory=CircuitBreakerConfig)
 
     # New endpoints architecture
     endpoints: list[EndpointConfig] = Field(default_factory=list, max_length=50)

@@ -717,6 +717,7 @@ class TestAllowedEndpointsEnforced:
 
         registry.get_health("gpunode-ollama").record_unhealthy(HealthStatus.UNHEALTHY)
         registry.get("gpunode-ollama").health = _unhealthy
+        registry.trip("gpunode-ollama")
         with pytest.raises(AllProvidersUnavailableError):
             await dispatcher.dispatch(self._request(allowed_endpoints=["gpunode-ollama"]))
         assert "dgxspark-ollama" not in calls

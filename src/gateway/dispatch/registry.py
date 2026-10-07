@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 
 from gateway.catalog.models import ModelCatalog
 from gateway.config import EndpointConfig, GatewayConfig, ProviderConfig
+from gateway.dispatch.circuit import CircuitBreaker, CircuitState
 from gateway.models.common import HealthStatus
 from gateway.providers import ProviderAdapter, create_adapter
 
@@ -74,6 +75,7 @@ class ProviderRegistry:
         self._config = config
         self._adapters: dict[str, ProviderAdapter] = {}
         self._health: dict[str, ProviderHealth] = {}
+        self._breakers: dict[str, CircuitBreaker] = {}
         self._endpoint_configs: dict[str, EndpointConfig] = {}
         self._health_task: asyncio.Task | None = None
         self._shutdown = False
@@ -107,6 +109,7 @@ class ProviderRegistry:
         adapter = create_adapter(config)
         self._adapters[config.name] = adapter
         self._health[config.name] = ProviderHealth(config.name)
+        self._breakers[config.name] = CircuitBreaker(self._config.circuit_breaker)
 
     async def _register_endpoint(self, config: EndpointConfig) -> None:
         """Create and register an adapter from endpoint config."""
@@ -124,6 +127,7 @@ class ProviderRegistry:
         adapter = create_adapter(provider_config)
         self._adapters[config.name] = adapter
         self._health[config.name] = ProviderHealth(config.name)
+        self._breakers[config.name] = CircuitBreaker(self._config.circuit_breaker)
         self._endpoint_configs[config.name] = config
 
     def get(self, name: str) -> ProviderAdapter | None:
@@ -159,6 +163,38 @@ class ProviderRegistry:
         """
         health = self._health.get(name)
         return health is not None and health.is_available()
+
+    # ------------------------------------------------------------------
+    # Circuit breaker (request outcomes + health loop; see dispatch/circuit.py)
+    # ------------------------------------------------------------------
+
+    def allow_request(self, name: str) -> bool:
+        """Whether a request may use this endpoint now. Claims the half-open probe."""
+        breaker = self._breakers.get(name)
+        return breaker.allow_request() if breaker else name in self._adapters
+
+    def record_success(self, name: str) -> None:
+        if name in self._breakers:
+            self._breakers[name].record_success()
+
+    def record_failure(self, name: str) -> None:
+        """A retryable failure: connection error, timeout or upstream 5xx (never 4xx)."""
+        if name in self._breakers:
+            self._breakers[name].record_failure()
+
+    def trip(self, name: str) -> None:
+        """Open the circuit now (the health loop saw the endpoint fail)."""
+        if name in self._breakers:
+            self._breakers[name].trip()
+
+    def release_probe(self, name: str) -> None:
+        """A request that claimed the probe ended without a verdict."""
+        if name in self._breakers:
+            self._breakers[name].release_probe()
+
+    def circuit_state(self, name: str) -> CircuitState | None:
+        breaker = self._breakers.get(name)
+        return breaker.state if breaker else None
 
     def list_providers(self) -> list[str]:
         """List all registered provider names."""
@@ -310,15 +346,20 @@ class ProviderRegistry:
 
             if status == HealthStatus.HEALTHY:
                 self._health[name].record_healthy()
+                self._breakers[name].record_success()
             else:
                 self._health[name].record_unhealthy(status)
+                if status == HealthStatus.UNHEALTHY:
+                    self.trip(name)
 
         except asyncio.TimeoutError:
             self._health[name].record_unhealthy(
                 HealthStatus.UNHEALTHY, error="Health check timed out"
             )
+            self.trip(name)
         except Exception as e:
             self._health[name].record_unhealthy(HealthStatus.UNHEALTHY, error=str(e))
+            self.trip(name)
 
     async def check_health(self, name: str) -> HealthStatus:
         """Check health of a specific provider (on-demand).

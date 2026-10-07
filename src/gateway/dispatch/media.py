@@ -146,21 +146,35 @@ class MediaDispatcher:
             adapter = self._registry.get(name)
             if adapter is None:
                 continue
+            if not self._registry.allow_request(name):
+                errors.append(f"{name}: circuit open (recent failures)")
+                continue
             attempted.append(name)
             try:
                 client = await adapter.media_client()
                 response = await client.send(build(client, model), stream=True)
             except (httpx.HTTPError, OSError) as e:
+                self._registry.record_failure(name)
                 errors.append(f"{name}: {type(e).__name__}: {e}")
                 logger.warning("Media endpoint failed", endpoint=name, error=str(e))
                 continue
+            except BaseException:
+                self._registry.release_probe(name)  # cancelled: no verdict
+                raise
 
             if response.status_code < 400:
+                self._registry.record_success(name)
                 return UpstreamMedia(endpoint=name, model=model, response=response)
 
             code, message = await upstream_http_error(response)
             await response.aclose()
             status = response.status_code
+            if status >= 500:
+                self._registry.record_failure(name)
+            elif status == 429:
+                self._registry.release_probe(name)  # busy, not broken
+            else:
+                self._registry.record_success(name)  # 4xx: alive, request wrong
             # 4xx means the request is wrong: trying elsewhere would hide it.
             # 429 (busy) is the exception: another endpoint may have room.
             if 400 <= status < 500 and status != 429:

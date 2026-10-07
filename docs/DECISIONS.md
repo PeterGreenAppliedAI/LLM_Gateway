@@ -645,3 +645,66 @@ is observe-only).
   prefix is treated as a pin. Don't name endpoints after model orgs.
 - **What works now:** `test_slash_in_model_name_is_not_a_pin`,
   `test_step1_unknown_prefix_is_part_of_model_name`, and the M2 end-to-end transcription.
+
+## D-031: Circuit breaker replaces in-request health probes (phase 2a)
+
+- **Status:** Implemented, 2026-10-07
+- **Problem:** When an endpoint was marked unhealthy, every request routed to it ran a blocking
+  health check (up to 10 s) *inside the request*. Ten queued requests meant ten probes against
+  a dead box. Each one added latency before failover, and they all piled onto an endpoint that
+  was already struggling. **Streaming didn't check health at all:** a dead endpoint got the full
+  connect timeout on every stream. Request failures weren't remembered either, so the next
+  request walked into the same failure.
+- **Decision:** a per-endpoint circuit breaker (`dispatch/circuit.py`), fed by **both** request
+  outcomes and the background health loop:
+  - **closed:** requests flow. Consecutive *retryable* failures count up. Retryable means
+    connection errors, timeouts, 5xx, and in-band upstream errors.
+  - **open:** reached at `failure_threshold` (default 5). Requests skip the endpoint with no
+    network call ("circuit open" appears in the failover reasons).
+  - **half-open:** after `cooldown_seconds` (default 15), exactly one probe request is let
+    through. Success closes the circuit; failure reopens it for another full cooldown.
+  - **Health loop:** a healthy check closes the circuit; an unhealthy check, timeout or
+    exception opens it. Recovery is noticed even with no traffic.
+  - **Wired into:** `Dispatcher._try_provider`, `dispatch_stream` (judged on the first chunk),
+    and `MediaDispatcher.send`.
+- **What counts as what:**
+  - Upstream **4xx counts as a success.** The engine is alive; the request was wrong. Counting
+    it would let one client's bad requests open the circuit for everyone.
+  - A **media 429** releases the probe without a verdict. The engine is busy, not broken.
+  - A **cancelled request** (the client left mid-probe) also releases the probe.
+  - Any probe that never reports back expires after one more cooldown, so a leak can't strand
+    an endpoint half-open.
+- **Alternatives considered:**
+  - *Keep the in-request probe but cache its result:* still blocks the first request after
+    each cache expiry, and still knows nothing about request failures.
+  - *Error-rate window (e.g. 50 % over 30 s):* better at catching flapping endpoints, but on
+    low-traffic home labs a handful of requests swings the rate wildly. Consecutive-failure
+    counting is predictable at any traffic level. This can be revisited if flapping shows up.
+- **State is in-process** (one breaker per gateway worker). Under the D-010 shared-state
+  interface it can move to Redis later. Per-worker state is acceptable for now: each worker
+  learns within `failure_threshold` requests.
+- **Visibility:**
+  - `circuit` appears per provider on `/health` and per endpoint on `/v1/devmesh/catalog`.
+  - The dashboard endpoint card shows a "Circuit open" or "Probing" badge.
+  - Prometheus exposes `*_circuit_state{endpoint}` (0 closed, 1 half-open, 2 open).
+- **Config:** `circuit_breaker.failure_threshold`, `circuit_breaker.cooldown_seconds`.
+- **What didn't work:**
+  - *First wiring:* the `CircuitBreakerConfig` model sat in `dispatch/circuit.py`, which made
+    a circular import (config → dispatch → config). Moved the model into `config.py`.
+  - *A search-and-replace that routed health-loop trips through the new `registry.trip()`:*
+    it also rewrote `trip()`'s own body into a call to itself (infinite recursion). The tests
+    caught it immediately.
+  - *Three existing tests went red,* as expected. They expressed "unhealthy" only through
+    `ProviderHealth`, so they now hit the network. Updated them to trip the breaker, which is
+    now the thing that gates requests.
+- **What works now:** `tests/test_circuit.py` (17 tests):
+  - the state machine, including the single half-open probe and probe expiry;
+  - failover skips an open endpoint without calling it;
+  - 4xx doesn't trip;
+  - a cancelled probe is released;
+  - streams trip the breaker;
+  - the health loop opens and closes the circuit;
+  - `/health` and `/metrics` report the state.
+
+  Also `test_open_circuit_skips_engine` (voice).
+

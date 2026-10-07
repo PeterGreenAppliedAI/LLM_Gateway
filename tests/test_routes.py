@@ -146,6 +146,7 @@ class TestHealthCheck:
         mock_health = MagicMock()
         mock_health.status = HealthStatus.HEALTHY
         mock_registry.get_health.return_value = mock_health
+        mock_registry.circuit_state.return_value = None
         app.state.registry = mock_registry
 
         response = client.get("/health")

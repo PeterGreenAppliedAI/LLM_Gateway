@@ -273,6 +273,7 @@ class CatalogEndpoint(BaseModel):
     url: str
     enabled: bool
     healthy: bool
+    circuit: str | None = None  # closed | open | half_open (circuit breaker)
     labels: dict[str, str] = Field(default_factory=dict)
     models: list[str] = Field(default_factory=list)
 
@@ -303,6 +304,7 @@ async def get_catalog(
         status_enum = health.status if health else HealthStatus.UNKNOWN
 
         models = catalog.get_models_for_endpoint(endpoint_config.name)
+        circuit = registry.circuit_state(endpoint_config.name)
 
         endpoints.append(
             CatalogEndpoint(
@@ -311,6 +313,7 @@ async def get_catalog(
                 url=endpoint_config.url,
                 enabled=endpoint_config.enabled,
                 healthy=status_enum == HealthStatus.HEALTHY,
+                circuit=circuit.value if circuit else None,
                 labels=endpoint_config.labels,
                 models=models,
             )

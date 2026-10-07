@@ -176,6 +176,15 @@ class MetricsCollector:
             **reg_kwargs,
         )
 
+        # Circuit breaker state per endpoint (0 closed, 1 half-open, 2 open);
+        # refreshed from the registry on each scrape
+        self._circuit_state = Gauge(
+            f"{prefix}_circuit_state",
+            "Endpoint circuit breaker state (0 closed, 1 half-open, 2 open)",
+            ["endpoint"],
+            **reg_kwargs,
+        )
+
         # Active requests gauge
         self._active_requests = Gauge(
             f"{prefix}_active_requests", "Number of active requests", ["provider"], **reg_kwargs
@@ -250,6 +259,13 @@ class MetricsCollector:
         self._audit_write_failures.labels(
             table=self._sanitize_label(table), outcome=self._sanitize_label(outcome)
         ).inc()
+
+    def set_circuit_state(self, endpoint: str, state: str) -> None:
+        """Publish an endpoint's breaker state (closed, half_open, open)."""
+        if not self._enabled:
+            return
+        value = {"closed": 0, "half_open": 1, "open": 2}.get(state, 0)
+        self._circuit_state.labels(endpoint=self._sanitize_label(endpoint)).set(value)
 
     def record_error(self, provider: str, error_type: str) -> None:
         """Record a provider error.

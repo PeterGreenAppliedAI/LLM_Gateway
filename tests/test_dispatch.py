@@ -446,6 +446,7 @@ class TestDispatcher:
 
         # Primary (default) unhealthy, fallback1 healthy
         registry._health["primary"].record_unhealthy(HealthStatus.UNHEALTHY)
+        registry.trip("primary")
         registry._health["fallback1"].record_healthy()
 
         # Mock fallback adapter
@@ -475,6 +476,7 @@ class TestDispatcher:
         await registry.initialize()
 
         registry._health["primary"].record_unhealthy(HealthStatus.UNHEALTHY)
+        registry.trip("primary")
         registry._health["fallback1"].record_healthy()
 
         mock_adapter = AsyncMock()
@@ -499,6 +501,7 @@ class TestDispatcher:
 
         # Primary unhealthy
         registry._health["primary"].record_unhealthy(HealthStatus.UNHEALTHY)
+        registry.trip("primary")
 
         dispatcher = Dispatcher(registry)
         request = sample_request.model_copy(
@@ -522,6 +525,7 @@ class TestDispatcher:
         # All unhealthy
         for name in registry.list_providers():
             registry._health[name].record_unhealthy(HealthStatus.UNHEALTHY)
+            registry.trip(name)
 
         dispatcher = Dispatcher(registry)
 

@@ -52,6 +52,7 @@ export interface Endpoint {
   url: string
   enabled: boolean
   healthy: boolean
+  circuit?: 'closed' | 'open' | 'half_open' | null
   labels: Record<string, string>
   models: string[]
 }

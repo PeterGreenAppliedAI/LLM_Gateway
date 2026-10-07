@@ -200,6 +200,16 @@ class TestSpeech:
         assert _audit(app)["endpoint"] == "b"
 
     @pytest.mark.asyncio
+    async def test_open_circuit_skips_engine(self, make_app):
+        app = await make_app({"a": (["tts"], _tts_ok), "b": (["tts"], _tts_ok)})
+        app.state.config.resolution.endpoint_priority = ["a", "b"]
+        app.state.registry.trip("a")
+        resp = TestClient(app).post("/v1/audio/speech", json=SPEECH)
+        assert resp.status_code == 200
+        assert _audit(app)["endpoint"] == "b"
+        assert not app.state.test["engines"]["a"].requests
+
+    @pytest.mark.asyncio
     async def test_input_over_limit_rejected(self, make_app):
         app = await make_app({"a": (["tts"], _tts_ok)}, media=MediaConfig(max_tts_characters=5))
         assert TestClient(app).post("/v1/audio/speech", json=SPEECH).status_code == 422

@@ -39,7 +39,7 @@ from gateway.errors import (
     ProviderError,
     ProviderUnavailableError,
 )
-from gateway.models.common import HealthStatus, TaskType
+from gateway.models.common import TaskType
 from gateway.models.internal import InternalRequest, InternalResponse, StreamChunk
 from gateway.observability import get_logger
 from gateway.providers import ProviderAdapter
@@ -448,19 +448,21 @@ class Dispatcher:
         if adapter is None:
             return None
 
-        # Check health (use cached status, don't block on health check)
-        if not self._registry.is_healthy(provider_name):
-            # Try one on-demand health check in case it recovered
-            status = await self._registry.check_health(provider_name)
-            if status != HealthStatus.HEALTHY:
-                return None
+        # Circuit breaker: an endpoint failing repeatedly is skipped instantly
+        # instead of probed inside the request (see dispatch/circuit.py)
+        if not self._registry.allow_request(provider_name):
+            if error_sink is not None:
+                error_sink.append(f"{provider_name}: circuit open (recent failures)")
+            return None
 
         # Dispatch based on task type
         try:
             response = await self._execute_request(adapter, request)
         except GatewayError:
+            self._registry.release_probe(provider_name)
             raise
         except Exception as e:
+            self._registry.record_failure(provider_name)
             logger.warning(
                 "Provider dispatch failed",
                 provider=provider_name,
@@ -471,12 +473,19 @@ class Dispatcher:
             if error_sink is not None:
                 error_sink.append(f"{provider_name}: {e}")
             return None
+        except BaseException:
+            self._registry.release_probe(provider_name)  # cancelled: no verdict
+            raise
 
         if response.is_error:
             # Retryable failures (timeouts, connection errors, upstream 5xx)
             # fall through to the next provider. Upstream 4xx means the
             # request itself is wrong (bad model, invalid params) — retrying
             # elsewhere just masks the real error, so propagate it.
+            if self._is_retryable_error(response.error_code):
+                self._registry.record_failure(provider_name)
+            else:
+                self._registry.record_success(provider_name)  # 4xx: alive, request wrong
             if self._is_retryable_error(response.error_code) and not raise_on_error:
                 logger.warning(
                     "Provider returned retryable error",
@@ -495,6 +504,7 @@ class Dispatcher:
                 http_status=self._upstream_client_status(response.error_code),
             )
 
+        self._registry.record_success(provider_name)
         return response
 
     @staticmethod
@@ -646,6 +656,9 @@ class Dispatcher:
             if adapter is None:
                 continue
 
+            if not self._registry.allow_request(try_name):
+                errors_seen.append(f"{try_name}: circuit open (recent failures)")
+                continue
             attempted.append(try_name)
 
             # Start the stream and peek at the first chunk to detect errors
@@ -659,12 +672,18 @@ class Dispatcher:
             try:
                 first_chunk = await stream_iter.__anext__()
             except StopAsyncIteration:
+                self._registry.record_failure(try_name)
                 errors_seen.append(f"{try_name}: empty stream")
                 continue
             except Exception as e:
+                self._registry.record_failure(try_name)
                 await _close_quietly(stream_iter)
                 errors_seen.append(f"{try_name}: {type(e).__name__}: {e}")
                 continue
+            except BaseException:
+                self._registry.release_probe(try_name)  # cancelled: no verdict
+                await _close_quietly(stream_iter)
+                raise
 
             # An error before any content means this endpoint can't serve
             # the request (thinking-only and tool-call chunks are content)
@@ -675,6 +694,10 @@ class Dispatcher:
                 and not first_chunk.tool_calls
             ):
                 await _close_quietly(stream_iter)
+                if self._is_retryable_error(first_chunk.error_code):
+                    self._registry.record_failure(try_name)
+                else:
+                    self._registry.record_success(try_name)  # 4xx: alive, request wrong
                 message = first_chunk.error or "stream failed"
                 # Same rule as non-streaming: upstream 4xx means the request
                 # itself is wrong, so trying elsewhere only hides the cause.
@@ -696,6 +719,7 @@ class Dispatcher:
                 errors_seen.append(f"{try_name}: {message}")
                 continue
 
+            self._registry.record_success(try_name)
             return try_name, _chain(first_chunk, stream_iter)
 
         raise AllProvidersUnavailableError(
