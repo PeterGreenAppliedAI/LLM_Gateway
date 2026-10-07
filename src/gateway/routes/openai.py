@@ -35,6 +35,7 @@ from gateway.models.openai import (
     OpenAIChatStreamResponse,
     OpenAICompletionRequest,
     OpenAICompletionResponse,
+    OpenAICompletionStreamResponse,
     OpenAIEmbeddingRequest,
     OpenAIEmbeddingResponse,
 )
@@ -400,7 +401,7 @@ async def completions(
 
     # One choice per prompt per n. Validate first: to_internal reads prompt[0]
     prompt_count = 1 if isinstance(body.prompt, str) else len(body.prompt)
-    check_choice_count(prompt_count * body.n)
+    check_choice_count(prompt_count * body.n, stream=body.stream)
 
     # Security: Sanitize prompt content
     sanitized_prompt = body.prompt
@@ -504,9 +505,24 @@ async def completions(
     except PolicyViolation as e:
         translate_policy_violation(e)
 
+    # The sanitized/scrubbed prompts are what the model gets (body.prompt is
+    # the raw client input; before 0ec8d7b it was sent as-is)
+    prompts = [sanitized_prompt] if isinstance(sanitized_prompt, str) else list(sanitized_prompt)
+
+    if body.stream:
+        return await _stream_completion_response(
+            request,
+            dispatcher,
+            internal_request.model_copy(update={"prompt": prompts[0], "stream": True}),
+            body.model,
+            ctx,
+            audit_logger,
+            enforcer=enforcer,
+            request_body={"prompt": prompts[0]},
+        )
+
     # One upstream generation per prompt per n, run concurrently and returned
     # in OpenAI order (prompt-major). Before, extra prompts were dropped.
-    prompts = [sanitized_prompt] if isinstance(sanitized_prompt, str) else list(sanitized_prompt)
     choice_requests = [
         internal_request.model_copy(update={"prompt": prompt})
         for prompt in prompts
@@ -547,6 +563,69 @@ async def completions(
         )
 
     return OpenAICompletionResponse.from_internal_many([r.response for r in results])
+
+
+async def _stream_completion_response(
+    request: Request,
+    dispatcher: Dispatcher,
+    internal_request,
+    model: str,
+    ctx,
+    audit_logger: AuditLogger | None,
+    enforcer: PolicyEnforcer | None = None,
+    request_body: dict | None = None,
+) -> StreamingResponse:
+    """Stream a text completion as OpenAI text_completion SSE frames.
+
+    Same contract as chat streaming: endpoint chosen and first chunk
+    received before headers (real HTTP errors), errors after that sent
+    in-band, outcome recorded once by StreamRecorder.
+    """
+    recorder = StreamRecorder(
+        ctx=ctx,
+        internal_request=internal_request,
+        model=model,
+        task="completion",
+        audit_logger=audit_logger,
+        enforcer=enforcer,
+        request_body=request_body,
+    )
+    stream = await recorder.start(request, dispatcher)
+
+    async def generate() -> AsyncGenerator[bytes, None]:
+        try:
+            async for chunk in stream:
+                recorder.observe(chunk)
+                if recorder.is_error(chunk):
+                    error = StreamError(message=chunk.error or "Stream interrupted")
+                    yield f"data: {json.dumps(error.to_dict())}\n\n".encode()
+                    await recorder.finish_error_chunk(chunk)
+                    break
+                response = OpenAICompletionStreamResponse.from_chunk(chunk, model)
+                yield f"data: {response.model_dump_json()}\n\n".encode()
+                if chunk.finish_reason:
+                    await recorder.finish()
+
+            yield b"data: [DONE]\n\n"
+
+        except Exception as e:
+            logger.exception("Error in completion stream")
+            stream_error = StreamError(message="Stream interrupted")
+            yield f"data: {json.dumps(stream_error.to_dict())}\n\n".encode()
+            await recorder.finish(status="error", error_code="stream_error", error_message=str(e))
+        finally:
+            await recorder.finish_disconnected(stream)
+            clear_request_context()
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 # =============================================================================

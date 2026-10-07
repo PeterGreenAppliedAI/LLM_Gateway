@@ -384,6 +384,32 @@ class OpenAICompletionChoice(BaseModel):
     finish_reason: str | None = None
 
 
+class OpenAICompletionStreamResponse(BaseModel):
+    """OpenAI-compatible streaming completion chunk (text_completion)."""
+
+    id: str
+    object: Literal["text_completion"] = "text_completion"
+    created: int = Field(default_factory=lambda: int(time.time()))
+    model: str
+    choices: list[OpenAICompletionChoice]
+
+    @classmethod
+    def from_chunk(cls, chunk: StreamChunk, model: str) -> "OpenAICompletionStreamResponse":
+        return cls(
+            id=f"cmpl-{chunk.request_id[:24]}",
+            model=model,
+            choices=[
+                OpenAICompletionChoice(
+                    index=0,
+                    text=chunk.delta or "",
+                    finish_reason=_map_finish_reason(chunk.finish_reason)
+                    if chunk.finish_reason
+                    else None,
+                )
+            ],
+        )
+
+
 class OpenAICompletionResponse(BaseModel):
     """OpenAI-compatible completion response."""
 

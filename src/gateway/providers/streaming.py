@@ -177,7 +177,8 @@ async def parse_openai_sse(
         finish = choice.get("finish_reason")
         finish_reason = map_finish_reason(finish) if finish else None
 
-        content = delta.get("content") or ""
+        # Chat frames carry delta.content; /v1/completions frames carry text
+        content = delta.get("content") or choice.get("text") or ""
         thinking = delta.get("reasoning_content") or delta.get("reasoning") or None
         if finish_reason is None and not content and not thinking:
             continue  # role-only or tool-fragment frame: nothing to forward yet

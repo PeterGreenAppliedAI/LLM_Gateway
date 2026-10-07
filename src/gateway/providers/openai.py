@@ -336,6 +336,46 @@ class OpenAIAdapter(ProviderAdapter):
         except Exception as e:
             yield error_chunk(request, *classify_exception(e))
 
+    async def generate_stream(self, request: InternalRequest) -> AsyncIterator[StreamChunk]:
+        """Stream a completion via /v1/completions with stream=true.
+
+        Like generate(): if the server has no /v1/completions (404), fall
+        back to streaming the prompt through chat.
+        """
+        fall_back_to_chat = False
+        try:
+            client = await self._get_client()
+            openai_request = self._build_completion_request(request)
+            openai_request["stream"] = True
+            openai_request["stream_options"] = {"include_usage": True}
+
+            async with client.stream("POST", "/v1/completions", json=openai_request) as response:
+                if response.status_code == 404:
+                    fall_back_to_chat = True
+                elif response.status_code >= 400:
+                    code, message = await upstream_http_error(response)
+                    yield error_chunk(request, code, message)
+                    return
+                else:
+                    lines = iter_lines_with_timeouts(
+                        response, self.timeout, self.stream_idle_timeout
+                    )
+                    async for chunk in parse_openai_sse(lines, request, self._map_finish_reason):
+                        yield chunk
+
+        except Exception as e:
+            yield error_chunk(request, *classify_exception(e))
+            return
+
+        if fall_back_to_chat:
+            chat_request = request
+            if request.prompt and not request.messages:
+                chat_request = request.model_copy(
+                    update={"messages": [Message(role=MessageRole.USER, content=request.prompt)]}
+                )
+            async for chunk in self.chat_stream(chat_request):
+                yield chunk
+
     # =========================================================================
     # Provider Metadata
     # =========================================================================

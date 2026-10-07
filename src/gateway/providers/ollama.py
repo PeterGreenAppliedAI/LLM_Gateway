@@ -417,6 +417,59 @@ class OllamaAdapter(ProviderAdapter):
         except Exception as e:
             yield error_chunk(request, *classify_exception(e))
 
+    async def generate_stream(self, request: InternalRequest) -> AsyncIterator[StreamChunk]:
+        """Stream a completion via Ollama /api/generate with stream=true.
+
+        Same endpoint and fields (system, template, context, ...) as the
+        non-streaming generate(); streams used to go through /api/chat.
+        """
+        try:
+            client = await self._get_client()
+            ollama_request = self._build_generate_request(request)
+            ollama_request["stream"] = True
+
+            async with client.stream("POST", "/api/generate", json=ollama_request) as response:
+                if response.status_code >= 400:
+                    code, message = await upstream_http_error(response)
+                    yield error_chunk(request, code, message)
+                    return
+                index = 0
+                lines = iter_lines_with_timeouts(response, self.timeout, self.stream_idle_timeout)
+                async for line in lines:
+                    if not line:
+                        continue
+                    data = json.loads(line)
+                    if data.get("error"):
+                        yield error_chunk(
+                            request, "upstream_error", str(data["error"])[:500], index
+                        )
+                        return
+
+                    finish_reason = None
+                    usage = None
+                    if data.get("done"):
+                        finish_reason = (
+                            FinishReason.LENGTH
+                            if data.get("done_reason") == "length"
+                            else FinishReason.STOP
+                        )
+                        usage = UsageStats.from_counts(
+                            prompt=data.get("prompt_eval_count", 0),
+                            completion=data.get("eval_count", 0),
+                        )
+                    yield StreamChunk(
+                        request_id=request.request_id,
+                        index=index,
+                        delta=data.get("response", ""),
+                        thinking=data.get("thinking") or None,
+                        finish_reason=finish_reason,
+                        usage=usage,
+                    )
+                    index += 1
+
+        except Exception as e:
+            yield error_chunk(request, *classify_exception(e))
+
     # =========================================================================
     # Provider Metadata
     # =========================================================================

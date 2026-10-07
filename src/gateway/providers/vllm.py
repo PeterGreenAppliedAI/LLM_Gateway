@@ -214,21 +214,9 @@ class VLLMAdapter(ProviderAdapter):
         try:
             client = await self._get_client()
 
-            # Build OpenAI-compatible completion request
-            vllm_request: dict[str, Any] = {
-                "model": request.model,
-                "prompt": request.prompt or request.get_input_text(),
-                "stream": False,
-            }
-            for key, value in (
-                ("max_tokens", request.max_tokens),
-                ("temperature", request.temperature),
-                ("top_p", request.top_p),
-            ):
-                if value is not None:
-                    vllm_request[key] = value
-
-            response = await client.post("/v1/completions", json=vllm_request)
+            response = await client.post(
+                "/v1/completions", json=self._build_completion_request(request)
+            )
             response.raise_for_status()
             data = response.json()
 
@@ -264,6 +252,43 @@ class VLLMAdapter(ProviderAdapter):
             vllm_request["stream_options"] = {"include_usage": True}
 
             async with client.stream("POST", "/v1/chat/completions", json=vllm_request) as response:
+                if response.status_code >= 400:
+                    code, message = await upstream_http_error(response)
+                    yield error_chunk(request, code, message)
+                    return
+                lines = iter_lines_with_timeouts(response, self.timeout, self.stream_idle_timeout)
+                async for chunk in parse_openai_sse(lines, request, _map_finish_reason):
+                    yield chunk
+
+        except Exception as e:
+            yield error_chunk(request, *classify_exception(e))
+
+    def _build_completion_request(self, request: InternalRequest) -> dict[str, Any]:
+        """OpenAI-compatible /v1/completions body (raw prompt, no chat template)."""
+        body: dict[str, Any] = {
+            "model": request.model,
+            "prompt": request.prompt or request.get_input_text(),
+            "stream": False,
+        }
+        for key, value in (
+            ("max_tokens", request.max_tokens),
+            ("temperature", request.temperature),
+            ("top_p", request.top_p),
+            ("stop", request.stop),
+        ):
+            if value is not None:
+                body[key] = value
+        return body
+
+    async def generate_stream(self, request: InternalRequest) -> AsyncIterator[StreamChunk]:
+        """Stream a completion via vLLM /v1/completions with stream=true."""
+        try:
+            client = await self._get_client()
+            vllm_request = self._build_completion_request(request)
+            vllm_request["stream"] = True
+            vllm_request["stream_options"] = {"include_usage": True}
+
+            async with client.stream("POST", "/v1/completions", json=vllm_request) as response:
                 if response.status_code >= 400:
                     code, message = await upstream_http_error(response)
                     yield error_chunk(request, code, message)

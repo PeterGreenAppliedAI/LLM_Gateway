@@ -148,11 +148,36 @@ class ProviderAdapter(ABC):
             StreamChunk with incremental content
         """
         # Default: non-streaming fallback
-        response = await self.chat(request)
-        yield StreamChunk(
+        yield self._response_as_chunk(await self.chat(request))
+
+    async def generate_stream(self, request: InternalRequest) -> AsyncIterator[StreamChunk]:
+        """Stream a raw-prompt completion (no chat template).
+
+        Used for completion/generate tasks. Default implementation yields
+        the non-streaming generate() result as a single chunk. Override
+        for providers with a native streaming completion endpoint.
+        """
+        yield self._response_as_chunk(await self.generate(request))
+
+    @staticmethod
+    def _response_as_chunk(response: InternalResponse) -> StreamChunk:
+        """A complete response as one terminal stream chunk, errors included."""
+        from gateway.models.common import FinishReason
+
+        if response.is_error:
+            return StreamChunk(
+                request_id=response.request_id,
+                delta="",
+                finish_reason=FinishReason.ERROR,
+                error=(response.error or "")[:1000],
+                error_code=(response.error_code or "unknown_error")[:64],
+            )
+        return StreamChunk(
             request_id=response.request_id,
             index=0,
             delta=response.get_output_text(),
+            thinking=response.thinking,
+            tool_calls=response.tool_calls,
             finish_reason=response.finish_reason,
             usage=response.usage,
         )

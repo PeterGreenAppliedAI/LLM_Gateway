@@ -39,7 +39,7 @@ from gateway.errors import (
     ProviderError,
     ProviderUnavailableError,
 )
-from gateway.models.common import HealthStatus
+from gateway.models.common import HealthStatus, TaskType
 from gateway.models.internal import InternalRequest, InternalResponse, StreamChunk
 from gateway.observability import get_logger
 from gateway.providers import ProviderAdapter
@@ -551,7 +551,6 @@ class Dispatcher:
         Returns:
             InternalResponse from the provider
         """
-        from gateway.models.common import TaskType
 
         if request.task == TaskType.EMBEDDINGS:
             return await adapter.embeddings(request)
@@ -658,7 +657,12 @@ class Dispatcher:
 
             # Start the stream and peek at the first chunk to detect errors
             # before the caller commits to a 200 response
-            stream_iter = adapter.chat_stream(request)
+            # Completion/generate tasks stream from the raw-prompt endpoint
+            # (no chat template), matching their non-streaming dispatch
+            if request.task in (TaskType.COMPLETION, TaskType.GENERATE):
+                stream_iter = adapter.generate_stream(request)
+            else:
+                stream_iter = adapter.chat_stream(request)
             try:
                 first_chunk = await stream_iter.__anext__()
             except StopAsyncIteration:
