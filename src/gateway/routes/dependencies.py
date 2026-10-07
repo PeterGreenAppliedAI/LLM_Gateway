@@ -134,64 +134,68 @@ def get_dispatcher(
 
 
 def get_enforcer(request: Request) -> PolicyEnforcer:
-    """Get or create policy enforcer.
-
-    Creates enforcer on first request and caches in app state.
-    Bridges gateway.yaml rate_limits config into PolicyConfig.
-    """
+    """The app's policy enforcer (built at startup; built here if absent, e.g. in tests)."""
     enforcer = getattr(request.app.state, "enforcer", None)
     if enforcer is None:
-        config = get_config(request)
-        if config.policy:
-            policy_config = config.policy
-        else:
-            # Bridge gateway.yaml rate_limits + token_budgets into PolicyConfig
-            from gateway.policy.enforcer import PolicyConfig
-            from gateway.policy.rate_limiter import RateLimitConfig as PolicyRateLimitConfig
-            from gateway.policy.token_budget import (
-                ModelAssignment,
-                ModelTierConfig,
-                TokenBudgetConfig,
-            )
-            from gateway.policy.token_limiter import TokenLimitConfig
+        enforcer = build_enforcer(request.app)
+    return enforcer
 
-            # Build token budget config from yaml
-            budget_cfg = config.token_budgets
-            budget_config = TokenBudgetConfig(
-                enabled=budget_cfg.enabled,
-                default_daily_limit=budget_cfg.default_daily_limit,
-                default_cost_multiplier=budget_cfg.default_cost_multiplier,
-                enforce_pre_request=budget_cfg.enforce_pre_request,
-                model_tiers=[
-                    ModelTierConfig(
-                        name=t.name,
-                        cost_multiplier=t.cost_multiplier,
-                        daily_limit=t.daily_limit,
-                    )
-                    for t in budget_cfg.model_tiers
-                ],
-                model_assignments=[
-                    ModelAssignment(model=a.model, tier=a.tier)
-                    for a in budget_cfg.model_assignments
-                ],
-            )
 
-            policy_config = PolicyConfig(
-                rate_limit=PolicyRateLimitConfig(
-                    requests_per_minute=config.rate_limits.requests_per_minute_per_user,
-                    requests_per_hour=config.rate_limits.requests_per_hour_per_user,
-                    burst_limit=config.rate_limits.burst_limit,
-                ),
-                token_limit=TokenLimitConfig(
-                    max_tokens_per_request=config.rate_limits.max_tokens_per_request,
-                ),
-                token_budget=budget_config,
-            )
-        shared = getattr(request.app.state, "shared_state", None)
-        enforcer = PolicyEnforcer(
-            policy_config, rate_store=shared.rate_windows if shared is not None else None
+def build_enforcer(app) -> PolicyEnforcer:
+    """Create the policy enforcer from config and cache it in app state.
+
+    Bridges gateway.yaml rate_limits and token_budgets into PolicyConfig.
+    """
+    config = getattr(app.state, "config", None) or GatewayConfig()
+    if config.policy:
+        policy_config = config.policy
+    else:
+        # Bridge gateway.yaml rate_limits + token_budgets into PolicyConfig
+        from gateway.policy.enforcer import PolicyConfig
+        from gateway.policy.rate_limiter import RateLimitConfig as PolicyRateLimitConfig
+        from gateway.policy.token_budget import (
+            ModelAssignment,
+            ModelTierConfig,
+            TokenBudgetConfig,
         )
-        request.app.state.enforcer = enforcer
+        from gateway.policy.token_limiter import TokenLimitConfig
+
+        # Build token budget config from yaml
+        budget_cfg = config.token_budgets
+        budget_config = TokenBudgetConfig(
+            enabled=budget_cfg.enabled,
+            default_daily_limit=budget_cfg.default_daily_limit,
+            default_cost_multiplier=budget_cfg.default_cost_multiplier,
+            enforce_pre_request=budget_cfg.enforce_pre_request,
+            model_tiers=[
+                ModelTierConfig(
+                    name=t.name,
+                    cost_multiplier=t.cost_multiplier,
+                    daily_limit=t.daily_limit,
+                )
+                for t in budget_cfg.model_tiers
+            ],
+            model_assignments=[
+                ModelAssignment(model=a.model, tier=a.tier) for a in budget_cfg.model_assignments
+            ],
+        )
+
+        policy_config = PolicyConfig(
+            rate_limit=PolicyRateLimitConfig(
+                requests_per_minute=config.rate_limits.requests_per_minute_per_user,
+                requests_per_hour=config.rate_limits.requests_per_hour_per_user,
+                burst_limit=config.rate_limits.burst_limit,
+            ),
+            token_limit=TokenLimitConfig(
+                max_tokens_per_request=config.rate_limits.max_tokens_per_request,
+            ),
+            token_budget=budget_config,
+        )
+    shared = getattr(app.state, "shared_state", None)
+    enforcer = PolicyEnforcer(
+        policy_config, rate_store=shared.rate_windows if shared is not None else None
+    )
+    app.state.enforcer = enforcer
     return enforcer
 
 

@@ -479,9 +479,9 @@ async def budget_usage(
             ],
         }
 
-    # Return all tracked keys
+    # Every key with usage today (this process and, via the database, others)
     keys = []
-    for k, usage in tracker._usage.items():
+    for k in tracker.keys_today():
         state = tracker.get_budget_state(k)
         keys.append(
             {
@@ -490,7 +490,7 @@ async def budget_usage(
                 "tokens_used": state.tokens_used,
                 "tokens_remaining": state.tokens_remaining,
                 "tier_usage": state.tier_usage,
-                "request_count": usage.request_count,
+                "request_count": state.request_count,
                 "resets_at": state.resets_at,
             }
         )
@@ -513,8 +513,16 @@ class TierCreateRequest(BaseModel):
     )
 
 
+async def _save_budget_catalog(request: Request, admin_id: str) -> None:
+    """Persist tiers/assignments so the change survives restarts (D-037)."""
+    sync = getattr(request.app.state, "budget_sync", None)
+    if sync is not None:
+        await sync.save_catalog(admin_id)
+
+
 @router.post("/api/budget/tiers")
 async def create_tier(
+    request: Request,
     body: TierCreateRequest,
     _client_id: Annotated[str, Depends(require_admin)],
     enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
@@ -522,6 +530,7 @@ async def create_tier(
     """Create or update a cost tier at runtime (no restart needed)."""
     tracker = enforcer.token_budget
     is_new = tracker.add_tier(body.name, body.cost_multiplier, body.daily_limit)
+    await _save_budget_catalog(request, _client_id)
 
     return {
         "status": "success",
@@ -534,6 +543,7 @@ async def create_tier(
 
 @router.delete("/api/budget/tiers/{tier_name}")
 async def delete_tier(
+    request: Request,
     tier_name: str,
     _client_id: Annotated[str, Depends(require_admin)],
     enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
@@ -541,6 +551,8 @@ async def delete_tier(
     """Remove a cost tier. Fails if models are still assigned to it."""
     tracker = enforcer.token_budget
     removed = tracker.remove_tier(tier_name)
+    if removed:
+        await _save_budget_catalog(request, _client_id)
 
     if not removed:
         if tier_name not in tracker.tiers:
@@ -570,6 +582,8 @@ async def assign_model_tier(
     """Assign a model to a cost tier at runtime (no restart needed)."""
     tracker = enforcer.token_budget
     success = tracker.assign_model(body.model, body.tier)
+    if success:
+        await _save_budget_catalog(request, _client_id)
 
     if not success:
         available = list(tracker.tiers.keys())
@@ -588,6 +602,7 @@ async def assign_model_tier(
 
 @router.delete("/api/budget/assignments/{model_name:path}")
 async def unassign_model_tier(
+    request: Request,
     model_name: str,
     _client_id: Annotated[str, Depends(require_admin)],
     enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
@@ -595,6 +610,8 @@ async def unassign_model_tier(
     """Remove a model's tier assignment (reverts to default cost multiplier)."""
     tracker = enforcer.token_budget
     existed = tracker.unassign_model(model_name)
+    if existed:
+        await _save_budget_catalog(request, _client_id)
 
     return {
         "status": "success" if existed else "not_found",

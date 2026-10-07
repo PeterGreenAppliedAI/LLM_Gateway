@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     Column,
     DateTime,
@@ -274,4 +275,19 @@ runtime_settings = Table(
     Column("value", JSON, nullable=False),
     Column("updated_at", DateTime, nullable=False),
     Column("updated_by", String(128), nullable=True),
+)
+
+
+# Token budget usage per day, client and tier (D-037). Each gateway process
+# adds its usage in small batches; totals are read back so every process
+# (and a restarted one) sees the same day's spend.
+budget_usage = Table(
+    "budget_usage",
+    metadata,
+    Column("day", String(10), primary_key=True),  # YYYY-MM-DD (UTC)
+    Column("client_id", String(128), primary_key=True),
+    Column("tier", String(64), primary_key=True),  # tier name or "unclassified"
+    Column("weighted_tokens", BigInteger, nullable=False, default=0),  # counts toward key budgets
+    Column("raw_tokens", BigInteger, nullable=False, default=0),  # counts toward tier caps
+    Column("requests", Integer, nullable=False, default=0),
 )

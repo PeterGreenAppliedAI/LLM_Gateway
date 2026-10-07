@@ -176,6 +176,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         batch_max_share=admission_cfg.batch_max_share if admission_cfg else 1.0,
     )
 
+    # Policy enforcer, built now (not on the first request) so token budgets
+    # can load saved tiers and today's usage before traffic arrives (D-037)
+    from gateway.routes.dependencies import build_enforcer
+
+    enforcer = build_enforcer(app)
+    app.state.budget_sync = None
+    if app.state.db_engine is not None:
+        from gateway.storage.budgets import BudgetStore, BudgetSync
+
+        app.state.budget_sync = BudgetSync(enforcer.token_budget, app.state.db_engine)
+        await app.state.budget_sync.start()
+        if settings.db.retention_days > 0:
+            await BudgetStore(app.state.db_engine).prune(settings.db.retention_days)
+
     # Initialize registry and discovery service if endpoints are configured
     if app.state.config and app.state.config.endpoints:
         registry = ProviderRegistry(
@@ -267,6 +281,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             await app.state._cleanup_task
         except asyncio.CancelledError:
             pass
+
+    if getattr(app.state, "budget_sync", None) is not None:
+        await app.state.budget_sync.stop()  # writes the last batch of usage
 
     if hasattr(app.state, "security_analyzer"):
         await app.state.security_analyzer.stop()

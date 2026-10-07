@@ -1051,3 +1051,78 @@ is observe-only).
 
   On a real gateway, the D-034 fake engine now lists `fake-7b`, chat routes to it by name,
   and the startup warning is gone.
+
+## D-037: Token budgets persisted to the database
+
+- **Status:** Implemented, 2026-10-07
+- **Problem:**
+  - Daily budget usage lived only in process memory. A restart (deploy, crash, config change)
+    gave every key a fresh budget mid-day.
+  - Tiers and model assignments changed from the dashboard were lost on restart, although
+    the README says "no restart needed".
+  - With several gateway processes, each tracked only its own share, so a key could spend
+    its budget once per process.
+- **Decision:** the database, not Redis. Budgets are durable accounting that operators
+  report on, and the database is already required (D-008). Redis stays optional (D-035).
+- **How it works:**
+  - **Checks never wait on the database.** The tracker still counts in memory: a persisted
+    *baseline* (today's totals as read from the database) plus *pending* usage recorded since
+    the last write.
+  - **Every 2 s, a background `BudgetSync` writes the pending usage** as atomic increments
+    (`INSERT … ON CONFLICT DO UPDATE SET n = n + excluded.n`, on SQLite and Postgres), then
+    re-reads today's totals.
+    - Several processes can add to the same row safely.
+    - Each process sees the others' spend within about one interval.
+  - **Table:** `budget_usage(day, client_id, tier → weighted_tokens, raw_tokens, requests)`.
+    Weighted tokens count against the key's budget; raw tokens count against the tier's
+    global cap. Rows are pruned on the same retention as audit logs.
+  - **Crash cost:** a clean shutdown writes the last batch. A crash loses at most one
+    interval (~2 s) of usage.
+  - **A batch being written stays counted.** Without that, a budget check during the write
+    would see neither the old pending entry nor the new baseline, and could let a key spend
+    one batch's worth twice. If the write fails, the batch returns to pending and is retried.
+  - **Tiers and assignments** are saved as one document in `runtime_settings`
+    (`budget.catalog`) on every dashboard change, which also records who made it. A saved
+    document overrides `gateway.yaml`'s tiers, the same rule as other dashboard settings (the
+    PII toggle). Other processes pick up a change within ~10 s.
+  - **The policy enforcer is built at startup**, not on the first request, so saved state
+    loads before traffic arrives.
+  - **Without a database** (tests, `GATEWAY_DB_REQUIRED=false`), budgets behave as before,
+    and past days are dropped instead of accumulating.
+- **Alternatives considered:**
+  - *Write on every request:* exact, but it adds a write to every response on SQLite's
+    single writer. The audit row already costs one.
+  - *Rebuild usage from the audit log at startup:* no new table, but audit writes are
+    best-effort (spill file) and don't record tier weights. It also doesn't solve sharing
+    across processes.
+  - *Per-key budget rows in the API keys table:* doesn't hold tier totals, and keys from
+    config have no row.
+- **Trade-off:** with several processes, a key can overshoot by what the other processes
+  spent in the last ~2 s. That's acceptable for a *daily* budget; a strict per-request check
+  needs a database round-trip on every request.
+- **What didn't work:**
+  - *A cleanup condition written before today's entry existed:* a lone stale day was never
+    dropped (caught by a test).
+  - *Comparing the saved catalog's timestamp:* SQLite returns naive datetimes, which can't
+    be compared with aware ones. Normalized to UTC.
+  - *The dashboard usage endpoint* read the tracker's private `_usage` dict. It now uses
+    `keys_today()`.
+- **What works now:**
+  - `tests/test_budget_persistence.py` (12 tests):
+    - usage and request counts survive a restart and are enforced after it;
+    - tier-cap totals survive;
+    - dashboard tier, assignment and unassignment changes survive;
+    - two processes see each other's spend, and a catalog change reaches the other
+      process;
+    - a failed write keeps the usage counted and retries;
+    - a batch being written is neither lost nor double-counted;
+    - increments, not overwrites;
+    - pruning;
+    - no-database cleanup.
+  - Migration `e3a7c1d94f20` upgrades and downgrades.
+  - **End-to-end** (real gateway, SQLite, fake engine; 20 weighted tokens per request,
+    budget 100):
+    - 3 requests and a tier added from the dashboard;
+    - clean restart → usage still 60 tokens / 3 requests, tier still there; the 7th request
+      overall → 403 `token_budget_exceeded`;
+    - `kill -9` three seconds after the last request, then restart → no usage lost.
