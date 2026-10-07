@@ -63,6 +63,7 @@ src/gateway/
 3. **Run the full test suite** before submitting
 4. **Keep PRs focused** — one feature or fix per PR
 5. **Update configuration examples** if you add new settings (`gateway.yaml.example`, `.env.example`)
+6. **Log it in [`docs/DECISIONS.md`](docs/DECISIONS.md)** when you fix a bug, make a design choice, or reverse an earlier one: the problem, what didn't work, the fix, and the test that proves it. Read the relevant entries first so you don't repeat a dead end.
 
 ## Architecture Principles
 
