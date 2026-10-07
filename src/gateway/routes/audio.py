@@ -65,9 +65,15 @@ def get_media_catalog(request: Request) -> MediaCatalog | None:
 
 
 def get_media_dispatcher(
-    request: Request, registry: Annotated[ProviderRegistry, Depends(get_registry)]
+    request: Request,
+    registry: Annotated[ProviderRegistry, Depends(get_registry)],
+    enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
 ) -> MediaDispatcher:
-    return MediaDispatcher(registry, get_config(request).resolution)
+    return MediaDispatcher(
+        registry,
+        get_config(request).resolution,
+        endpoint_allowed=enforcer.check_provider_allowed,
+    )
 
 
 class SpeechRequest(BaseModel):

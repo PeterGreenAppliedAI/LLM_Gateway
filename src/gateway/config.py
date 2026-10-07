@@ -8,7 +8,7 @@ from typing import Annotated, Any, Literal
 import yaml
 from pydantic import AfterValidator, BaseModel, Field, field_validator, model_validator
 
-from gateway.models.common import ProviderType
+from gateway.models.common import ProviderType, TaskType
 
 # =============================================================================
 # Validation Helpers
@@ -217,6 +217,19 @@ class EndpointConfig(BaseModel):
         return self
 
 
+class TaskEndpointPolicy(BaseModel):
+    """Which endpoints may serve a task (D-049), e.g. keep embeddings off a cloud endpoint.
+
+    Applied when the gateway picks an endpoint, fallback included: a task
+    is never sent to an endpoint outside `allowed_endpoints` (when set) or
+    inside `denied_endpoints`.
+    """
+
+    task: TaskType
+    allowed_endpoints: list[SafeIdentifier] = Field(default_factory=list)
+    denied_endpoints: list[SafeIdentifier] = Field(default_factory=list)
+
+
 class EnvironmentConfig(BaseModel):
     """Configuration for an environment (dev, prod, etc.).
 
@@ -421,6 +434,7 @@ class GatewayConfig(BaseModel):
     # New endpoints architecture
     endpoints: list[EndpointConfig] = Field(default_factory=list, max_length=50)
     environments: list[EnvironmentConfig] = Field(default_factory=list, max_length=20)
+    task_endpoints: list[TaskEndpointPolicy] = Field(default_factory=list, max_length=20)
     resolution: ResolutionConfig = Field(default_factory=ResolutionConfig)
 
     @model_validator(mode="after")
@@ -507,6 +521,20 @@ class GatewayConfig(BaseModel):
                 raise ValueError(
                     f"Endpoint priority references unknown endpoint '{priority_endpoint}'"
                 )
+
+        # Task/endpoint policies name real endpoints, one policy per task
+        known = provider_names | endpoint_names
+        seen_tasks = set()
+        for policy in self.task_endpoints:
+            if policy.task in seen_tasks:
+                raise ValueError(f"task_endpoints has two policies for '{policy.task.value}'")
+            seen_tasks.add(policy.task)
+            for name in [*policy.allowed_endpoints, *policy.denied_endpoints]:
+                if name not in known:
+                    raise ValueError(
+                        f"task_endpoints for '{policy.task.value}' references unknown "
+                        f"endpoint '{name}'"
+                    )
 
         # Validate environment references
         for env in self.environments:
