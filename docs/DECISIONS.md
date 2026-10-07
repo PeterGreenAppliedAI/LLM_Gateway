@@ -1649,3 +1649,9 @@ Each finding below was reproduced before it was fixed. The fixes are D-041 to D-
     `TimeoutError` replace the 3.10 spellings. `(str, Enum)` stays as is (UP042 ignored),
     because `StrEnum` changes how members format.
   - **3.11 still has the `wait_for` cancellation bug**, so `wait_event` stays.
+- **Found by the first Windows CI run:** request durations were measured as the difference
+  between two `datetime.now()` readings. That's wall-clock time, which ticks every ~15 ms on
+  Windows, so a fast request measured 0 ms and got no tokens-per-second. Wall-clock time can
+  also jump with NTP and give negative latencies on any OS. `RequestContext` now measures
+  durations with `time.perf_counter`; `start_time` stays a wall-clock timestamp for logs.
+  This was the review's sixth Windows failure (`test_observability.py::test_full_request_flow`).
