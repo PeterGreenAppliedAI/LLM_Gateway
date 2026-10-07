@@ -214,7 +214,7 @@ is observe-only).
 
 ## D-011: Inline images pass through; image URLs are rejected
 
-- **Status:** Proposed, 2026-10-07 (phase 5)
+- **Status:** Accepted, 2026-10-07 (phase 5)
 - **Problem:** The OpenAI route drops all image parts silently, so vision models answer as if no
   image was sent.
 - **What didn't work:** *Downloading `http(s)` image URLs in the gateway:* rejected.
@@ -226,3 +226,90 @@ is observe-only).
   saying to send the image inline.
 - **Revisit when:** A customer needs URL images. Then add opt-in fetching with a domain allowlist,
   private addresses blocked, and size and time caps.
+
+---
+
+## Phase 1: Streaming correctness
+
+## D-012: Stream failures carry their cause; failover follows the non-streaming rules
+
+- **Status:** Implemented, 2026-10-07, `abfa1c5`
+- **Problem:** Every adapter turned any stream failure into an anonymous error chunk. The
+  dispatcher therefore couldn't tell "model not found" (404) from a dead box. It failed a
+  404 over to every endpoint, then returned "all providers unavailable" with no reason.
+  Streams it gave up on were never closed.
+- **What didn't work:**
+  - *Patching each adapter separately:* three copies of the line reader and two of the SSE
+    parser had already drifted. vLLM ignored `finish_reason: "tool_calls"`, and neither
+    OpenAI-style adapter parsed streamed tool calls. Replaced with shared helpers in
+    `providers/streaming.py`.
+  - *Treating every in-band runtime error as non-retryable:* an Ollama error line such as "model
+    requires more system memory" is a server-side failure another box may handle. Code
+    `upstream_error` is now retryable. Only upstream 4xx stops failover.
+- **Fix:** Error chunks carry `error` and `error_code` (`http_<status>`, `timeout`,
+  `connection_error`, `upstream_error`, `unknown_error`). `dispatch_stream` applies
+  `_is_retryable_error` like non-streaming dispatch does: 4xx raises `ProviderError` with the
+  upstream status, and a pin never fails over. The final 503 includes the last cause. Abandoned
+  streams are closed, and closing the returned stream closes the upstream connection.
+- **What works now:** `tests/test_streaming_phase1.py::TestStreamFailover`,
+  `::TestAdapters`, `::TestUpstreamHttpError`.
+
+## D-013: The status code is decided before the first byte
+
+- **Status:** Implemented, 2026-10-07, `abfa1c5`
+- **Problem:** Streaming routes returned `200 OK` headers, *then* dispatched. "No endpoint
+  available" or "model not found" arrived as an error event inside a 200, which load balancers
+  and SDK retry logic can't see.
+- **What didn't work:** *Sending the error event with a non-200 status:* impossible, because the
+  status line is already sent when the generator starts.
+- **Fix:** `StreamRecorder.start()` picks the endpoint and waits for the first chunk *before*
+  the `StreamingResponse` is created. Failures raise and the normal exception handlers return
+  4xx/503 JSON (audited first). The wait can be long during a cold model load, so it runs
+  under `run_unless_disconnected`: a client that leaves cancels the upstream request. After the
+  first byte, failures are sent in-band: OpenAI `{"error": …}` frame, Ollama `{"error": …,
+  "done": true}`.
+- **What works now:** `TestPreStreamStatus` (503 and pass-through 404 on both APIs).
+- **Trade-offs:** Response headers wait for the first token. That's the same time-to-first-
+  token, only the headers move.
+
+## D-014: Separate first-chunk and between-chunk stream timeouts
+
+- **Status:** Implemented, 2026-10-07, `abfa1c5`
+- **Problem:** The gap allowed between chunks was `max(120s, endpoint timeout)`. With timeouts
+  allowed up to 3600s, a stalled stream could hold a GPU slot and a client for an hour.
+- **What didn't work:** *One shorter timeout for every chunk:* cold model loads legitimately take
+  minutes before the first token.
+- **Fix:** The first chunk may take the endpoint `timeout`. After that, a new per-endpoint
+  `stream_idle_timeout` (default 60s) applies. Stalls are classified as `timeout`, which is
+  retryable.
+- **What works now:** `TestTimeouts`.
+
+## D-015: OpenAI route streams tool calls
+
+- **Status:** Implemented, 2026-10-07, `abfa1c5`
+- **Problem:** `tools` + `stream: true` was silently converted to one buffered response
+  wrapped in fake SSE, so for agent workloads time-to-first-token equaled total latency.
+- **What didn't work:** *Re-fragmenting arguments into OpenAI-style partial deltas:* unnecessary.
+  The spec allows a complete call in one delta, and SDKs assemble deltas by `index` the same way.
+- **Fix:** Each tool call is emitted as one delta (`index` running across the response,
+  `id` = upstream id or `call_<n>`, arguments as a JSON string). The finish reason is
+  `"tool_calls"` whenever tool calls were sent, since Ollama reports `"stop"`.
+- **Also fixed:** the stream choice `index` counted chunks (0, 1, 2, …). It is now always 0,
+  because there is one choice.
+- **What works now:** `TestOpenAIToolStreaming`, `TestParseOpenAISSE`.
+
+## D-016: Bugs found while doing phase 1
+
+- **Status:** Implemented, 2026-10-07, `abfa1c5`
+- **Stream endpoint order ignored routing config.** Streams tried endpoints from the model
+  catalog first, and the resolved primary (which reflects pins, `target_endpoint`, per-model
+  defaults and priority) only after them. They also ignored `fallback_allowed: false`.
+  Found because a failover test hit the wrong endpoint first. *Fix:* primary first, then other
+  endpoints with the model, then the fallback chain; fallback disabled means primary only.
+  `test_stream_honors_priority_and_target_endpoint`.
+- **Endpoint choice changed between restarts.** `ModelCatalog.get_endpoints_for_model` built its
+  list from a `set`, so order depended on the per-process hash seed. *Fix:* order-preserving
+  dedup. `test_catalog_order_is_deterministic`.
+- **`connect_timeout` was ignored for endpoints.** The registry never passed it to the adapter,
+  so it was always 3s. *Fix:* passed through, along with `stream_idle_timeout`.
+

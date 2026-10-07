@@ -83,12 +83,16 @@ The gaps are in capacity management and in streaming correctness.
 | ~~P0~~ | **Fixed:** streaming usage wasn't charged to token budgets | `routes/stream_recorder.py` | All streaming routes charge budgets through a shared `StreamRecorder`, including failed and abandoned streams (estimated from chunks when no usage arrives). |
 | ~~P0~~ | **Fixed:** mid-stream failures recorded as success | same | `finish_reason=ERROR` is now audited as `status=error, error_code=stream_error`; Ollama streams send the client an error instead of a normal `done`. |
 | ~~P1~~ | **Fixed:** client disconnect mid-stream left no audit record | same | Disconnects close the upstream stream and write a `client_disconnected` row with partial content and tokens, shielded against Starlette's cancel scope. |
-| P1 | Upstream stream not closed on failover | `dispatch/dispatcher.py:627` | When the first chunk is an error or empty, the dispatcher moves to the next provider without `aclose()` on the abandoned iterator, so its upstream connection stays open until garbage collection. |
-| P1 | Stream errors lose their cause | `providers/ollama.py`, `providers/openai.py` `chat_stream` | Every exception, including upstream 4xx such as "model not found", becomes an empty `ERROR` chunk. So the stream dispatcher fails over on client errors (the non-streaming path correctly doesn't), and the final 503 doesn't say why (`AllProvidersUnavailableError` gets no `last_error`). |
-| P1 | Pre-stream failures return HTTP 200 | `routes/openai.py` `_stream_chat_response` | `dispatch_stream` runs inside the generator after the 200 headers are sent, so "all providers unavailable" reaches the client as a 200 with an error event. Load balancers and SDK retry logic can't see it. Resolve the provider and peek the first chunk before returning the `StreamingResponse`. |
-| P1 | Tool calls disable streaming on the OpenAI API | `routes/openai.py:167` | `tools` plus `stream: true` is silently turned into one buffered response. For agent workloads TTFT then equals total latency. The Ollama route already streams tool calls; the OpenAI route needs `tool_calls` delta support. |
-| P1 | Stalled stream can hang for up to an hour | `providers/*` `_iter_lines_with_timeout` | The gap allowed between chunks is `max(120s, endpoint timeout)`, and endpoint timeouts now go up to 3600s. The first-chunk timeout (cold model load) should be separate from the between-chunk timeout, which should be short (~30–60s). |
+| ~~P1~~ | **Fixed (D-012):** upstream stream not closed on failover | `dispatch/dispatcher.py` | Abandoned streams are closed, and closing the returned stream closes the upstream connection. |
+| ~~P1~~ | **Fixed (D-012):** stream errors lost their cause | `providers/streaming.py` | Error chunks carry `error`/`error_code`; streaming failover now stops on upstream 4xx and the 503 includes the last cause. |
+| ~~P1~~ | **Fixed (D-013):** pre-stream failures returned HTTP 200 | `routes/stream_recorder.py` `start` | Endpoint chosen and first chunk received before headers; failures return real 4xx/503. |
+| ~~P1~~ | **Fixed (D-015):** tool calls disabled streaming on the OpenAI API | `routes/openai.py`, `models/openai.py` | Tool calls stream as complete-call deltas; OpenAI/vLLM adapters reassemble streamed fragments. |
+| ~~P1~~ | **Fixed (D-014):** stalled stream could hang for up to an hour | `providers/streaming.py` | First chunk gets the endpoint timeout; then `stream_idle_timeout` (default 60s). |
 | ~~P2~~ | **Fixed:** response text accumulated with `+=` | same | Now a list join. Still accumulated when bodies aren't stored. |
+
+Also fixed in phase 1 (D-016): streams ignored endpoint priority, `target_endpoint` and
+`fallback_allowed: false`; endpoint order changed between restarts (set ordering); and
+`connect_timeout` was never passed to endpoint adapters.
 
 ### Request handling
 
@@ -173,7 +177,7 @@ while keyless or streaming traffic bypasses policy would be wrong.
 **Step 2: real-time capacity (P1)**
 5. Per-endpoint in-flight caps with fail-fast backpressure; least-in-flight balancing across endpoints.
 6. Key-validation cache; background audit writer; circuit breaker instead of in-request health probes.
-7. Fix stream lifecycle: close abandoned iterators, carry error causes, return a real status before streaming starts, separate first-chunk and between-chunk timeouts, streaming tool calls on the OpenAI route.
+7. ~~Fix stream lifecycle: close abandoned iterators, carry error causes, return a real status before streaming starts, separate first-chunk and between-chunk timeouts, streaming tool calls on the OpenAI route.~~ Done (phase 1).
 8. Persist budgets and assignments; Redis limiter; then multiple workers.
 
 **Step 3: operations and operator view**
