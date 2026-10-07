@@ -108,10 +108,47 @@ that don't speak it get an adapter. Design decisions live in [DECISIONS.md](DECI
 | **stable-diffusion.cpp `sd-server`** | Active | **Both** OpenAI and `/sdapi/v1` routes | Sync | — | — |
 | **InvokeAI** | Active (v6.14) | Graph queue `/api/v1/queue/.../enqueue_batch` | Async + Socket.IO | 9090 | optional |
 | AUTOMATIC1111 / original Forge | **Stale** (2024-07 / 2025-06) | `/sdapi/v1/*` | Sync | 7860 | Basic |
-| Ollama | — | **No image generation** (returns 400) | — | — | — |
+| Ollama | **Removed in v0.32.6** (2026-08-04) | v0.14.0–v0.32.5 only: OpenAI `/v1/images/generations` (`size`, `seed`; b64 only, no `n`) and `/api/generate` (`width`, `height`, `steps`, NDJSON progress) | Sync | 11434 | none |
+
+**Ollama image generation** (experimental) shipped in v0.14.0 (2026-01-13) on **macOS / Apple
+Silicon** via a separate MLX runner (Z-Image Turbo as `x/z-image-turbo`, FLUX.2 Klein 4B/9B), and
+was **removed in v0.32.6** ("temporarily removed; continue using 0.32.5"). Current Ollama rejects
+image models with 400 on every platform. A Mac pinned to ≤0.32.5 still works, and because it speaks
+the OpenAI image shape the gateway's generic adapter covers it, but it's not a foundation to plan on.
 
 FLUX runs on ComfyUI (most common), Forge Neo, SD.Next, vLLM-Omni (FLUX.1/.2, Qwen-Image,
 Z-Image), LocalAI diffusers and sd.cpp.
+
+### Video
+- **Client contract: OpenAI `/v1/videos`.** This is a job API, not a single request:
+  - `POST /v1/videos` (multipart: `prompt`, `model`, `seconds`, `size`, `input_reference`) → a
+    job `{id, status: queued|in_progress|completed|failed, progress 0–100, expires_at, error}`.
+  - `GET /v1/videos/{id}` to poll; the `openai-poll-after-ms` header sets the poll interval.
+  - `GET /v1/videos/{id}/content?variant=video|thumbnail|spritesheet`, plus list, delete and
+    remix routes.
+  - **vLLM-Omni implements the same API** (plus `/v1/videos/sync`, and extensions such as
+    `num_frames`, `fps`, `steps`, `guidance_scale`, `seed`, `negative_prompt`).
+- **ComfyUI video** (Wan 2.2, LTX-Video / LTX-2) uses the same `/prompt` + `/history` + `/view`
+  flow as images:
+  - Output nodes: `SaveVideo` / `SaveWEBM` report under `images` with `animated: [true]`;
+    VideoHelperSuite `VHS_VideoCombine` reports under `gifs`. Tell video from image by file
+    extension or mime type, and scan both keys.
+  - Image-to-video: upload the image with `POST /upload/image`, then set the returned name in
+    the workflow's `LoadImage` node.
+  - The official templates (Comfy-Org/workflow_templates: `video_wan2_2_5B_ti2v`,
+    `video_wan2_2_14B_t2v/i2v`, `ltxv_*`, `video_ltx2_*`) are **UI-format with subgraphs**. Export
+    each once with "Export (API)" before the gateway can use it. `api_*` templates use **paid**
+    Comfy partner nodes.
+
+  | Workflow (template defaults) | Output | Notes |
+  |---|---|---|
+  | Wan 2.2 TI2V-5B | 1280×704, 121 frames @ 24 fps (~5 s) | 20 steps; ~8 GB VRAM with ComfyUI offload; minutes per clip on consumer GPUs |
+  | Wan 2.2 14B T2V/I2V (fp8) | 640×640, 81 frames @ 16 fps (~5 s) | 4 steps with the lightx2v LoRA; two expert passes |
+  | LTX-Video 2B | 768×512, 97 frames @ 24 fps (~4 s) | Size must be a multiple of 32; frames must be 8n+1 |
+  | LTX-2 19B distilled | 960×544, 121 frames @ 30 fps (~4 s) | Two stages plus upscaler; also generates audio |
+
+  Render times and VRAM on your own GPUs are *(unverified)*. Benchmark them.
+- **Sizes:** a 5 s 720p h264 mp4 is roughly 2–15 MB; a 1024² PNG is 1–3 MB (base64 adds ~33%).
 
 ### Image knobs and discovery
 - **A1111 family (Forge Neo, SD.Next, sd.cpp):**
@@ -177,5 +214,7 @@ Kokoro-FastAPI, hexgrad/kokoro, speaches, whisper.cpp `examples/server`, vLLM
 OHF-Voice/piper1-gpl, devnen/Chatterbox-TTS-Server, travisvn/chatterbox-tts-api,
 openai-python 3.26.0 types, ComfyUI `server.py`, AUTOMATIC1111 `modules/api`,
 Haoming02/sd-webui-forge-classic (`neo`), vladmandic/sdnext, invoke-ai/InvokeAI,
-mudler/LocalAI, ollama/ollama, leejet/stable-diffusion.cpp, NVIDIA Speech NIM docs (search
+mudler/LocalAI, ollama/ollama (imagegen added in v0.14.0, removed in 4713800b / v0.32.6), leejet/stable-diffusion.cpp,
+ComfyUI `comfy_extras/nodes_video.py`, Kosinkadink/ComfyUI-VideoHelperSuite, Comfy-Org/workflow_templates,
+Wan-Video/Wan2.2, Lightricks/LTX-Video and LTX-2, openai-python `resources/videos.py`, vLLM-Omni `docs/serving/videos_api.md`, NVIDIA Speech NIM docs (search
 extracts only). All on GitHub, fetched 2026-10-07.

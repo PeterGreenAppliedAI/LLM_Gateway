@@ -423,3 +423,92 @@ is observe-only).
 - **Revisit when:** Compliance needs a queryable change history. Then add a
   `runtime_settings_history` table. The same store can hold other runtime settings
   (budgets, D-010).
+
+---
+
+## Media: voice, images and video (research: [MEDIA_ENGINES.md](MEDIA_ENGINES.md))
+
+## D-020: Contract first; engines are described by data, not code
+
+- **Status:** Accepted, 2026-10-07
+- **Problem:** Adding text-to-speech (TTS), speech-to-text (STT), image and video generation. The
+  first draft gave every engine its own adapter type (`kokoro`, `speaches`, `vllm`,
+  `whispercpp`, `comfyui`, …), which ties the gateway to today's engines and needs a release for
+  each new one.
+- **What didn't work:** *An adapter per engine:* rejected on review (the user asked "does it have
+  to be specifically those?"). Most engines already speak one contract.
+- **Fix:**
+  - **Clients always see OpenAI's API:** `/v1/audio/speech`, `/v1/audio/transcriptions`,
+    `/v1/audio/translations`, `/v1/images/generations` and `/v1/videos`.
+  - **An endpoint's `type` is its request style, not its brand.** `openai` covers Kokoro-FastAPI,
+    speaches, vLLM, vLLM-Omni, LocalAI, Chatterbox, stable-diffusion.cpp, and Ollama ≤0.32.5
+    images. `comfyui` covers every ComfyUI model, because a new model is a new workflow
+    template (data). Translators (whisper.cpp, Piper) are built only when someone runs them.
+  - **`capabilities`** (`tts`, `stt`, `image`, `video`) say what an endpoint does.
+  - **What the dashboard shows (voices, languages, ranges) comes from data, in order:**
+    1. Ask the engine (`/v1/models`, `/v1/audio/voices`, ComfyUI `/object_info`).
+    2. **Profiles:** small config files describing an engine family's quirks (e.g. Kokoro: the
+       first letter of a voice ID is its language, speed 0.25–4.0).
+    3. Admin-declared values for engines that report nothing.
+- **Trade-offs:** An engine without a profile gets generic controls until someone writes one.
+- **Revisit when:** An important engine needs behavior a profile can't describe.
+
+## D-021: Media usage is metered in its own units, converted to token budgets
+
+- **Status:** Accepted, 2026-10-07 (stated default, not objected to)
+- **Decision:** Record each request's native units: TTS characters, STT audio seconds, image
+  count × megapixels × steps, video seconds × resolution. Budgets convert these to weighted
+  tokens with a per-tier multiplier, so one budget system covers everything.
+- **Why:** It reuses the existing budgets and dashboard instead of a parallel system.
+- **Revisit when:** Operators need separate media quotas (e.g. "10 videos/day").
+
+## D-022: Unsupported audio formats are rejected, not transcoded
+
+- **Status:** Accepted, 2026-10-07 (stated default, not objected to)
+- **Decision:** If an engine can't produce or accept a format (several are WAV-only), return
+  400 listing the formats it supports. No ffmpeg in the gateway in v1.
+- **Why:** Transcoding adds a native dependency, CPU load on the request path, and a
+  media-parsing attack surface. It also hides capability gaps that should be visible.
+- **Revisit when:** A must-have client can't choose its format. Video thumbnails (D-024) may
+  need ffmpeg anyway; if it arrives for that, reconsider.
+
+## D-023: Generated and uploaded media are never stored in the audit trail
+
+- **Status:** Accepted, 2026-10-07 (stated default, not objected to)
+- **Decision:** Audit rows record metadata only: format, duration, size, dimensions, voice,
+  model and a content hash. TTS input text and image/video prompts go through PII
+  detection like chat prompts; transcripts are redacted before storage (D-005).
+- **Why:** Audio and images can carry PII (voices, faces) that hash-only rules can't redact.
+
+## D-024: Generated video (and image links) live in a gateway media store
+
+- **Status:** Accepted, 2026-10-07 (stated default, not objected to)
+- **Problem:** Video takes minutes and produces MB-sized files, so it can't return inline.
+  OpenAI's video API is job-based (create → poll → download content).
+- **Decision:**
+  - The gateway copies outputs out of the engine (e.g. ComfyUI's output folder) into its own
+    store, keyed by job ID, with owner and `expires_at` (default 7 days, configurable).
+  - Downloads only through the gateway, by the creating key or an admin. Video supports Range
+    requests for playback.
+  - Never expose engine routes such as ComfyUI `/view` or `/upload`.
+  - Images stay synchronous base64 (OpenAI has no image job API). The gateway holds the request
+    open with keepalives while ComfyUI works, and stores an image only if a client asks for a link.
+- **Revisit when:** Storage needs to be S3 or other object storage instead of local disk.
+
+## D-025: Build order: voice, then capacity (phase 2), then images and video
+
+- **Status:** Accepted, 2026-10-07 (stated default, not objected to)
+- **Why:** Voice is mostly OpenAI-compatible pass-through and useful immediately. Images and
+  video need per-endpoint concurrency limits first, or requests queue invisibly for minutes
+  behind a busy GPU.
+
+## D-026: Ollama image generation is supported only as a generic OpenAI endpoint
+
+- **Status:** Accepted, 2026-10-07
+- **Finding:** Ollama shipped experimental image generation (macOS / Apple Silicon, MLX runner,
+  Z-Image Turbo and FLUX.2 Klein) in v0.14.0 and **removed it in v0.32.6** (2026-08-04).
+  Current Ollama returns 400 for image models on every platform. An earlier research pass read
+  only current code and concluded it had never existed, until the user's Mac proved otherwise.
+- **Decision:** No Ollama-specific image adapter. A Mac pinned to ≤0.32.5 works as a `type: openai`
+  image endpoint (D-020).
+- **Lesson:** Check release history, not just current main, before declaring a feature absent.
