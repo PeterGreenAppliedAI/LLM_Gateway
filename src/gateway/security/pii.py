@@ -48,6 +48,36 @@ class PIIScanResult:
         }
 
 
+@dataclass
+class PIIFinding:
+    """One scanned text and exactly where it came from.
+
+    Audit rows are built from these, not by matching results to messages by
+    position: that silently skipped content parts (zero PII events for an
+    email in a multimodal message) and, for batches that kept only results
+    with detections, paired them with the wrong inputs (wrong index, hash of
+    the wrong text).
+    """
+
+    message_index: int  # position in the request's messages, prompts or inputs
+    role: str | None
+    text: str  # the original text; detection offsets refer to it
+    result: PIIScanResult
+    part_index: int | None = None  # content part within the message, if any
+
+    @property
+    def has_pii(self) -> bool:
+        return self.result.has_pii
+
+    @property
+    def detection_count(self) -> int:
+        return self.result.detection_count
+
+    @property
+    def scrubbed_text(self) -> str | None:
+        return self.result.scrubbed_text
+
+
 # Pre-compiled PII patterns
 # Order matters — more specific patterns first to avoid partial matches
 _PII_PATTERNS: list[tuple[str, re.Pattern]] = [
@@ -144,9 +174,20 @@ class PIIScrubber:
             scan_time_ms=elapsed,
         )
 
+    def scan_texts(self, texts: list, scrub: bool = False, role: str = "user") -> list[PIIFinding]:
+        """Scan a batch (embedding inputs, completion prompts); non-strings skipped.
+
+        Each finding keeps its item's index in the original list.
+        """
+        return [
+            PIIFinding(index, role, text, self.scan(text, scrub=scrub))
+            for index, text in enumerate(texts)
+            if isinstance(text, str) and text
+        ]
+
     def scan_messages(
         self, messages: list[dict], scrub: bool = False
-    ) -> tuple[list[dict], list[PIIScanResult]]:
+    ) -> tuple[list[dict], list[PIIFinding]]:
         """Scan a list of chat messages for PII.
 
         Args:
@@ -154,29 +195,32 @@ class PIIScrubber:
             scrub: If True, return messages with PII replaced
 
         Returns:
-            Tuple of (possibly scrubbed messages, list of scan results)
+            Tuple of (possibly scrubbed messages, one finding per text scanned,
+            located by message and content part)
         """
-        results: list[PIIScanResult] = []
+        results: list[PIIFinding] = []
         output_messages = []
 
-        for msg in messages:
+        for msg_index, msg in enumerate(messages):
             content = msg.get("content", "")
+            role = msg.get("role")
+            role = getattr(role, "value", role)
             new_msg = dict(msg)  # shallow copy
 
             if isinstance(content, str) and content:
                 result = self.scan(content, scrub=scrub)
-                results.append(result)
+                results.append(PIIFinding(msg_index, role, content, result))
                 if scrub and result.scrubbed_text is not None:
                     new_msg["content"] = result.scrubbed_text
             elif isinstance(content, list):
                 # Multimodal content arrays — scan text parts
                 new_parts = []
-                for part in content:
+                for part_index, part in enumerate(content):
                     if isinstance(part, dict) and part.get("type") == "text":
                         text = part.get("text", "")
                         if isinstance(text, str) and text:
                             result = self.scan(text, scrub=scrub)
-                            results.append(result)
+                            results.append(PIIFinding(msg_index, role, text, result, part_index))
                             if scrub and result.scrubbed_text is not None:
                                 new_part = dict(part)
                                 new_part["text"] = result.scrubbed_text

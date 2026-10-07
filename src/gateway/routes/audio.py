@@ -48,6 +48,7 @@ from gateway.routes.dependencies import (
     translate_policy_violation,
 )
 from gateway.security import PIIScrubber
+from gateway.security.pii import PIIFinding
 from gateway.storage import AuditLogger
 
 logger = get_logger(__name__)
@@ -288,8 +289,7 @@ async def create_speech(
                     client_id=auth.client_id,
                     task="speech",
                     model=body.model,
-                    messages=[{"role": "user", "content": text}],
-                    pii_results=[result],
+                    findings=[PIIFinding(0, "user", text, result)],
                     was_scrubbed=scrub,
                 )
             if scrub and result.scrubbed_text is not None:

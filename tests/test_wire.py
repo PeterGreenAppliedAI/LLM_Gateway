@@ -254,3 +254,82 @@ async def test_image_reaches_ollama_in_native_field():
     assert resp.status_code == 200
     assert seen[-1]["messages"][0]["images"] == [IMAGE.partition(",")[2]]
     await registry.close()
+
+
+# =============================================================================
+# PII audit events point at the right input (second review)
+# =============================================================================
+
+
+@pytest.fixture
+async def audited(wire, tmp_path):
+    """The wire app with a real audit logger on SQLite (direct writes)."""
+    from gateway.storage import AuditLogger, DatabaseConfig, create_async_db_engine
+
+    client, engine = wire
+    db = await create_async_db_engine(DatabaseConfig(url=f"sqlite:///{tmp_path}/a.db"))
+    client.app.state.audit_logger = AuditLogger(db)
+    yield client, db
+    await db.dispose()
+
+
+async def _pii_events(db) -> list[dict]:
+    from sqlalchemy import select
+
+    from gateway.storage.schema import pii_events
+
+    async with db.connect() as conn:
+        rows = await conn.execute(select(pii_events).order_by(pii_events.c.id))
+        return [dict(r._mapping) for r in rows]
+
+
+def _sha(value: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
+class TestPIIAuditMapping:
+    @pytest.mark.asyncio
+    async def test_email_in_a_content_part_is_audited(self, audited):
+        """Produced zero events: content parts weren't mapped back."""
+        client, db = audited
+        parts = [
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}},
+            {"type": "text", "text": f"who is {EMAIL}?"},
+        ]
+        messages = [
+            {"role": "system", "content": "be brief"},
+            {"role": "user", "content": parts},
+        ]
+        resp = client.post("/v1/chat/completions", json={"model": "m", "messages": messages})
+        assert resp.status_code == 200
+        [event] = await _pii_events(db)
+        assert (event["message_index"], event["part_index"]) == (1, 1)
+        assert event["message_role"] == "user"
+        assert event["value_hash"] == _sha(EMAIL)
+        text = parts[1]["text"]
+        assert text[event["position_start"] : event["position_end"]] == EMAIL
+
+    @pytest.mark.asyncio
+    async def test_embedding_batch_events_point_at_their_input(self, audited):
+        """Filtering out clean results misaligned detections: wrong index, wrong hash."""
+        client, db = audited
+        other = "sam@example.org"
+        inputs = ["nothing here", f"mail {EMAIL}", "still clean", f"or {other}"]
+        resp = client.post("/v1/embeddings", json={"model": "m", "input": inputs})
+        assert resp.status_code == 200
+        events = await _pii_events(db)
+        assert [(e["message_index"], e["value_hash"]) for e in events] == [
+            (1, _sha(EMAIL)),
+            (3, _sha(other)),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_completion_prompt_list_events_point_at_their_prompt(self, audited):
+        client, db = audited
+        prompts = ["clean", "clean too", f"x {EMAIL}"]
+        resp = client.post("/v1/completions", json={"model": "m", "prompt": prompts})
+        assert resp.status_code == 200
+        [event] = await _pii_events(db)
+        assert (event["message_index"], event["value_hash"]) == (2, _sha(EMAIL))

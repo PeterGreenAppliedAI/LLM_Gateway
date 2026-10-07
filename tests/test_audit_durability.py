@@ -97,8 +97,7 @@ async def test_pii_events_spill_too(tmp_path):
         client_id="app",
         task="chat",
         model="phi4:14b",
-        messages=messages,
-        pii_results=results,
+        findings=results,
         was_scrubbed=False,
     )
     assert '"table": "pii_events"' in spill.read_text()

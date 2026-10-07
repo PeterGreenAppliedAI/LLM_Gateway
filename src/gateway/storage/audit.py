@@ -655,15 +655,14 @@ class AuditLogger:
         client_id: str,
         task: str | None,
         model: str | None,
-        messages: list[dict],
-        pii_results: list,
+        findings: list,
         was_scrubbed: bool,
     ) -> int:
         """Log PII detection events with hashed values — never stores raw PII.
 
         Args:
-            messages: Original messages (before scrubbing) to extract raw values for hashing
-            pii_results: List of PIIScanResult from the scrubber
+            findings: PIIFinding per scanned text, each with its message (and
+                content part) index and original text
             was_scrubbed: Whether scrubbing was applied
 
         Returns:
@@ -674,21 +673,11 @@ class AuditLogger:
         now = datetime.now(UTC)
         rows = []
 
-        # Map pii_results back to messages — one result per message content
-        result_idx = 0
-        for msg_idx, msg in enumerate(messages):
-            content = msg.get("content", "")
-            if not isinstance(content, str) or not content:
-                continue
-            if result_idx >= len(pii_results):
-                break
-
-            scan_result = pii_results[result_idx]
-            result_idx += 1
-
+        for finding in findings:
+            scan_result = finding.result
             for detection in scan_result.detections:
                 # Extract the raw value from the original text and hash it
-                raw_value = content[detection.start : detection.end]
+                raw_value = finding.text[detection.start : detection.end]
                 value_hash = hashlib.sha256(raw_value.encode("utf-8")).hexdigest()
 
                 rows.append(
@@ -699,8 +688,9 @@ class AuditLogger:
                         "model": model,
                         "task": task,
                         "pii_type": detection.pii_type,
-                        "message_index": msg_idx,
-                        "message_role": msg.get("role"),
+                        "message_index": finding.message_index,
+                        "part_index": finding.part_index,
+                        "message_role": finding.role,
                         "position_start": detection.start,
                         "position_end": detection.end,
                         "value_hash": value_hash,

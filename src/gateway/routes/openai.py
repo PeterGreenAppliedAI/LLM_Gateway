@@ -127,6 +127,50 @@ def _record_choice_metrics(results: list[DispatchResult], ctx, task: str) -> Non
 # =============================================================================
 
 
+async def _scan_batch(
+    value,
+    *,
+    pii_scrubber: PIIScrubber,
+    scrub: bool,
+    audit_logger: AuditLogger | None,
+    ctx,
+    client_id: str,
+    task: str,
+    model: str,
+):
+    """PII-scan a prompt or input that's a string or a list; returns it scrubbed if asked.
+
+    Each detection is audited with its item's index in the original list
+    (non-string items included in the count), so events for a batch point at
+    the item and text they came from.
+    """
+    texts = [value] if isinstance(value, str) else list(value) if isinstance(value, list) else []
+    findings = pii_scrubber.scan_texts(texts, scrub=scrub)
+    flagged = [f for f in findings if f.has_pii]
+    if flagged:
+        logger.warning(
+            "PII detected in request",
+            request_id=ctx.request_id,
+            pii_count=sum(f.detection_count for f in flagged),
+            scrubbed=scrub,
+        )
+        if audit_logger:
+            await audit_logger.log_pii_events(
+                request_id=ctx.request_id,
+                client_id=client_id,
+                task=task,
+                model=model,
+                findings=flagged,
+                was_scrubbed=scrub,
+            )
+    if not scrub:
+        return value
+    for finding in flagged:
+        if finding.scrubbed_text is not None:
+            texts[finding.message_index] = finding.scrubbed_text
+    return texts[0] if isinstance(value, str) else texts if isinstance(value, list) else value
+
+
 @router.post("/chat/completions")
 async def chat_completions(
     request: Request,
@@ -170,7 +214,6 @@ async def chat_completions(
     # PII detection (always flags) + optional scrubbing (per-route)
     if pii_scrubber:
         scrub = should_scrub_pii(request)
-        pre_scrub_messages = [dict(m) for m in sanitized_messages]
         sanitized_messages, pii_results = pii_scrubber.scan_messages(
             sanitized_messages, scrub=scrub
         )
@@ -188,8 +231,7 @@ async def chat_completions(
                     client_id=client_id,
                     task="chat",
                     model=body.model,
-                    messages=pre_scrub_messages,
-                    pii_results=pii_results,
+                    findings=pii_results,
                     was_scrubbed=scrub,
                 )
 
@@ -428,54 +470,16 @@ async def completions(
 
     # PII detection + optional scrubbing
     if pii_scrubber:
-        scrub = should_scrub_pii(request)
-        if isinstance(sanitized_prompt, str):
-            pre_scrub_prompt = sanitized_prompt
-            pii_result = pii_scrubber.scan(sanitized_prompt, scrub=scrub)
-            if pii_result.has_pii:
-                logger.warning(
-                    "PII detected in request",
-                    request_id=ctx.request_id,
-                    pii_count=pii_result.detection_count,
-                    scrubbed=scrub,
-                )
-                if audit_logger:
-                    await audit_logger.log_pii_events(
-                        request_id=ctx.request_id,
-                        client_id=client_id,
-                        task="completions",
-                        model=body.model,
-                        messages=[{"role": "user", "content": pre_scrub_prompt}],
-                        pii_results=[pii_result],
-                        was_scrubbed=scrub,
-                    )
-                if scrub and pii_result.scrubbed_text is not None:
-                    sanitized_prompt = pii_result.scrubbed_text
-        elif isinstance(sanitized_prompt, list):
-            all_pii_results = []
-            pre_scrub_prompts = list(sanitized_prompt)
-            for idx, p in enumerate(sanitized_prompt):
-                pii_result = pii_scrubber.scan(p, scrub=scrub)
-                if pii_result.has_pii:
-                    all_pii_results.append((idx, pii_result))
-                    logger.warning(
-                        "PII detected in request",
-                        request_id=ctx.request_id,
-                        pii_count=pii_result.detection_count,
-                        scrubbed=scrub,
-                    )
-                    if scrub and pii_result.scrubbed_text is not None:
-                        sanitized_prompt[idx] = pii_result.scrubbed_text
-            if all_pii_results and audit_logger:
-                await audit_logger.log_pii_events(
-                    request_id=ctx.request_id,
-                    client_id=client_id,
-                    task="completions",
-                    model=body.model,
-                    messages=[{"role": "user", "content": p} for p in pre_scrub_prompts],
-                    pii_results=[r for _, r in all_pii_results],
-                    was_scrubbed=scrub,
-                )
+        sanitized_prompt = await _scan_batch(
+            sanitized_prompt,
+            pii_scrubber=pii_scrubber,
+            scrub=should_scrub_pii(request),
+            audit_logger=audit_logger,
+            ctx=ctx,
+            client_id=client_id,
+            task="completions",
+            model=body.model,
+        )
 
     # Queue for async security analysis
     if security_analyzer:
@@ -690,67 +694,16 @@ async def embeddings(
 
     # PII detection (always flags) + optional scrubbing (per-route)
     if pii_scrubber:
-        scrub = should_scrub_pii(request)
-        if isinstance(sanitized_input, str):
-            pre_scrub_input = sanitized_input
-            pii_result = pii_scrubber.scan(sanitized_input, scrub=scrub)
-            if pii_result.detection_count:
-                logger.warning(
-                    "PII detected in request",
-                    request_id=ctx.request_id,
-                    pii_count=pii_result.detection_count,
-                    scrubbed=scrub,
-                )
-                if audit_logger:
-                    await audit_logger.log_pii_events(
-                        request_id=ctx.request_id,
-                        client_id=client_id,
-                        task="embeddings",
-                        model=body.model,
-                        messages=[{"role": "user", "content": pre_scrub_input}],
-                        pii_results=[pii_result],
-                        was_scrubbed=scrub,
-                    )
-            if scrub and pii_result.scrubbed_text is not None:
-                sanitized_input = pii_result.scrubbed_text
-        elif isinstance(sanitized_input, list):
-            total_pii = 0
-            all_pii_results = []
-            pre_scrub_items = list(sanitized_input)
-            scrubbed_list = []
-            for item in sanitized_input:
-                if isinstance(item, str):
-                    pii_result = pii_scrubber.scan(item, scrub=scrub)
-                    total_pii += pii_result.detection_count
-                    if pii_result.has_pii:
-                        all_pii_results.append(pii_result)
-                    scrubbed = scrub and pii_result.scrubbed_text is not None
-                    scrubbed_list.append(pii_result.scrubbed_text if scrubbed else item)
-                else:
-                    scrubbed_list.append(item)
-            if total_pii:
-                logger.warning(
-                    "PII detected in request",
-                    request_id=ctx.request_id,
-                    pii_count=total_pii,
-                    scrubbed=scrub,
-                )
-                if audit_logger and all_pii_results:
-                    await audit_logger.log_pii_events(
-                        request_id=ctx.request_id,
-                        client_id=client_id,
-                        task="embeddings",
-                        model=body.model,
-                        messages=[
-                            {"role": "user", "content": str(i)}
-                            for i in pre_scrub_items
-                            if isinstance(i, str)
-                        ],
-                        pii_results=all_pii_results,
-                        was_scrubbed=scrub,
-                    )
-            if scrub:
-                sanitized_input = scrubbed_list
+        sanitized_input = await _scan_batch(
+            sanitized_input,
+            pii_scrubber=pii_scrubber,
+            scrub=should_scrub_pii(request),
+            audit_logger=audit_logger,
+            ctx=ctx,
+            client_id=client_id,
+            task="embeddings",
+            model=body.model,
+        )
 
     # Queue for async security analysis
     if security_analyzer:
