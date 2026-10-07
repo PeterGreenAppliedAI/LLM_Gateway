@@ -317,3 +317,26 @@ def test_startup_fails_on_missing_profile(monkeypatch, tmp_path):
     with pytest.raises(RuntimeError, match="no-such-profile"):
         with TestClient(gateway.main.create_app(settings)):
             pass
+
+
+@pytest.mark.asyncio
+async def test_admin_key_works_on_inference_routes(monkeypatch):
+    """The dashboard playground calls /v1/audio/* with the admin key (D-002/D-029)."""
+    monkeypatch.setattr(
+        gateway.settings,
+        "get_settings",
+        lambda: Settings(admin_api_key=SecretStr("admin-key-1234567890")),
+    )
+    audit = AsyncMock()
+    app = await build_app(
+        [tts("k", profile="kokoro")],
+        {"k": engine_handler(KOKORO_VOICES)},
+        auth=AuthConfig(enabled=True, anonymous={"enabled": False}),
+    )
+    app.dependency_overrides[get_audit_logger] = lambda: audit
+    client = TestClient(app)
+    body = {"model": "kokoro", "input": "Hi", "voice": "af_heart"}
+    assert client.post("/v1/audio/speech", json=body).status_code == 401  # keyless refused
+    resp = client.post("/v1/audio/speech", json=body, headers={"X-API-Key": "admin-key-1234567890"})
+    assert resp.status_code == 200
+    assert audit.log_request.await_args.kwargs["client_id"] == "admin"

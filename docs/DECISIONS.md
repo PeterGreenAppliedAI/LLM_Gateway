@@ -593,3 +593,55 @@ is observe-only).
   listing, admin catalog, startup failure).
 - **Trade-offs:** The voice list can be up to 60 s stale. A just-added voice may be rejected
   until the next poll; `POST /api/media/catalog/refresh` forces one.
+
+## D-029: Dashboard voice controls (M2)
+
+- **Status:** Implemented, 2026-10-07
+- **What:** A **Voice** tab built entirely from the media catalog (D-028):
+  - **Engines view:** health, capabilities, profile, voice and model counts, last refresh,
+    discovery errors, and a refresh button.
+  - **Text-to-speech:** endpoint ("Auto" lets the gateway route; picking one pins via
+    `endpoint/model`), model, language and gender filters, voice picker, Kokoro **blender**
+    (voices plus weight sliders with a preview of the string sent), speed slider within the
+    profile's range, browser-playable formats only, then play and download.
+  - **Speech-to-text:** model, transcribe or translate, language (or auto-detect) from the
+    profile, output format, and upload or **in-browser recording** (MediaRecorder; needs HTTPS
+    or localhost).
+- **Decision:** the playground calls the real public routes, so its use is audited, metered and
+  budgeted like any client. For that, **the admin key now works on inference routes too**,
+  audited as client `admin`. This completes D-002's "admin key is a superset".
+- **What didn't work:**
+  - *The first browser run:* transcription failed with `Endpoint 'Systran' does not serve stt`.
+    That exposed D-030, a bug well beyond the playground.
+- **What works now:** verified end to end against the real gateway and dashboard with fake
+  Kokoro- and speaches-shaped engines in headless Chromium:
+  - the British English filter, then `bm_george` at speed 1.25 → a 1.2 s playable WAV;
+  - the blend `bm_george(2)+bf_emma` → reaches the engine verbatim;
+  - transcription of a WAV upload with `Systran/faster-whisper-small`;
+  - audit rows recorded as client `admin` with `media_usage`, including duration from the WAV
+    header.
+
+  Test: `test_admin_key_works_on_inference_routes`.
+
+## D-030: Model names containing "/" were misread as endpoint pins
+
+- **Status:** Implemented, 2026-10-07
+- **Problem:** `endpoint/model` pins were parsed purely by syntax, so any model name with a slash
+  became a pin to a nonexistent endpoint: Hugging Face IDs on vLLM and speaches
+  (`meta-llama/Llama-3.1-8B-Instruct`, `Qwen/Qwen2.5-7B`, `Systran/faster-whisper-small`) and
+  Ollama namespaced models (`user/model`). **Chat requests to such models failed** with
+  "provider unavailable", and resolution raised `EndpointNotFoundError`. Found by the M2
+  browser run, not by any test: the existing transcription test used an explicit pin.
+- **What didn't work:** *The old unit tests:* they asserted the syntactic behavior
+  (`"nonexistent/phi4" → EndpointNotFoundError`), so they encoded the bug. Two route-debug
+  tests also passed only by accident. They patch `get_dispatcher`, but FastAPI captured the
+  real dependency at import, so the patch never applied and the real dispatcher ran on a
+  bare mock registry.
+- **Fix:** a prefix is a pin **only if it names a configured endpoint**
+  (`Dispatcher.split_pin`, registry-aware). Otherwise the whole string is the model name. Fixed
+  at every call site (text dispatch, streaming, media, environment model approval, stream
+  budget metering).
+- **Trade-off:** If an endpoint is named the same as a Hugging Face org (e.g. `Qwen`), its
+  prefix is treated as a pin. Don't name endpoints after model orgs.
+- **What works now:** `test_slash_in_model_name_is_not_a_pin`,
+  `test_step1_unknown_prefix_is_part_of_model_name`, and the M2 end-to-end transcription.

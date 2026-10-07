@@ -1,4 +1,4 @@
-import type { Stats, Request, RequestDetail, Catalog, HealthResponse, SecurityAlert, SecurityStats, SecurityResult, ApiKeyInfo, BudgetConfig, BudgetUsage, SecurityScan, LabelStats, PIIStats, PIIEvent, PIIConfig } from '../types'
+import type { Stats, Request, RequestDetail, Catalog, HealthResponse, SecurityAlert, SecurityStats, SecurityResult, ApiKeyInfo, BudgetConfig, BudgetUsage, SecurityScan, LabelStats, PIIStats, PIIEvent, PIIConfig, MediaEndpoint } from '../types'
 
 // API base URL - gateway server
 export const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8001'
@@ -213,5 +213,51 @@ export async function updatePIIConfig(body: { scrub_enabled: boolean; scrub_rout
     throw new Error(data?.error?.message || data?.detail?.[0]?.msg || `Request failed (${res.status})`)
   }
   return data
+}
+
+// ---- Media (voice) ----
+
+export async function fetchMediaCatalog(refresh = false): Promise<MediaEndpoint[]> {
+  const res = refresh
+    ? await apiFetch(`${API_BASE}/api/media/catalog/refresh`, { method: 'POST' })
+    : await apiFetch(`${API_BASE}/api/media/catalog`)
+  if (!res.ok) return []
+  return (await res.json()).endpoints
+}
+
+async function errorMessage(res: Response): Promise<string> {
+  const data = await res.json().catch(() => null)
+  return data?.error?.message || data?.detail?.[0]?.msg || `Request failed (${res.status})`
+}
+
+/** Text-to-speech through the gateway's real route (audited and metered). */
+export async function synthesizeSpeech(body: Record<string, unknown>): Promise<{ audio: Blob; ms: number }> {
+  const started = performance.now()
+  const res = await apiFetch(`${API_BASE}/v1/audio/speech`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) throw new Error(await errorMessage(res))
+  const audio = await res.blob()
+  return { audio, ms: performance.now() - started }
+}
+
+/** Speech-to-text (task 'transcriptions' or 'translations') through the gateway. */
+export async function transcribeAudio(
+  task: 'transcriptions' | 'translations',
+  file: Blob,
+  filename: string,
+  fields: Record<string, string>,
+): Promise<{ text: string; contentType: string; ms: number }> {
+  const form = new FormData()
+  form.append('file', file, filename)
+  for (const [key, value] of Object.entries(fields)) {
+    if (value) form.append(key, value)
+  }
+  const started = performance.now()
+  const res = await apiFetch(`${API_BASE}/v1/audio/${task}`, { method: 'POST', body: form })
+  if (!res.ok) throw new Error(await errorMessage(res))
+  return { text: await res.text(), contentType: res.headers.get('content-type') || '', ms: performance.now() - started }
 }
 

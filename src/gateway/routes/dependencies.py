@@ -489,6 +489,11 @@ async def authenticate_with_environment(
             rate_limit_rpm=anonymous.rate_limit_rpm,
         )
 
+    # The admin key can do anything a client key can (D-002), including
+    # inference: the dashboard playground uses it. Audited as client "admin".
+    if _is_admin_key(api_key):
+        return AuthResult(client_id=ADMIN_CLIENT_ID)
+
     # Validate key if provided (pass db_engine for DB-backed key lookup)
     db_engine = getattr(request.app.state, "db_engine", None)
     key_info = await validate_api_key(api_key, config, db_engine)
@@ -564,7 +569,10 @@ async def resolve_access_scope(request: Request, auth: AuthResult, model: str | 
     environment = resolve_environment(request, auth)
     if environment is not None:
         updates["environment"] = environment.name
-        bare_model = Dispatcher.parse_provider_from_model(model)[1] or ""
+        endpoint_names = {ep.name for ep in get_config(request).endpoints} | {
+            p.name for p in get_config(request).providers
+        }
+        bare_model = Dispatcher.parse_provider_from_model(model, endpoint_names)[1] or ""
         # model None = listing (e.g. GET /v1/audio/voices): scope only, no model check
         if model is not None and not model_approved_in_environment(bare_model, environment):
             raise PolicyError(

@@ -22,7 +22,6 @@ from gateway.dispatch.dispatcher import Dispatcher
 from gateway.dispatch.registry import ProviderRegistry
 from gateway.errors import (
     AmbiguousModelError,
-    EndpointNotFoundError,
     NoProviderError,
 )
 from gateway.models.common import ProviderType, TaskType
@@ -287,19 +286,23 @@ class TestDispatcherResolution:
         await registry.close()
 
     @pytest.mark.asyncio
-    async def test_step1_explicit_endpoint_not_found(self, endpoints_config, sample_request):
-        """Step 1: Explicit non-existent endpoint raises error."""
+    async def test_step1_unknown_prefix_is_part_of_model_name(
+        self, endpoints_config, sample_request
+    ):
+        """A prefix that isn't a configured endpoint is part of the model name.
+
+        It used to raise EndpointNotFoundError, which broke every Hugging Face
+        style model ID ("meta-llama/Llama-3.1-8B-Instruct")."""
         registry = ProviderRegistry(endpoints_config)
         await registry.initialize()
 
         dispatcher = Dispatcher(registry, endpoints_config.resolution)
 
-        request = sample_request.model_copy(update={"model": "nonexistent/phi4:14b"})
+        request = sample_request.model_copy(update={"model": "meta-llama/Llama-3.1-8B-Instruct"})
+        endpoint, model = dispatcher.resolve_endpoint(request)
 
-        with pytest.raises(EndpointNotFoundError) as exc_info:
-            dispatcher.resolve_endpoint(request)
-
-        assert "nonexistent" in str(exc_info.value)
+        assert model == "meta-llama/Llama-3.1-8B-Instruct"
+        assert endpoint == "gpunode-ollama"  # first by priority
 
         await registry.close()
 

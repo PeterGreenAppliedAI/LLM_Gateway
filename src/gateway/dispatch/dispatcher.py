@@ -19,7 +19,7 @@ Per API Error Handling Architecture:
 
 import fnmatch
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Collection
 from dataclasses import dataclass, field
 
 from gateway.config import (
@@ -103,40 +103,33 @@ class Dispatcher:
         self._resolution_config = resolution_config or ResolutionConfig()
 
     @classmethod
-    def parse_provider_from_model(cls, model: str | None) -> tuple[str | None, str | None]:
-        """Parse provider and model from model string.
+    def parse_provider_from_model(
+        cls, model: str | None, endpoints: Collection[str]
+    ) -> tuple[str | None, str | None]:
+        """Split an "endpoint/model" pin, if the prefix names a configured endpoint.
 
-        Supports formats:
-        - "provider/model" → ("provider", "model")
-        - "model" → (None, "model")
-        - None → (None, None)
+        - "gpu-node/llama3.1:8b" with endpoint gpu-node → ("gpu-node", "llama3.1:8b")
+        - "meta-llama/Llama-3.1-8B-Instruct" → (None, the whole string)
+        - "model" → (None, "model"); None → (None, None)
 
-        Args:
-            model: Model string from request
-
-        Returns:
-            Tuple of (provider_name, model_name)
-
-        Security:
-            Validates provider name against SafeIdentifier pattern to prevent
-            log injection and metric label injection attacks.
+        Only a configured endpoint name makes a pin: Hugging Face model IDs
+        ("Qwen/Qwen2.5-7B", "Systran/faster-whisper-small") and Ollama
+        namespaced models ("user/model") contain a slash too, and used to be
+        misread as pins to an endpoint that doesn't exist.
         """
         if not model:
             return None, None
 
         match = cls.MODEL_PROVIDER_PATTERN.match(model)
         if match:
-            provider_hint = match.group(1)
-            model_name = match.group(2)
-
-            # Security: Validate provider name from user input
-            if not SAFE_IDENTIFIER_PATTERN.match(provider_hint):
-                # Invalid provider name - treat as unprefixed model
-                return None, model
-
-            return provider_hint, model_name
-
+            provider_hint, model_name = match.group(1), match.group(2)
+            # SAFE_IDENTIFIER check keeps user input out of logs/metric labels
+            if SAFE_IDENTIFIER_PATTERN.match(provider_hint) and provider_hint in endpoints:
+                return provider_hint, model_name
         return None, model
+
+    def split_pin(self, model: str | None) -> tuple[str | None, str | None]:
+        return self.parse_provider_from_model(model, self._registry.list_providers())
 
     def resolve_provider(self, request: InternalRequest) -> tuple[str, str]:
         """Resolve which provider and model to use for a request.
@@ -156,7 +149,7 @@ class Dispatcher:
             DispatchError: If no provider can be resolved
         """
         # Try to parse from model string
-        provider_hint, model_name = self.parse_provider_from_model(request.model)
+        provider_hint, model_name = self.split_pin(request.model)
 
         # Use explicit hint if found
         if provider_hint:
@@ -235,7 +228,7 @@ class Dispatcher:
             NoProviderError: If no endpoint can be resolved
         """
         # Step 1: Check for explicit endpoint/model syntax
-        endpoint_hint, model_name = self.parse_provider_from_model(request.model)
+        endpoint_hint, model_name = self.split_pin(request.model)
 
         if endpoint_hint:
             # Validate the endpoint exists
@@ -367,7 +360,7 @@ class Dispatcher:
         # there and ONLY there. Falling back elsewhere violates the pin and
         # masks the pinned endpoint's real error behind an unrelated one
         # (e.g. a 500 "model failed to load" hidden by a fallback's 404).
-        pinned = self.parse_provider_from_model(request.model)[0] is not None
+        pinned = self.split_pin(request.model)[0] is not None
 
         provider_name, model_name = self.resolve_provider(request)
         self._require_permitted(request, provider_name)
@@ -623,7 +616,7 @@ class Dispatcher:
         """
         from gateway.models.common import FinishReason
 
-        pinned = self.parse_provider_from_model(request.model)[0] is not None
+        pinned = self.split_pin(request.model)[0] is not None
 
         provider_name, model_name = self.resolve_provider(request)
         self._require_permitted(request, provider_name)

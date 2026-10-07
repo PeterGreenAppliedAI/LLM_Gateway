@@ -66,7 +66,9 @@ class MediaDispatcher:
             PolicyError: Capable endpoints exist but the key/environment allows none.
             NoProviderError: No endpoint declares the capability.
         """
-        pinned, _ = Dispatcher.parse_provider_from_model(request.model)
+        pinned, _ = Dispatcher.parse_provider_from_model(
+            request.model, self._registry.list_providers()
+        )
         capable = [
             name
             for name in self._registry.list_providers()
@@ -90,7 +92,10 @@ class MediaDispatcher:
         if pinned:
             return permitted
 
-        model = Dispatcher.parse_provider_from_model(request.model)[1] or ""
+        model = (
+            Dispatcher.parse_provider_from_model(request.model, self._registry.list_providers())[1]
+            or ""
+        )
         with_model = set(self._registry.get_endpoints_with_model(model)) if model else set()
         priority = {name: i for i, name in enumerate(self._resolution.endpoint_priority)}
 
@@ -119,7 +124,11 @@ class MediaDispatcher:
             ProviderError: Upstream 4xx (passed through, not retried elsewhere).
             AllProvidersUnavailableError: Every candidate failed retryably.
         """
-        model = Dispatcher.parse_provider_from_model(request.model)[1] or request.model or ""
+        model = (
+            Dispatcher.parse_provider_from_model(request.model, self._registry.list_providers())[1]
+            or request.model
+            or ""
+        )
         attempted: list[str] = []
         errors: list[str] = []
 

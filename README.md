@@ -93,7 +93,7 @@ If you just need to route requests to different providers, LiteLLM works. If you
 
 ## Dashboard
 
-React + TypeScript monitoring UI with four tabs:
+React + TypeScript monitoring UI with five tabs:
 
 <!-- TODO: Take screenshots and drop into docs/screenshots/ -->
 <!-- ![Dashboard Tab](docs/screenshots/dashboard-tab.png) -->
@@ -105,6 +105,7 @@ React + TypeScript monitoring UI with four tabs:
 - **Security** — Guard model verdicts, regex vs guard comparison, PII scrubbing controls (admin, applied live) and detection audit with hash-only event log, security scan labeling with bulk actions and training data export
 - **Keys & Budgets** — API key management (create/revoke with model/endpoint policies), token budget tiers, model-to-tier assignments, per-key usage tracking
 - **Requests** — Full audit log with click-to-expand request/response details, token counts, latency, streaming metrics
+- **Voice** — Voice engines (health, profile, voices, models), a text-to-speech playground (voice picker filtered by language/gender, Kokoro voice blending with weights, speed within the engine's range, play/download) and speech-to-text (upload or record, model, language or auto-detect, output format). Playground requests use the real routes, so they are audited and metered
 
 ```bash
 cd dashboard && npm install && npx vite --host 0.0.0.0 --port 5174

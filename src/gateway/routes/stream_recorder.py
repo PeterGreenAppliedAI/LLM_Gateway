@@ -116,8 +116,11 @@ class StreamRecorder:
         total_tokens = prompt_tokens + completion_tokens
         if self._enforcer is not None and total_tokens > 0:
             try:
-                # Budget tiers key on the bare model name, not endpoint/model
-                bare_model = Dispatcher.parse_provider_from_model(self._model)[1] or self._model
+                # Budget tiers key on the model name without an endpoint pin
+                pin = f"{self.provider}/" if self.provider else None
+                bare_model = (
+                    self._model[len(pin) :] if pin and self._model.startswith(pin) else self._model
+                )
                 self._enforcer.record_token_usage(self._request.client_id, bare_model, total_tokens)
             except Exception:
                 logger.exception("Failed to record streamed token usage")

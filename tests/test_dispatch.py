@@ -244,9 +244,10 @@ class TestDispatcher:
     def test_parse_provider_from_model_with_prefix(self):
         """Parse provider from 'provider/model' format."""
         registry = MagicMock()
+        registry.list_providers.return_value = ["ollama", "vllm"]
         dispatcher = Dispatcher(registry)
 
-        provider, model = dispatcher.parse_provider_from_model("ollama/llama3.2")
+        provider, model = dispatcher.split_pin("ollama/llama3.2")
 
         assert provider == "ollama"
         assert model == "llama3.2"
@@ -254,9 +255,10 @@ class TestDispatcher:
     def test_parse_provider_from_model_without_prefix(self):
         """Model without provider prefix returns None provider."""
         registry = MagicMock()
+        registry.list_providers.return_value = ["ollama", "vllm"]
         dispatcher = Dispatcher(registry)
 
-        provider, model = dispatcher.parse_provider_from_model("llama3.2")
+        provider, model = dispatcher.split_pin("llama3.2")
 
         assert provider is None
         assert model == "llama3.2"
@@ -264,9 +266,10 @@ class TestDispatcher:
     def test_parse_provider_from_model_none(self):
         """None model returns None for both."""
         registry = MagicMock()
+        registry.list_providers.return_value = ["ollama", "vllm"]
         dispatcher = Dispatcher(registry)
 
-        provider, model = dispatcher.parse_provider_from_model(None)
+        provider, model = dispatcher.split_pin(None)
 
         assert provider is None
         assert model is None
@@ -274,12 +277,28 @@ class TestDispatcher:
     def test_parse_provider_complex_model_name(self):
         """Parse works with complex model names."""
         registry = MagicMock()
+        registry.list_providers.return_value = ["ollama", "vllm"]
         dispatcher = Dispatcher(registry)
 
-        provider, model = dispatcher.parse_provider_from_model("vllm/meta-llama/Llama-3.1-8B")
+        provider, model = dispatcher.split_pin("vllm/meta-llama/Llama-3.1-8B")
 
         assert provider == "vllm"
         assert model == "meta-llama/Llama-3.1-8B"
+
+    def test_slash_in_model_name_is_not_a_pin(self):
+        """Regression: Hugging Face IDs and Ollama namespaced models contain a
+        slash; only a configured endpoint name makes a prefix a pin."""
+        registry = MagicMock()
+        registry.list_providers.return_value = ["ollama", "vllm"]
+        dispatcher = Dispatcher(registry)
+
+        for name in (
+            "meta-llama/Llama-3.1-8B-Instruct",
+            "Systran/faster-whisper-small",
+            "huihui_ai/qwen3:8b",
+        ):
+            assert dispatcher.split_pin(name) == (None, name)
+        assert dispatcher.split_pin("vllm/Qwen/Qwen2.5-7B") == ("vllm", "Qwen/Qwen2.5-7B")
 
     def test_parse_provider_rejects_invalid_provider_name(self):
         """Security: Invalid provider names are rejected to prevent injection.
@@ -299,7 +318,7 @@ class TestDispatcher:
         ]
 
         for malicious_model in test_cases:
-            provider, model = dispatcher.parse_provider_from_model(malicious_model)
+            provider, model = dispatcher.split_pin(malicious_model)
             # Should treat as unprefixed model (provider=None)
             assert provider is None, f"Should reject: {malicious_model}"
             assert model == malicious_model

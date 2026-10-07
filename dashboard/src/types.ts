@@ -224,3 +224,38 @@ export interface PIIEvent {
   was_scrubbed: boolean
   scan_time_ms: number | null
 }
+
+// ---- Media (voice) catalog: GET /api/media/catalog ----
+
+export interface ParamSpec {
+  type: 'number' | 'integer' | 'boolean' | 'enum' | 'string'
+  min?: number
+  max?: number
+  values?: (string | number)[]
+  default?: string | number | boolean
+}
+
+export interface MediaVoice {
+  id: string
+  name: string
+  language?: string
+  gender?: string
+}
+
+export interface MediaEndpoint {
+  endpoint: string
+  capabilities: ('tts' | 'stt' | 'image' | 'video')[]
+  healthy: boolean
+  profile: string | null
+  description: string
+  models: { id: string; task?: string }[]
+  voices: MediaVoice[]
+  voices_source: 'engine' | 'config' | null
+  blending: boolean
+  tts_params: Record<string, ParamSpec>
+  stt_params: Record<string, ParamSpec>
+  stt_languages: string[]
+  fetched_at: string | null
+  error: string | null
+}
+

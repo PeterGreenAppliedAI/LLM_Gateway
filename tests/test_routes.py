@@ -137,6 +137,11 @@ class TestHealthCheck:
         """Health check shows provider status."""
         # Setup mock registry
         mock_registry = MagicMock(spec=ProviderRegistry)
+        # Note: the get_dispatcher patch below has no effect (FastAPI captured the
+        # real dependency at import); the real dispatcher runs on this registry
+        mock_registry.list_providers.return_value = ["ollama", "vllm"]
+        mock_registry.get_endpoints_with_model.return_value = []
+        mock_registry.get_default_provider.return_value = "ollama"
         mock_registry.list_providers.return_value = ["ollama"]
         mock_health = MagicMock()
         mock_health.status = HealthStatus.HEALTHY
@@ -181,6 +186,11 @@ class TestModelsList:
         """List models with no registry returns empty list."""
         # Create empty registry
         mock_registry = MagicMock(spec=ProviderRegistry)
+        # Note: the get_dispatcher patch below has no effect (FastAPI captured the
+        # real dependency at import); the real dispatcher runs on this registry
+        mock_registry.list_providers.return_value = ["ollama", "vllm"]
+        mock_registry.get_endpoints_with_model.return_value = []
+        mock_registry.get_default_provider.return_value = "ollama"
         mock_registry.list_providers.return_value = []
         app.state.registry = mock_registry
 
@@ -211,6 +221,11 @@ class TestModelsList:
         )
 
         mock_registry = MagicMock(spec=ProviderRegistry)
+        # Note: the get_dispatcher patch below has no effect (FastAPI captured the
+        # real dependency at import); the real dispatcher runs on this registry
+        mock_registry.list_providers.return_value = ["ollama", "vllm"]
+        mock_registry.get_endpoints_with_model.return_value = []
+        mock_registry.get_default_provider.return_value = "ollama"
         mock_registry.list_providers.return_value = ["ollama"]
         mock_registry.is_healthy.return_value = True
         mock_registry.get.return_value = mock_adapter
@@ -238,6 +253,11 @@ class TestAuthentication:
     def test_no_auth_required_when_disabled(self, client: TestClient, app: FastAPI):
         """No auth required when auth is disabled."""
         mock_registry = MagicMock(spec=ProviderRegistry)
+        # Note: the get_dispatcher patch below has no effect (FastAPI captured the
+        # real dependency at import); the real dispatcher runs on this registry
+        mock_registry.list_providers.return_value = ["ollama", "vllm"]
+        mock_registry.get_endpoints_with_model.return_value = []
+        mock_registry.get_default_provider.return_value = "ollama"
         mock_registry.list_providers.return_value = []
         app.state.registry = mock_registry
 
@@ -249,6 +269,11 @@ class TestAuthentication:
     ):
         """Auth is optional - requests without key use 'default' client."""
         mock_registry = MagicMock(spec=ProviderRegistry)
+        # Note: the get_dispatcher patch below has no effect (FastAPI captured the
+        # real dependency at import); the real dispatcher runs on this registry
+        mock_registry.list_providers.return_value = ["ollama", "vllm"]
+        mock_registry.get_endpoints_with_model.return_value = []
+        mock_registry.get_default_provider.return_value = "ollama"
         mock_registry.list_providers.return_value = []
         app_with_auth.state.registry = mock_registry
 
@@ -259,6 +284,11 @@ class TestAuthentication:
     def test_auth_with_bearer_token(self, auth_client: TestClient, app_with_auth: FastAPI):
         """Auth with Bearer token works."""
         mock_registry = MagicMock(spec=ProviderRegistry)
+        # Note: the get_dispatcher patch below has no effect (FastAPI captured the
+        # real dependency at import); the real dispatcher runs on this registry
+        mock_registry.list_providers.return_value = ["ollama", "vllm"]
+        mock_registry.get_endpoints_with_model.return_value = []
+        mock_registry.get_default_provider.return_value = "ollama"
         mock_registry.list_providers.return_value = []
         app_with_auth.state.registry = mock_registry
 
@@ -271,6 +301,11 @@ class TestAuthentication:
     def test_auth_with_x_api_key(self, auth_client: TestClient, app_with_auth: FastAPI):
         """Auth with X-API-Key header works."""
         mock_registry = MagicMock(spec=ProviderRegistry)
+        # Note: the get_dispatcher patch below has no effect (FastAPI captured the
+        # real dependency at import); the real dispatcher runs on this registry
+        mock_registry.list_providers.return_value = ["ollama", "vllm"]
+        mock_registry.get_endpoints_with_model.return_value = []
+        mock_registry.get_default_provider.return_value = "ollama"
         mock_registry.list_providers.return_value = []
         app_with_auth.state.registry = mock_registry
 
@@ -485,6 +520,11 @@ class TestRouteDebug:
         mock_dispatcher.resolve_provider.return_value = ("ollama", "llama3.2")
 
         mock_registry = MagicMock(spec=ProviderRegistry)
+        # Note: the get_dispatcher patch below has no effect (FastAPI captured the
+        # real dependency at import); the real dispatcher runs on this registry
+        mock_registry.list_providers.return_value = ["ollama", "vllm"]
+        mock_registry.get_endpoints_with_model.return_value = []
+        mock_registry.get_default_provider.return_value = "ollama"
         mock_registry.is_healthy.return_value = True
         mock_registry.get_fallback_chain.return_value = ["vllm"]
         app.state.registry = mock_registry
@@ -511,6 +551,11 @@ class TestRouteDebug:
         mock_dispatcher.resolve_provider.return_value = ("ollama", "llama3.2")
 
         mock_registry = MagicMock(spec=ProviderRegistry)
+        # Note: the get_dispatcher patch below has no effect (FastAPI captured the
+        # real dependency at import); the real dispatcher runs on this registry
+        mock_registry.list_providers.return_value = ["ollama", "vllm"]
+        mock_registry.get_endpoints_with_model.return_value = []
+        mock_registry.get_default_provider.return_value = "ollama"
         mock_registry.is_healthy.return_value = False
         mock_registry.get_fallback_chain.return_value = ["vllm"]
         app.state.registry = mock_registry
@@ -554,6 +599,11 @@ class TestProviderManagement:
         )
 
         mock_registry = MagicMock(spec=ProviderRegistry)
+        # Note: the get_dispatcher patch below has no effect (FastAPI captured the
+        # real dependency at import); the real dispatcher runs on this registry
+        mock_registry.list_providers.return_value = ["ollama", "vllm"]
+        mock_registry.get_endpoints_with_model.return_value = []
+        mock_registry.get_default_provider.return_value = "ollama"
         mock_health = MagicMock()
         mock_health.status = HealthStatus.HEALTHY
         mock_registry.get_health.return_value = mock_health
@@ -573,6 +623,11 @@ class TestProviderManagement:
     def test_check_provider_health(self, app: FastAPI, client: TestClient):
         """Force provider health check."""
         mock_registry = MagicMock(spec=ProviderRegistry)
+        # Note: the get_dispatcher patch below has no effect (FastAPI captured the
+        # real dependency at import); the real dispatcher runs on this registry
+        mock_registry.list_providers.return_value = ["ollama", "vllm"]
+        mock_registry.get_endpoints_with_model.return_value = []
+        mock_registry.get_default_provider.return_value = "ollama"
         mock_registry.list_providers.return_value = ["ollama"]
         mock_registry.check_health = AsyncMock(return_value=HealthStatus.HEALTHY)
         app.state.registry = mock_registry
@@ -587,6 +642,11 @@ class TestProviderManagement:
     def test_check_provider_health_not_found(self, app: FastAPI, client: TestClient):
         """Health check for unknown provider returns 404."""
         mock_registry = MagicMock(spec=ProviderRegistry)
+        # Note: the get_dispatcher patch below has no effect (FastAPI captured the
+        # real dependency at import); the real dispatcher runs on this registry
+        mock_registry.list_providers.return_value = ["ollama", "vllm"]
+        mock_registry.get_endpoints_with_model.return_value = []
+        mock_registry.get_default_provider.return_value = "ollama"
         mock_registry.list_providers.return_value = ["ollama"]
         app.state.registry = mock_registry
 
