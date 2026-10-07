@@ -34,6 +34,7 @@ from gateway.errors import (
     ProviderError,
     ValidationError,
 )
+from gateway.models.common import TaskType
 from gateway.models.internal import InternalRequest
 from gateway.observability import get_logger
 from gateway.providers.streaming import upstream_http_error
@@ -73,9 +74,15 @@ class UpstreamMedia:
 
 
 class MediaDispatcher:
-    def __init__(self, registry: ProviderRegistry, resolution: ResolutionConfig | None = None):
+    def __init__(
+        self,
+        registry: ProviderRegistry,
+        resolution: ResolutionConfig | None = None,
+        endpoint_allowed: Callable[[TaskType, str], bool] | None = None,
+    ):
         self._registry = registry
         self._resolution = resolution or ResolutionConfig()
+        self._endpoint_allowed = endpoint_allowed  # task/endpoint policy (D-049)
 
     def candidates(self, capability: MediaCapability, request: InternalRequest) -> list[str]:
         """Endpoints to try, in order.
@@ -108,6 +115,14 @@ class MediaDispatcher:
                 message=f"No {capability} endpoint is allowed for this API key or environment",
                 code=ErrorCode.ENDPOINT_NOT_ALLOWED,
             )
+        if self._endpoint_allowed is not None:
+            permitted = [n for n in permitted if self._endpoint_allowed(request.task, n)]
+            if not permitted:
+                raise PolicyError(
+                    message=f"No {capability} endpoint is allowed for "
+                    f"{request.task.value} requests",
+                    code=ErrorCode.ENDPOINT_NOT_ALLOWED,
+                )
         if pinned:
             return permitted
 

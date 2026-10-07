@@ -236,3 +236,73 @@ async def test_streamed_request_settles_its_reservation():
     assert tracker._reservations == {}
     assert tracker.get_budget_state("default").tokens_used == 7  # actual, not the 500 estimate
     await registry.close()
+
+
+# =============================================================================
+# Second review: admission must reserve every generation, not one
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_n_choices_reserve_n_generations():
+    """n=8 x max_tokens 80 against a 100-token budget returned 200 and charged 648."""
+    engine = SlowEngine()
+    app, registry = await _app(engine, limit=100)
+    transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 1))
+    body = {"model": "m", "n": 8, "max_tokens": 80, "messages": [{"role": "user", "content": "hi"}]}
+    async with httpx.AsyncClient(transport=transport, base_url="http://gw") as http:
+        resp = await http.post("/v1/chat/completions", json=body)
+    assert resp.status_code != 200
+    assert engine.calls == 0  # refused before anything was dispatched
+    assert app.state.enforcer.token_budget.get_budget_state("default").tokens_used == 0
+    await registry.close()
+
+
+@pytest.mark.asyncio
+async def test_n_choices_within_budget_are_admitted():
+    engine = SlowEngine()
+    app, registry = await _app(engine, limit=1_000)
+    transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 1))
+    body = {"model": "m", "n": 3, "max_tokens": 80, "messages": [{"role": "user", "content": "hi"}]}
+    async with httpx.AsyncClient(transport=transport, base_url="http://gw") as http:
+        resp = await http.post("/v1/chat/completions", json=body)
+    assert resp.status_code == 200
+    assert engine.calls == 3
+    tracker = app.state.enforcer.token_budget
+    assert tracker.get_budget_state("default").tokens_used == 30  # settled: 3 x 10 actual
+    assert tracker._reservations == {}
+    await registry.close()
+
+
+def test_batched_completions_reserve_every_prompt():
+    from gateway.models.common import TaskType
+    from gateway.models.internal import InternalRequest
+
+    enforcer = PolicyEnforcer(
+        PolicyConfig(
+            token_budget=TokenBudgetConfig(
+                enabled=True, default_daily_limit=100_000, default_cost_multiplier=1.0
+            )
+        )
+    )
+    one = InternalRequest(task=TaskType.COMPLETION, model="m", prompt="x" * 40, max_tokens=50)
+    single = enforcer._estimate_tokens(one, 50)
+    asyncio.run(enforcer.enforce(one, rate_limit_key="k", generations=[one] * 6))
+    assert enforcer.token_budget._reservations[one.request_id].raw == 6 * single
+
+
+def test_content_part_text_counts_toward_the_estimate():
+    from gateway.models.common import TaskType
+    from gateway.models.internal import InternalRequest, Message, MessageRole
+
+    enforcer = PolicyEnforcer(PolicyConfig())
+    parts = [
+        {"type": "text", "text": "y" * 400},
+        {"type": "image_url", "image_url": {"url": "data:"}},
+    ]
+    request = InternalRequest(
+        task=TaskType.CHAT,
+        model="m",
+        messages=[Message(role=MessageRole.USER, content_parts=parts)],
+    )
+    assert enforcer._estimate_tokens(request, 1) >= 100  # the parts' text, not 0

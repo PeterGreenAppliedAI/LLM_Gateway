@@ -152,6 +152,18 @@ endpoints:
   #   profile: speaches        # Whisper language list for the dashboard
 
 # =============================================================================
+# Task/endpoint policy (D-049)
+# =============================================================================
+# Which endpoints may serve a task, enforced wherever the gateway picks an
+# endpoint (fallback and endpoint/model pins included). Example: keep
+# embeddings on-prem while chat may overflow to a cloud endpoint.
+# task_endpoints:
+#   - task: embeddings
+#     allowed_endpoints: [gpu-node-1, gpu-node-2]
+#   - task: chat
+#     denied_endpoints: [experimental-box]
+
+# =============================================================================
 # Environments
 # Control which endpoints and models are available
 # =============================================================================

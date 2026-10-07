@@ -126,20 +126,26 @@ async def get_registry(request: Request) -> ProviderRegistry:
     return registry
 
 
-def get_dispatcher(
-    request: Request, registry: Annotated[ProviderRegistry, Depends(get_registry)]
-) -> Dispatcher:
-    """Get dispatcher instance with resolution config."""
-    config = get_config(request)
-    return Dispatcher(registry, resolution_config=config.resolution)
-
-
 def get_enforcer(request: Request) -> PolicyEnforcer:
     """The app's policy enforcer (built at startup; built here if absent, e.g. in tests)."""
     enforcer = getattr(request.app.state, "enforcer", None)
     if enforcer is None:
         enforcer = build_enforcer(request.app)
     return enforcer
+
+
+def get_dispatcher(
+    request: Request,
+    registry: Annotated[ProviderRegistry, Depends(get_registry)],
+    enforcer: Annotated[PolicyEnforcer, Depends(get_enforcer)],
+) -> Dispatcher:
+    """Get dispatcher instance with resolution config and the task/endpoint policy."""
+    config = get_config(request)
+    return Dispatcher(
+        registry,
+        resolution_config=config.resolution,
+        endpoint_allowed=enforcer.check_provider_allowed,
+    )
 
 
 def build_enforcer(app) -> PolicyEnforcer:
@@ -152,7 +158,7 @@ def build_enforcer(app) -> PolicyEnforcer:
         policy_config = config.policy
     else:
         # Bridge gateway.yaml rate_limits + token_budgets into PolicyConfig
-        from gateway.policy.enforcer import PolicyConfig
+        from gateway.policy.enforcer import PolicyConfig, TaskProviderPolicy
         from gateway.policy.rate_limiter import RateLimitConfig as PolicyRateLimitConfig
         from gateway.policy.token_budget import (
             ModelAssignment,
@@ -192,6 +198,14 @@ def build_enforcer(app) -> PolicyEnforcer:
                 max_tokens_per_request=config.rate_limits.max_tokens_per_request,
             ),
             token_budget=budget_config,
+            task_policies=[
+                TaskProviderPolicy(
+                    task=t.task,
+                    allowed_providers=set(t.allowed_endpoints),
+                    denied_providers=set(t.denied_endpoints),
+                )
+                for t in config.task_endpoints
+            ],
         )
     shared = getattr(app.state, "shared_state", None)
     enforcer = PolicyEnforcer(

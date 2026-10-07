@@ -12,6 +12,7 @@ Per PRD Section 10:
 - Block execution if provider unhealthy
 """
 
+from collections.abc import Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass
 
@@ -97,6 +98,19 @@ class PolicyCheckResult:
     violation_code: str | None = None
 
 
+def _text_length(content) -> int:
+    """Characters of text in message content: a string or content parts."""
+    if isinstance(content, str):
+        return len(content)
+    if isinstance(content, list):
+        return sum(
+            len(part.get("text") or "")
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "text"
+        )
+    return 0
+
+
 class PolicyEnforcer:
     """Coordinates policy enforcement across all policy types.
 
@@ -143,6 +157,8 @@ class PolicyEnforcer:
         allowed_models: list[str] | None = None,
         allowed_endpoints: list[str] | None = None,
         rate_limit_rpm: int | None = None,
+        generations: Sequence[InternalRequest] | None = None,
+        estimated_tokens: int | None = None,
     ) -> PolicyCheckResult:
         """Enforce all policies on a request.
 
@@ -153,6 +169,11 @@ class PolicyEnforcer:
             allowed_models: Per-key model allowlist (from API key)
             allowed_endpoints: Per-key endpoint allowlist (from API key)
             rate_limit_rpm: Per-key rate limit override (from API key)
+            generations: Every upstream request this one will be dispatched as
+                (n choices, a completions prompt list). The budget reservation
+                covers all of them; default: just `request`.
+            estimated_tokens: The cost to reserve, when the caller knows it
+                better than a text estimate (media, metered in its own units).
 
         Returns:
             PolicyCheckResult with enforcement details
@@ -219,7 +240,12 @@ class PolicyEnforcer:
                     reservation_id=request.request_id,
                     key=key,
                     model=request.model or "",
-                    estimated_tokens=self._estimate_tokens(request, validated_max_tokens),
+                    estimated_tokens=estimated_tokens
+                    if estimated_tokens is not None
+                    else sum(
+                        self._estimate_tokens(g, validated_max_tokens)
+                        for g in (generations or [request])
+                    ),
                     daily_limit_override=None,  # TODO: per-key override from DB
                 )
                 holds = _BUDGET_HOLDS.get()
@@ -359,7 +385,7 @@ class PolicyEnforcer:
         """
         chars = 0
         for message in request.messages or []:
-            chars += len(message.content or "")
+            chars += len(message.content or "") or _text_length(message.content_parts)
         for item in request.input_data or []:
             chars += len(item) if isinstance(item, str) else 0
         chars += len(getattr(request, "prompt", None) or "")

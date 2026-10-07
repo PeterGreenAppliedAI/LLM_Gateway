@@ -1,12 +1,17 @@
 # Client Deployment Readiness Assessment
 
-_Last reviewed: 2026-10-07, on `docs/readiness-gap-report` (opened as a PR into `main`)._
+_Last reviewed: 2026-10-07, after a second external review of `main` at `1e74243`._
 _Decisions behind each fix: [DECISIONS.md](DECISIONS.md)._
 
 This report checks the code against what a production gateway needs to handle real-time
-traffic. This revision follows an external review of `4390209`. The review found six real
-defects (D-041 to D-044), Windows failures (D-045), and places where this report said
-"fixed" more broadly than the evidence supported.
+traffic. Two external reviews shaped it:
+- **First review, of `4390209`:** six defects (D-041 to D-044), Windows failures (D-045), and
+  "fixed" claims broader than the evidence.
+- **Second review, of `1e74243`:** six more gaps (D-047 to D-051). Budgets could be overspent
+  by multi-choice, batched and media requests. Long inputs bypassed PII scrubbing. Older
+  databases weren't upgraded. PII audit events could be missing or point at the wrong
+  input. Task/endpoint policy was never applied. The review also found that this report
+  overstated the budget and privacy guarantees; the verdict below is corrected.
 
 ## How to read this report
 
@@ -25,7 +30,7 @@ A **Fixed** row names four things, so the claim can be checked rather than trust
   On Linux, CI fails rather than skips when PostgreSQL or Redis is missing
   (`GATEWAY_TEST_REQUIRE_SERVICES=1`, D-045).
 
-**Test baseline:** 914 passed, 0 skipped, run locally with PostgreSQL and Redis required
+**Test baseline:** 952 passed, 0 skipped, run locally with PostgreSQL and Redis required
 (Linux, Python 3.13). The CI result on the PR is the authoritative run for 3.11 and 3.12 and
 for Windows.
 
@@ -36,12 +41,22 @@ for Windows.
 
 ## Verdict
 
-**The gateway is ready for single-organization deployments** (Profiles A and B below):
+**Treat the gateway as ready for a controlled pilot:** one organization, a known set of
+clients, an operator watching it. It is not yet ready for broad deployment. What holds, and
+exactly how far:
 
-- every request is authenticated and attributed;
-- budgets and rate limits are enforced, including under concurrency and streaming;
-- the audit trail survives crashes;
-- PII is scrubbed before it reaches engines or storage, where scrubbing is configured.
+- **Authentication and attribution:** every request is authenticated, or comes from a
+  network you allowed, and is attributed to a client.
+- **Budgets are hard limits within one gateway process.** That covers every generation a
+  request asks for (`n`, prompt lists) and media (D-043, D-051). Across several processes,
+  each can admit up to the remaining budget once, because reservations aren't shared yet
+  (section 1).
+- **The audit trail survives crashes** (D-038), and its PII events point at the input they
+  came from (D-048).
+- **PII scrubbing covers whole inputs** (D-050), but it is pattern-based. It detects email
+  addresses, US-format phone numbers, SSNs, card numbers and IPv4 addresses. Names, postal
+  addresses and other identifiers pass through. Don't describe this as "PII is removed".
+- **Older databases are upgraded at startup** (D-047).
 
 **Not ready:**
 - **Multi-tenant (Profile C):** per-tenant views and isolation are still open. D-039 is
@@ -68,6 +83,9 @@ for Windows.
 | Dashboard reads showed every client's traffic to any key | D-002 `a0e31b8` | Same | `test_dashboard_api.py` | All, SQLite + PG |
 | Endpoint allowlist checked the requested endpoint, not the one used; environments never applied | D-003 `0f70f4a` | Default | `test_resolution.py` | All |
 | Budget check passed with `max_tokens` omitted, at exactly the limit, and under concurrency | D-043 `68f5968` | `token_budget.enabled` | `test_budget_reservations.py` | All |
+| Budget reserved one generation for `n` choices or prompt lists (n=8 charged 648 tokens against a 100-token budget) | D-051 `9c811b0` | `token_budget.enabled` | `test_budget_reservations.py` | All |
+| Media admission checked an empty request (400-character speech passed a 10-token budget) | D-051 `9c811b0` | `token_budget.enabled` | `test_audio_routes.py::TestMediaBudgetAdmission` | All |
+| Task/endpoint policy was never applied, and couldn't be configured | D-049 `6c269bf` | `task_endpoints` in gateway.yaml | `test_task_endpoints.py` | All |
 | Budgets and dashboard tier changes reset on restart | D-037 `b6a9bb3` | Default (database) | `test_budget_persistence.py` | All, SQLite + PG |
 | No per-key concurrency limit or batch class | D-034 `22ca369` | `max_concurrent`, `priority` on a key | `test_key_limits.py` | All, SQLite + PG |
 | No way to try a config without minting keys | D-042 `b8e0228` | `GATEWAY_DEV_MODE=true` or `./start-gateway.sh --dev`; `GATEWAY_PROFILE=production` refuses it | `test_access_modes.py::TestTestMode`, `::TestProductionProfile` | All |
@@ -78,7 +96,7 @@ for Windows.
 |-----|-----|-------|--------|
 | P1 | Config-file keys can't carry model, endpoint or RPM limits | `config.py` `ApiKeyConfig` | YAML keys support `max_concurrent` and `priority` (D-034) but not `allowed_models`, `allowed_endpoints` or `rate_limit_rpm`. DB-created keys support all of them. |
 | P1 | No per-key token budget override | `policy/enforcer.py` (`daily_limit_override=None # TODO`) | Every key shares its tier's limit. |
-| P1 | Budget reservations are per process | `policy/token_budget.py` | With several gateway processes sharing a budget, each can admit up to the remaining budget once (D-043, Scope). |
+| P1 | Budget reservations are per process | `policy/token_budget.py` | With several gateway processes sharing a budget, each can admit up to the remaining budget once (D-043, Scope). Needs shared reservations (the optional Redis, D-035) before multi-worker budgets are hard limits. |
 | P2 | CORS `*` with credentials | `settings.py` `cors_origins`, `main.py` | Default `["*"]` together with `allow_credentials=True`. Default it to the dashboard origin. Compose serves the dashboard on the same origin (D-044), so it doesn't need CORS. |
 | P2 | All keyless traffic shares one rate-limit bucket | `policy/rate_limiter.py` | Per-client-IP buckets need trusted proxy headers (section 4). |
 
@@ -121,12 +139,15 @@ for Windows.
 |---|---|---|---|---|
 | Raw PII in audit bodies | D-005 `27645da` | PII detection on, or body storage off (the default) | `test_pii.py`, `test_storage.py` | All, SQLite + PG |
 | Embeddings sent unscrubbed text to the engine | D-041 `df17d9b` | Scrubbing on for the route | `test_wire.py` | All |
+| Text after character 100,000 reached the engine unscrubbed; the email pattern was quadratic (~20 s per 100k hostile characters) | D-050 `477c547` | Scrubbing on for the route | `test_pii.py`, `test_wire.py` | All |
+| PII events missing for content parts; batch events pointed at the wrong input and hash | D-048 `28f3116` | PII detection on | `test_wire.py::TestPIIAuditMapping` | All |
+| Older databases weren't upgraded (`no such column: api_keys.max_concurrent`) | D-047 `ebdf6db` | Default (startup migrates; `gateway-migrate` to do it as a separate step) | `test_migrations.py` | All, SQLite + PG |
 | Security scans kept every prompt, forever | D-041 `df17d9b` | Default (`GATEWAY_SECURITY_STORE_MESSAGES=none`, `GATEWAY_SECURITY_RETENTION_DAYS=90`) | `test_security_store.py` | All |
 | Audit writes failed silently; gateway started without a database | D-006 `eb0e274` | Default (`GATEWAY_DB_REQUIRED=true`) | `test_audit_durability.py` | All, SQLite + PG |
 | Audit rows lost or duplicated on a crash | D-038 `0c7148a`, D-040 `4390209` | Default. `grouped` or `sync` durability also covers power loss (D-038) | `test_intent_log.py` (includes racing drainers) | All, SQLite + PG |
 | Audit intent log broke on Windows (file locks, deleting open files) | D-045 `5b7e7e3` | Default | `test_intent_log.py` on the Windows job | Windows, SQLite |
 | Retention: first cleanup 24 h after boot; one error stopped it for good | D-041 `df17d9b` | Default | — (loop runs at startup and logs errors) | — |
-| Retention: `GATEWAY_DB_RETENTION_DAYS=0` ("keep") was rejected | this revision | Default | `test_settings.py` | All |
+| Retention: `GATEWAY_DB_RETENTION_DAYS=0` ("keep") was rejected | D-045 `973edcf` | Default | `test_settings.py` | All |
 | Compose lost all state on `down`/`up` | D-044 `e065815` | `GATEWAY_ADMIN_API_KEY` (Compose refuses to start without it) | Manual: image build plus `down`/`up` (D-044). Not in CI. | Docker on Linux |
 
 ### Still open
@@ -134,7 +155,7 @@ for Windows.
 | Pri | Gap | Where | Detail |
 |-----|-----|-------|--------|
 | P1 | Security scans dropped silently under load | `security/analyzer.py` `queue_request` | A full queue drops the scan and increments an internal counter only. Expose it as a metric and alert on it. |
-| P1 | PII scrubbing truncates long messages | `security/pii.py` `scan` | Text is scanned up to 100k characters, and the scrubbed text is built from the cut copy. With scrubbing on, the tail of a longer prompt never reaches the model. Stored copies are marked `[TRUNCATED: not scanned for PII]`. Scrub in windows, or reject oversized input. |
+| P1 | PII detection is pattern-based | `security/pii.py` | Email, US phone, SSN, card numbers and IPv4 only. Names, postal addresses, non-US phone formats and free-text identifiers aren't detected. A small classifier model (does this text contain PII: yes/no) in front of the patterns is the proposed next step. |
 | P1 | `usage_daily` never filled automatically | `storage/audit.py` `aggregate_daily_usage` | No scheduler calls it. |
 | P2 | Fallback and routing reason not stored | `storage/schema.py` `audit_log` | `was_fallback` and `attempted_providers` exist on `DispatchResult` but aren't persisted. The operator view needs them (section 5). |
 
@@ -175,10 +196,10 @@ code:
 | | Status | Requires |
 |-|--------|----------|
 | **Solo**: one person, one machine | Ready. | `auth.enabled: false` (local only by default) |
-| **Mode A, local-only** (internal runtimes) | Ready for a single organization. | `auth.enabled: true`, `GATEWAY_ADMIN_API_KEY`, keys per client |
+| **Mode A, local-only** (internal runtimes) | Ready for a controlled pilot in a single organization. | `auth.enabled: true`, `GATEWAY_ADMIN_API_KEY`, keys per client |
 | **Mode B, hybrid** (local plus external fallback) | Not ready: no egress allowlist. Fallback does respect key and environment endpoint restrictions (D-003). | — |
-| **Profile A**: SMB, 1–2 GPU servers, Compose, SQLite | Ready. | `GATEWAY_ADMIN_API_KEY`; scrubbing on for routes that carry PII |
-| **Profile B**: mid-market, several workers, PostgreSQL, per-team keys | Ready, with the section 4 operations gaps. | `GATEWAY_DB_URL` (PostgreSQL), `GATEWAY_REDIS_URL` for more than one process |
+| **Profile A**: SMB, 1–2 GPU servers, Compose, SQLite | Ready for a controlled pilot. | `GATEWAY_ADMIN_API_KEY`; scrubbing on for routes that carry PII |
+| **Profile B**: mid-market, several workers, PostgreSQL, per-team keys | Pilot with one worker per budget, or accept that budgets can overshoot across workers until reservations are shared; plus the section 4 operations gaps. | `GATEWAY_DB_URL` (PostgreSQL), `GATEWAY_REDIS_URL` for more than one process |
 | **Profile C**: MSP, multi-tenant | Not ready. | Tenant isolation (D-039, proposed), per-tenant views |
 
 **Upgrading from before D-042:** keyless clients on other machines (LocalClaw, stock Ollama
@@ -188,11 +209,13 @@ clients) need `auth.anonymous.enabled: true`, with their address in
 
 ## Recommended order
 
-1. ~~**P0: make policy and audit claims true.**~~ Done (D-001 to D-006, D-041 to D-043).
+1. ~~**P0: make policy and audit claims true.**~~ Done (D-001 to D-006, D-041 to D-043,
+   D-047 to D-051).
 2. ~~**Real-time capacity:** circuit breaker, admission and overflow, pool sizing, per-key
    limits, shared state, persisted budgets, intent log, key cache.~~ Done (D-031 to D-040).
-3. **Operations:** `/livez` and `/readyz`, graceful drain, trusted proxies, `X-Request-ID`,
-   the scan-drop metric, windowed PII scrubbing.
+3. **Before broad deployment:** budget reservations shared across workers; `/readyz`
+   returning 503 when not ready (and `/livez`); the security-scan drop counter as a metric;
+   graceful drain; trusted proxies; `X-Request-ID`; a PII classifier alongside the patterns.
 4. **Operator view:** the Needs Attention strip, then routing and fallback detail.
 5. **Tiers:** decide D-039 (Server mode, tenant isolation), then Helm, HA, backup and upgrade
    docs, and the egress allowlist for hybrid mode.

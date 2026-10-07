@@ -1712,3 +1712,151 @@ Each finding below was reproduced before it was fixed. The fixes are D-041 to D-
     it; `finish(timeout)` cancels after the timeout.
   - **Full suite:** 919 passed on 3.11 and on 3.13.
   - **The two failing tests:** 15 runs in a row on 3.11 without a failure.
+
+---
+
+## Second external review of `1e74243`
+
+The reviewer's verdict: a controlled pilot, not yet broad deployment; this report
+overstated the budget and privacy guarantees. Six gaps, each reproduced before it was
+fixed. Their priority order (PII boundaries, budget admission, database upgrades, audit
+accuracy) is the order below.
+
+## D-050: PII scrubbing covers the whole input, and the scan is linear
+
+- **Status:** Implemented, 2026-10-07, `477c547`
+- **Problem:**
+  - With scrubbing on, an email after character 100,000 reached the engine unchanged.
+  - The scanner looked only at a 100k prefix. If the prefix had no matches, the route
+    forwarded the whole original text. If it did, the scrubbed text was built from the cut
+    copy, which dropped the tail.
+- **Why the cap existed, and a second bug:** the email pattern was quadratic.
+  - It allowed unbounded runs of `[A-Za-z0-9._%+-]` before the `@`, and text like `a.a.a.…`
+    has a word boundary at every position. So each of n start positions scanned to the end
+    of the run.
+  - **Measured:** 40k characters took 3.3 s, so a single message at the cap cost about 20 s of
+    CPU on the request path. The cap didn't prevent the slowdown; it only bounded it.
+- **Fix:**
+  - The email pattern is bounded by the standard's own limits: at most 64 characters before
+    the `@`, 253 for the domain and 63 for the top-level label. Every pattern is now linear:
+    1M hostile characters take about 0.2 s.
+  - The cap and the `[TRUNCATED: not scanned for PII]` marker are gone; the whole text is
+    always scanned and scrubbed.
+- **Still true, and now stated wherever PII is described:** detection is pattern-based.
+  Email, US phone, SSN, card numbers and IPv4 are detected; names, postal addresses and other
+  identifiers are not. A small yes/no classifier model in front of the patterns is the
+  proposed next step.
+- **What works now:**
+  - `test_wire.py::test_pii_past_100k_characters_is_scrubbed` checks what the engine
+    receives; it fails on the old code.
+  - `test_pii.py`: the 1M-character hostile scan finishes under 5 s, and 64-character local
+    parts are still found.
+
+## D-051: Budget admission reserves the whole request
+
+- **Status:** Implemented, 2026-10-07, `9c811b0`. Amends D-043.
+- **Problem:**
+  - **Chat with `n`:** `n=8` with `max_tokens=80`, against a 100-token budget, returned 200
+    and charged 648. Admission reserved one generation and dispatched eight.
+  - **Batched completions:** a prompt list × `n` had the same problem.
+  - **Media:** a 400-character speech request passed a 10-token budget and was charged 100
+    token equivalents afterwards. Admission had checked an empty request.
+  - **Content parts:** the text estimate ignored the text inside multimodal messages.
+- **Fix:**
+  - `enforce()` takes the list of generations the request will be dispatched as, and
+    reserves their sum: chat reserves `n`, completions reserve every prompt × `n`.
+  - Media routes reserve their cost before the upstream opens: speech by characters,
+    transcription by duration. Duration is exact for WAV. For compressed audio it is
+    estimated from the file size at 128 kbps, then settled to the engine's reported figure.
+  - Content-part text counts toward the estimate.
+- **Still open:** reservations are per process (D-043, Scope). Several workers sharing a
+  budget can each admit up to the remaining budget once.
+- **What works now:** `test_budget_reservations.py` (n over budget refused before dispatch;
+  n within budget settled to actual usage; completions reserve every prompt; content parts
+  counted) and `test_audio_routes.py::TestMediaBudgetAdmission`. Three of the four route
+  tests fail on the old code.
+
+## D-047: The database is migrated at startup
+
+- **Status:** Implemented, 2026-10-07, `ebdf6db`
+- **Problem:**
+  - A database made by an older version started fine, then failed on the first key query
+    with `no such column: api_keys.max_concurrent`.
+  - Startup ran `create_all`, which creates missing tables but never adds columns.
+  - `alembic` wasn't a dependency and the migrations weren't in the package, so the Docker
+    image couldn't migrate even by hand.
+- **Fix:** startup runs `gateway.storage.migrate.upgrade` in one transaction (SQLite and
+  PostgreSQL both have transactional DDL):
+  - **Empty database:** create the schema and stamp the latest revision.
+  - **Versioned database:** upgrade to the latest revision.
+  - **Unversioned database** (from the `create_all` era): adopt it as the initial revision and
+    upgrade. Each migration skips tables and columns that already exist. That covers the
+    reviewer's exact case: a database already started once by a `create_all`-era version,
+    so it has the new tables but not the new columns.
+  - **After migrating:** every table and column the code uses must be present, or startup
+    stops and names what's missing.
+  - **A revision newer than the code** (a gateway downgrade) is refused.
+  - **Concurrent startups on PostgreSQL** are serialized with an advisory lock.
+- **Packaging:**
+  - Migrations moved to `gateway/storage/migrations`, so they ship in wheels and the image.
+  - `alembic` is a dependency.
+  - `gateway-migrate` runs the same upgrade as a separate deployment step.
+  - The `alembic` CLI works with the gateway's async URLs.
+- **What didn't work:** nothing failed outright. One design was rejected: inferring a legacy
+  database's revision from its shape. The guards made that unnecessary and handle
+  half-upgraded databases that no single revision describes.
+- **What works now:**
+  - **End to end:** a database built by the old code at `a17a0d8`, holding a key, fails on
+    `main` and upgrades on this branch with the key intact, on SQLite and PostgreSQL. A
+    second start is a no-op.
+  - **`test_migrations.py`** (each test on SQLite and PostgreSQL):
+    - a new database is created at the latest revision;
+    - a legacy database is adopted and keeps its data;
+    - a half-upgraded database is completed;
+    - a versioned database is upgraded;
+    - a restart is a no-op;
+    - a database from a newer gateway is refused;
+    - running the migrations alone produces the current schema, which catches a model change
+      made without a migration.
+
+## D-048: PII audit events record exactly where each detection came from
+
+- **Status:** Implemented, 2026-10-07, `28f3116`
+- **Problem:**
+  - Detections were matched back to messages by position, and only string content counted.
+    An email in a multimodal text part produced zero PII events.
+  - Embedding and completion batches passed on only the results with detections, which were
+    then paired with the first inputs: the wrong `message_index`, and the hash of the wrong
+    text.
+- **Fix:**
+  - Scanning returns `PIIFinding`: message index, content-part index, role, original text
+    and result.
+  - `log_pii_events` writes from those findings, with no positional matching.
+  - `pii_events` gains `part_index` (migration `a9c4e7b2d6f1`), so a detection's positions
+    within a part are unambiguous.
+  - Completions and embeddings share one batch helper that keeps each item's original index.
+- **What works now:** `test_wire.py::TestPIIAuditMapping`, end to end into the table: the
+  content-part email has the right message, part, role, hash and offsets, and batch events
+  point at their own inputs. All three fail on the old code.
+
+## D-049: The task/endpoint policy is applied where endpoints are chosen
+
+- **Status:** Implemented, 2026-10-07, `6c269bf`
+- **Problem:** a `TaskProviderPolicy` denying the selected provider still let the chat
+  request succeed. The enforcer checked it only when given a provider argument, which no
+  route passed, and `gateway.yaml` had no way to configure it.
+- **Fix:**
+  - The dispatcher's candidate filter (`_permitted`) asks the enforcer's
+    `check_provider_allowed` for the request's task. Since D-003, every routing path goes
+    through that filter: catalog, default endpoint, fallback, streaming order, and
+    endpoint/model pins. The media dispatcher applies the same check.
+  - `gateway.yaml` gains `task_endpoints`: one policy per task, with allowed and denied
+    endpoint names that must exist. It is bridged into the enforcer's `task_policies`.
+  - A denied pin, or a task with no allowed endpoint, gets 403 `endpoint_not_allowed`
+    naming the task.
+- **What works now:** `test_task_endpoints.py`:
+  - the reviewer's case returns 403 without contacting the engine (200 on the old code);
+  - a denied endpoint is skipped for an allowed one, for streams too;
+  - an allowed list applies per task;
+  - a denied pin is refused;
+  - an unknown endpoint name is a config error.

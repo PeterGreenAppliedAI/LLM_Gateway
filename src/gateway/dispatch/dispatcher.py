@@ -21,7 +21,7 @@ import asyncio
 import fnmatch
 import math
 import re
-from collections.abc import AsyncIterator, Collection
+from collections.abc import AsyncIterator, Callable, Collection
 from dataclasses import dataclass, field
 
 from gateway.config import (
@@ -152,15 +152,20 @@ class Dispatcher:
         self,
         registry: ProviderRegistry,
         resolution_config: ResolutionConfig | None = None,
+        endpoint_allowed: Callable[[TaskType, str], bool] | None = None,
     ):
         """Initialize dispatcher with provider registry.
 
         Args:
             registry: Initialized provider registry with health tracking
             resolution_config: Optional resolution configuration for endpoint selection
+            endpoint_allowed: Task/endpoint policy (`task_endpoints` in gateway.yaml,
+                via PolicyEnforcer.is_provider_allowed). Applied wherever
+                candidates are chosen, fallback included (D-049).
         """
         self._registry = registry
         self._resolution_config = resolution_config or ResolutionConfig()
+        self._endpoint_allowed = endpoint_allowed
 
     @classmethod
     def parse_provider_from_model(
@@ -242,20 +247,36 @@ class Dispatcher:
 
         raise NoProviderError()
 
-    @staticmethod
-    def _permitted(request: InternalRequest, endpoints: list[str]) -> list[str]:
-        """Endpoints the request may be served by, order preserved."""
-        if request.allowed_endpoints is None:
-            return list(endpoints)
-        return [name for name in endpoints if name in request.allowed_endpoints]
+    def _permitted(self, request: InternalRequest, endpoints: list[str]) -> list[str]:
+        """Endpoints the request may be served by, order preserved.
+
+        The key/environment scope and the task/endpoint policy, together:
+        every way of choosing an endpoint (catalog, default, fallback,
+        streaming order, endpoint/model pins) goes through here.
+        """
+        allowed = request.allowed_endpoints
+        return [
+            name
+            for name in endpoints
+            if (allowed is None or name in allowed) and self._task_allows(request, name)
+        ]
+
+    def _task_allows(self, request: InternalRequest, endpoint: str) -> bool:
+        return self._endpoint_allowed is None or self._endpoint_allowed(request.task, endpoint)
 
     def _require_permitted(self, request: InternalRequest, endpoint: str) -> None:
         """Refuse an endpoint outside the request's allowed set."""
-        if not self._permitted(request, [endpoint]):
+        if self._permitted(request, [endpoint]):
+            return
+        if not self._task_allows(request, endpoint):
             raise PolicyError(
-                message=f"Endpoint '{endpoint}' is not allowed for this API key or environment",
+                message=f"Endpoint '{endpoint}' is not allowed for {request.task.value} requests",
                 code=ErrorCode.ENDPOINT_NOT_ALLOWED,
             )
+        raise PolicyError(
+            message=f"Endpoint '{endpoint}' is not allowed for this API key or environment",
+            code=ErrorCode.ENDPOINT_NOT_ALLOWED,
+        )
 
     def resolve_endpoint(
         self,

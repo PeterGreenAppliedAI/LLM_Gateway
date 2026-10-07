@@ -10,6 +10,8 @@ Create Date: 2026-10-07
 from typing import Sequence, Union
 
 from alembic import op
+
+from gateway.storage.migrations.guards import has_column
 import sqlalchemy as sa
 
 
@@ -22,9 +24,19 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     """Add max_concurrent and priority columns."""
+    missing = [
+        column
+        for column in (
+            sa.Column('max_concurrent', sa.Integer(), nullable=True),
+            sa.Column('priority', sa.String(length=16), nullable=True),
+        )
+        if not has_column('api_keys', column.name)
+    ]
+    if not missing:
+        return
     with op.batch_alter_table('api_keys') as batch:
-        batch.add_column(sa.Column('max_concurrent', sa.Integer(), nullable=True))
-        batch.add_column(sa.Column('priority', sa.String(length=16), nullable=True))
+        for column in missing:
+            batch.add_column(column)
 
 
 def downgrade() -> None:

@@ -48,6 +48,36 @@ class PIIScanResult:
         }
 
 
+@dataclass
+class PIIFinding:
+    """One scanned text and exactly where it came from.
+
+    Audit rows are built from these, not by matching results to messages by
+    position: that silently skipped content parts (zero PII events for an
+    email in a multimodal message) and, for batches that kept only results
+    with detections, paired them with the wrong inputs (wrong index, hash of
+    the wrong text).
+    """
+
+    message_index: int  # position in the request's messages, prompts or inputs
+    role: str | None
+    text: str  # the original text; detection offsets refer to it
+    result: PIIScanResult
+    part_index: int | None = None  # content part within the message, if any
+
+    @property
+    def has_pii(self) -> bool:
+        return self.result.has_pii
+
+    @property
+    def detection_count(self) -> int:
+        return self.result.detection_count
+
+    @property
+    def scrubbed_text(self) -> str | None:
+        return self.result.scrubbed_text
+
+
 # Pre-compiled PII patterns
 # Order matters — more specific patterns first to avoid partial matches
 _PII_PATTERNS: list[tuple[str, re.Pattern]] = [
@@ -55,8 +85,11 @@ _PII_PATTERNS: list[tuple[str, re.Pattern]] = [
     ("SSN", re.compile(r"\b\d{3}[-\s]\d{2}[-\s]\d{4}\b")),
     # Credit card: 4 groups of 4 digits, with optional separators
     ("CREDIT_CARD", re.compile(r"\b(?:\d{4}[-\s]){3}\d{4}\b")),
-    # Email
-    ("EMAIL", re.compile(r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b")),
+    # Email. Lengths are bounded by the standard's own limits (64 before the
+    # "@", 253 after): unbounded runs made scanning quadratic, so text like
+    # "a.a.a.…" took ~20 s per 100k characters, which is why scans used to be
+    # cut off at 100k (and why text past the cut reached engines unscrubbed)
+    ("EMAIL", re.compile(r"\b[A-Za-z0-9._%+\-]{1,64}@[A-Za-z0-9.\-]{1,253}\.[A-Za-z]{2,63}\b")),
     # Phone: US formats - (123) 456-7890, 123-456-7890, +1 123 456 7890, etc.
     ("PHONE", re.compile(r"\b(?:\+1[-.\s]?)?\(?[2-9]\d{2}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b")),
     # IP address (v4) - but not version numbers like 1.2.3
@@ -73,16 +106,10 @@ class PIIScrubber:
     Detection always runs. Scrubbing (replacement) only happens
     when explicitly requested per-call via the `scrub` parameter.
 
-    Thread-safe: stateless, uses pre-compiled patterns.
+    Thread-safe: stateless, uses pre-compiled patterns. Every pattern runs in
+    linear time, so the whole text is always scanned: a cut-off scan
+    forwarded everything past the cut unscrubbed.
     """
-
-    def __init__(self, max_input_length: int = 100_000):
-        """Initialize PII scrubber.
-
-        Args:
-            max_input_length: Maximum text length to scan (truncates for safety)
-        """
-        self._max_input_length = max_input_length
 
     def scan(self, text: str, scrub: bool = False) -> PIIScanResult:
         """Scan text for PII and optionally scrub it.
@@ -99,8 +126,7 @@ class PIIScrubber:
 
         start = time.perf_counter()
 
-        # Truncate for safety
-        scan_text = text[: self._max_input_length]
+        scan_text = text
 
         # Collect all matches with positions
         all_matches: list[PIIMatch] = []
@@ -148,9 +174,20 @@ class PIIScrubber:
             scan_time_ms=elapsed,
         )
 
+    def scan_texts(self, texts: list, scrub: bool = False, role: str = "user") -> list[PIIFinding]:
+        """Scan a batch (embedding inputs, completion prompts); non-strings skipped.
+
+        Each finding keeps its item's index in the original list.
+        """
+        return [
+            PIIFinding(index, role, text, self.scan(text, scrub=scrub))
+            for index, text in enumerate(texts)
+            if isinstance(text, str) and text
+        ]
+
     def scan_messages(
         self, messages: list[dict], scrub: bool = False
-    ) -> tuple[list[dict], list[PIIScanResult]]:
+    ) -> tuple[list[dict], list[PIIFinding]]:
         """Scan a list of chat messages for PII.
 
         Args:
@@ -158,29 +195,32 @@ class PIIScrubber:
             scrub: If True, return messages with PII replaced
 
         Returns:
-            Tuple of (possibly scrubbed messages, list of scan results)
+            Tuple of (possibly scrubbed messages, one finding per text scanned,
+            located by message and content part)
         """
-        results: list[PIIScanResult] = []
+        results: list[PIIFinding] = []
         output_messages = []
 
-        for msg in messages:
+        for msg_index, msg in enumerate(messages):
             content = msg.get("content", "")
+            role = msg.get("role")
+            role = getattr(role, "value", role)
             new_msg = dict(msg)  # shallow copy
 
             if isinstance(content, str) and content:
                 result = self.scan(content, scrub=scrub)
-                results.append(result)
+                results.append(PIIFinding(msg_index, role, content, result))
                 if scrub and result.scrubbed_text is not None:
                     new_msg["content"] = result.scrubbed_text
             elif isinstance(content, list):
                 # Multimodal content arrays — scan text parts
                 new_parts = []
-                for part in content:
+                for part_index, part in enumerate(content):
                     if isinstance(part, dict) and part.get("type") == "text":
                         text = part.get("text", "")
                         if isinstance(text, str) and text:
                             result = self.scan(text, scrub=scrub)
-                            results.append(result)
+                            results.append(PIIFinding(msg_index, role, text, result, part_index))
                             if scrub and result.scrubbed_text is not None:
                                 new_part = dict(part)
                                 new_part["text"] = result.scrubbed_text
@@ -203,17 +243,13 @@ class PIIScrubber:
 
         For data at rest (audit bodies, stored scans): independent of the
         per-route scrub setting, so flag-only mode still never persists raw
-        PII. Text beyond the scan limit is dropped rather than stored
-        unscanned.
+        PII.
         """
         if isinstance(value, str):
             if not value:
                 return value
             result = self.scan(value, scrub=True)
-            redacted = result.scrubbed_text if result.scrubbed_text is not None else value
-            if len(value) > self._max_input_length:
-                redacted = redacted[: self._max_input_length] + "[TRUNCATED: not scanned for PII]"
-            return redacted
+            return result.scrubbed_text if result.scrubbed_text is not None else value
         if isinstance(value, dict):
             return {k: self.redact(v) for k, v in value.items()}
         if isinstance(value, list):

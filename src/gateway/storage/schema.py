@@ -272,6 +272,8 @@ pii_events = Table(
     # Detection details (no raw PII stored)
     Column("pii_type", String(32), nullable=False),  # EMAIL, PHONE, SSN, CREDIT_CARD, IP_ADDRESS
     Column("message_index", Integer, nullable=True),  # Which message in the conversation
+    # Which content part of that message (multimodal); positions are within it
+    Column("part_index", Integer, nullable=True),
     Column("message_role", String(16), nullable=True),  # user, system, assistant
     Column("position_start", Integer, nullable=True),
     Column("position_end", Integer, nullable=True),
