@@ -68,7 +68,7 @@ curl http://your-server:8001/api/chat -d '{"model":"llama3.1:8b","messages":[{"r
 | 3 GPU boxes, no unified API | One endpoint for all your runtimes — Ollama, vLLM, OpenAI, TRT-LLM |
 | No idea who's calling what | Every request logged with client ID, model, tokens, latency, full audit trail |
 | Prompt injection goes straight through | Regex pattern detection (sync, ~1ms) + guard model analysis (async, zero latency) |
-| PII leaking into models | Detects emails, phones, SSNs, credit cards, IPs. Optional scrubbing. SHA-256 audit trail — raw PII never stored |
+| PII leaking into models | Detects emails, US phone numbers, SSNs, credit cards, IPs (pattern-based: names and postal addresses aren't detected). Optional scrubbing over the whole input. SHA-256 audit trail — raw PII never stored |
 | No rate limits or access control | Per-key rate limits, model allowlists, endpoint restrictions, daily token budgets with cost tiers |
 | New model deployed, nobody classified it | Auto-discovery polls endpoints every 60s. Unclassified models default to expensive tier until assigned |
 | Want to finetune your own guard model | Every scan persisted with regex + guard verdicts. Label from dashboard. Export in Llama Guard format |
@@ -89,7 +89,7 @@ LiteLLM is a good proxy for routing requests to different LLM providers. DevMesh
 | **Dashboard** | Included React UI with security, PII, budgets, requests | Separate UI project |
 | **Test coverage** | ~915 tests on Python 3.11–3.13, Linux and Windows, SQLite, PostgreSQL and Redis | Varies |
 
-If you just need to route requests to different providers, LiteLLM works. If you need to know what's going through your models, stop PII from leaking, build your own guard model, and prove it all to an auditor — that's what this is for.
+If you just need to route requests to different providers, LiteLLM works. If you need to know what's going through your models, catch common PII before it leaks, build your own guard model, and prove it all to an auditor — that's what this is for.
 
 ## Dashboard
 
@@ -119,7 +119,7 @@ On first load, enter the admin key (`GATEWAY_ADMIN_API_KEY`) in the header field
 |-------|--------|-------------|
 | **Unicode Sanitization** | Sync, ~0ms | Strips invisible characters, homoglyphs, zero-width joiners |
 | **Pattern Detection** | Sync, ~1ms | 25+ regex patterns — role overrides, delimiter attacks, encoding tricks |
-| **PII Detection** | Sync, ~1ms | Emails, phones, SSNs, credit cards, IPs. SHA-256 hashed audit trail. Raw PII never stored |
+| **PII Detection** | Sync, linear in input size | Emails, US phone numbers, SSNs, credit cards, IPs, anywhere in the input. Pattern-based: names and addresses aren't detected. SHA-256 hashed audit trail. Raw PII never stored |
 | **Guard Model** | Async, background | Granite Guardian or Llama Guard — classifies every request, logs agreement/disagreement with regex |
 
 ### The Guard Model Training Loop
