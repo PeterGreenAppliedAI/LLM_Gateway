@@ -97,14 +97,23 @@ class TestRevocation:
         assert await cache.validate(key["key"]) is None
 
     @pytest.mark.asyncio
-    async def test_other_process_follows_within_ttl(self, engine):
+    async def test_other_process_follows_within_ttl(self, engine, monkeypatch):
+        # A controlled clock: with real time, a slow CI disk made the revoke
+        # itself take longer than a short TTL, so the entry expired early
+        from types import SimpleNamespace
+
+        import gateway.storage.key_cache as key_cache
+
+        now = [1000.0]
+        monkeypatch.setattr(key_cache, "time", SimpleNamespace(monotonic=lambda: now[0]))
         km = KeyManager(engine)
         key = await km.create_key(name="app", client_id="app")
-        other = KeyCache(engine, ttl=0.1)  # another gateway process
+        other = KeyCache(engine, ttl=30)  # another gateway process
         assert await other.validate(key["key"]) is not None
         await km.revoke_key(key["key_id"])  # revoked elsewhere
+        now[0] += 29
         assert await other.validate(key["key"]) is not None  # still cached
-        await asyncio.sleep(0.15)
+        now[0] += 2
         assert await other.validate(key["key"]) is None
 
 

@@ -35,3 +35,43 @@ async def test_cancel_at_the_moment_the_event_is_set_stops_the_loop():
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(task, 2)
     assert task.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_cancelling_the_loop_doesnt_cut_off_its_work():
+    """D-046: database work must not be abandoned mid-transaction."""
+    from gateway.aio import Uninterruptible
+
+    work = Uninterruptible()
+    started, finished = asyncio.Event(), []
+
+    async def unit():
+        started.set()
+        await asyncio.sleep(0.05)
+        finished.append(True)
+
+    async def loop():
+        while True:
+            await work.run(unit())
+
+    task = asyncio.create_task(loop())
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert finished == []  # the loop stopped; its work is still going
+    await work.finish()
+    assert finished == [True]
+
+
+@pytest.mark.asyncio
+async def test_finish_timeout_cancels_after_all():
+    from gateway.aio import Uninterruptible
+
+    work = Uninterruptible()
+    runner = asyncio.create_task(work.run(asyncio.sleep(10)))
+    await asyncio.sleep(0)
+    runner.cancel()
+    await work.finish(timeout=0.01)  # returns instead of waiting 10 s
+    with pytest.raises(asyncio.CancelledError):
+        await runner

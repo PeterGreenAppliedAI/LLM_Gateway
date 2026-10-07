@@ -20,6 +20,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from gateway.aio import Uninterruptible
 from gateway.observability import get_logger
 from gateway.policy.token_budget import TokenBudgetTracker, UsageRow
 from gateway.storage.runtime_settings import RuntimeSettingsStore
@@ -140,6 +141,7 @@ class BudgetSync:
         self._catalog_seen: datetime | None = None
         self._task: asyncio.Task | None = None
         self._lock = asyncio.Lock()
+        self._db = Uninterruptible()
         self.failures = 0
 
     async def start(self) -> None:
@@ -155,6 +157,7 @@ class BudgetSync:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._task
             self._task = None
+        await self._db.finish()  # a flush in progress completes, not cut off
         await self.flush()  # a clean shutdown loses nothing
 
     async def flush(self) -> None:
@@ -197,11 +200,11 @@ class BudgetSync:
         ticks = 0
         while True:
             await asyncio.sleep(self._interval)
-            await self.flush()
+            await self._db.run(self.flush())
             ticks += 1
             if ticks % self._catalog_check_every == 0:
                 # Another process (or its dashboard) may have changed tiers
                 try:
-                    await self._load_catalog()
+                    await self._db.run(self._load_catalog())
                 except Exception as e:
                     logger.debug("Budget catalog check failed", error=str(e))

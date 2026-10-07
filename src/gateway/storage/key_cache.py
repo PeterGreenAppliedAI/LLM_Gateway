@@ -25,6 +25,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from gateway.aio import Uninterruptible
 from gateway.observability import get_logger
 from gateway.storage.keys import KeyManager, _hash_key
 
@@ -49,6 +50,7 @@ class KeyCache:
         self._invalid: OrderedDict[str, float] = OrderedDict()
         self._last_used: dict[int, datetime] = {}
         self._task: asyncio.Task | None = None
+        self._db = Uninterruptible()
         self.hits = 0
         self.misses = 0
 
@@ -61,6 +63,7 @@ class KeyCache:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._task
             self._task = None
+        await self._db.finish()  # a flush in progress completes, not cut off
         await self.flush()
 
     async def validate(self, plaintext: str) -> dict | None:
@@ -130,4 +133,4 @@ class KeyCache:
     async def _flush_loop(self) -> None:
         while True:
             await asyncio.sleep(self._flush_interval)
-            await self.flush()
+            await self._db.run(self.flush())

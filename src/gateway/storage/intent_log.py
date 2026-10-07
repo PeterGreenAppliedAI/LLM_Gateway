@@ -40,7 +40,7 @@ from sqlalchemy import Table, delete, insert, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from gateway.aio import wait_event
+from gateway.aio import Uninterruptible, wait_event
 from gateway.observability import get_logger
 from gateway.storage.schema import audit_journal, audit_log, pii_events
 
@@ -126,6 +126,10 @@ class IntentLog:
         self.instance = f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
         self._dir = self._root / self.instance
         self._lock_file: Any = None
+        # Database work runs shielded: cancelling a loop mid-transaction can
+        # leave a SQLite connection holding the write lock (D-046)
+        self._drain_work = Uninterruptible()
+        self._orphan_work = Uninterruptible()
         self._file: Any = None
         self._segment_no = 0
         self._segment_size = 0
@@ -169,6 +173,8 @@ class IntentLog:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
         self._tasks = []
+        await self._drain_work.finish()
+        await self._orphan_work.finish()
         # Close the active segment first: the final drain deletes segments it
         # has written, and Windows can't delete a file that is still open
         if self._file is not None:
@@ -282,7 +288,7 @@ class IntentLog:
             await wait_event(self._wake, backoff)
             self._wake.clear()
             try:
-                await self._drain(self.instance, self._dir, live=True)
+                await self._drain_work.run(self._drain(self.instance, self._dir, live=True))
                 backoff = self._idle
                 if self.last_error:
                     logger.info("Audit database reachable again; backlog draining")
@@ -466,7 +472,7 @@ class IntentLog:
     async def _orphan_loop(self) -> None:
         while True:
             await asyncio.sleep(self._orphan_scan_interval)
-            await self._recover_orphans()
+            await self._orphan_work.run(self._recover_orphans())
 
     # -- status --------------------------------------------------------------
 

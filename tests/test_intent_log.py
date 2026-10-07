@@ -68,6 +68,11 @@ async def _crash(log: IntentLog) -> None:
     for task in log._tasks:  # a dead process runs nothing: wait until they're gone
         with contextlib.suppress(BaseException):
             await task
+    # A dead process's open transaction is rolled back by the database; here,
+    # let the batch in flight finish (D-046: an abandoned SQLite connection
+    # would hold the write lock, which a real crash releases)
+    await log._drain_work.finish()
+    await log._orphan_work.finish()
     log._file.close()
     log._file = None
     log._lock_file.close()  # the OS releases the lock when a process dies
