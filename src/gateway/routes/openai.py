@@ -221,7 +221,9 @@ async def chat_completions(
         update=await resolve_access_scope(request, auth, internal_request.model)
     )
 
-    # Check policies - raises domain errors on violation
+    # Check policies - raises domain errors on violation. The budget
+    # reservation covers all n generations, not one (second review: n=8
+    # charged 648 tokens against a 100-token budget)
     try:
         await enforcer.enforce(
             internal_request,
@@ -229,6 +231,7 @@ async def chat_completions(
             allowed_models=auth.allowed_models,
             allowed_endpoints=auth.allowed_endpoints,
             rate_limit_rpm=auth.rate_limit_rpm,
+            generations=[internal_request] * body.n,
         )
     except PolicyViolation as e:
         translate_policy_violation(e)
@@ -504,6 +507,17 @@ async def completions(
     from gateway.policy.embedding_queue import QueueSaturatedError
     from gateway.routes.dependencies import get_embedding_queue
 
+    # The sanitized/scrubbed prompts are what the model gets (body.prompt is
+    # the raw client input; before 0ec8d7b it was sent as-is)
+    prompts = [sanitized_prompt] if isinstance(sanitized_prompt, str) else list(sanitized_prompt)
+    # One upstream generation per prompt per n (prompt-major, OpenAI order).
+    # Admission reserves budget for all of them, not just the first.
+    choice_requests = [
+        internal_request.model_copy(update={"prompt": prompt})
+        for prompt in prompts
+        for _ in range(body.n)
+    ]
+
     queue = get_embedding_queue(request)
     try:
         await queue.admit(
@@ -513,16 +527,13 @@ async def completions(
                 allowed_models=auth.allowed_models,
                 allowed_endpoints=auth.allowed_endpoints,
                 rate_limit_rpm=auth.rate_limit_rpm,
+                generations=choice_requests,
             )
         )
     except QueueSaturatedError as e:
         raise RateLimitError(message=str(e), retry_after=e.retry_after)
     except PolicyViolation as e:
         translate_policy_violation(e)
-
-    # The sanitized/scrubbed prompts are what the model gets (body.prompt is
-    # the raw client input; before 0ec8d7b it was sent as-is)
-    prompts = [sanitized_prompt] if isinstance(sanitized_prompt, str) else list(sanitized_prompt)
 
     if body.stream:
         return await _stream_completion_response(
@@ -536,13 +547,7 @@ async def completions(
             request_body={"prompt": prompts[0]},
         )
 
-    # One upstream generation per prompt per n, run concurrently and returned
-    # in OpenAI order (prompt-major). Before, extra prompts were dropped.
-    choice_requests = [
-        internal_request.model_copy(update={"prompt": prompt})
-        for prompt in prompts
-        for _ in range(body.n)
-    ]
+    # Run concurrently, returned in OpenAI order (before, extra prompts were dropped)
     with metrics.track_request("dispatch"):
         results = await dispatch_choices(request, dispatcher, choice_requests)
 

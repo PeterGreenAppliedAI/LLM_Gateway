@@ -410,3 +410,56 @@ async def test_multipart_parses_on_a_real_fastapi_engine(make_app):
     assert received["audio"] == audio
     assert received["content_type"] == "audio/wav"
     assert "\r" not in received["filename"] and '"' not in received["filename"]
+
+
+# =============================================================================
+# Budget admission reserves the media cost (second review)
+# =============================================================================
+
+
+def _budgeted(app, limit: int) -> PolicyEnforcer:
+    from gateway.policy.enforcer import PolicyConfig
+    from gateway.policy.token_budget import TokenBudgetConfig
+
+    enforcer = PolicyEnforcer(
+        PolicyConfig(
+            token_budget=TokenBudgetConfig(
+                enabled=True, default_daily_limit=limit, default_cost_multiplier=1.0
+            )
+        )
+    )
+    app.dependency_overrides[get_enforcer] = lambda: enforcer
+    return enforcer
+
+
+class TestMediaBudgetAdmission:
+    @pytest.mark.asyncio
+    async def test_speech_over_budget_refused_before_the_engine(self, make_app):
+        """400 characters (100 token equivalents) passed a 10-token budget."""
+        app = await make_app({"kokoro-box": (["tts"], _tts_ok)})
+        enforcer = _budgeted(app, limit=10)
+        resp = TestClient(app).post("/v1/audio/speech", json={**SPEECH, "input": "a" * 400})
+        assert resp.status_code != 200
+        assert app.state.test["engines"]["kokoro-box"].requests == []
+        assert enforcer.token_budget.get_budget_state("default").tokens_used == 0
+
+    @pytest.mark.asyncio
+    async def test_speech_within_budget_settles_to_its_cost(self, make_app):
+        app = await make_app({"kokoro-box": (["tts"], _tts_ok)})
+        enforcer = _budgeted(app, limit=1_000)
+        resp = TestClient(app).post("/v1/audio/speech", json={**SPEECH, "input": "a" * 400})
+        assert resp.status_code == 200
+        assert enforcer.token_budget.get_budget_state("default").tokens_used == 100
+        assert enforcer.token_budget._reservations == {}
+
+    @pytest.mark.asyncio
+    async def test_transcription_reserves_the_audio_length(self, make_app):
+        app = await make_app({"whisper-box": (["stt"], _stt_ok)})
+        _budgeted(app, limit=50)  # 10 s of WAV = 100 token equivalents
+        resp = TestClient(app).post(
+            "/v1/audio/transcriptions",
+            data={"model": "whisper"},
+            files={"file": ("a.wav", _wav(10), "audio/wav")},
+        )
+        assert resp.status_code != 200
+        assert app.state.test["engines"]["whisper-box"].requests == []

@@ -177,8 +177,15 @@ async def _prepare(
     enforcer: PolicyEnforcer,
     task: TaskType,
     model: str,
+    estimated_tokens: int,
 ) -> InternalRequest:
-    """Scope and policy for a media request (same rules as text routes)."""
+    """Scope and policy for a media request (same rules as text routes).
+
+    The budget reservation is the media cost in token equivalents, known (or
+    bounded) before the upstream request opens. Before, admission checked an
+    empty request: a 400-character speech request passed a 10-token budget
+    and was charged 100 afterwards.
+    """
     internal = InternalRequest(task=task, model=model, client_id=auth.client_id)
     internal = internal.model_copy(update=await resolve_access_scope(request, auth, model))
     try:
@@ -188,6 +195,7 @@ async def _prepare(
             allowed_models=auth.allowed_models,
             allowed_endpoints=auth.allowed_endpoints,
             rate_limit_rpm=auth.rate_limit_rpm,
+            estimated_tokens=estimated_tokens,
         )
     except PolicyViolation as e:
         translate_policy_violation(e)
@@ -224,6 +232,11 @@ async def _open_upstream(
     outcome.model = upstream.model
     return upstream
 
+
+# Compressed audio's duration isn't known before the engine reports it. For
+# the budget reservation, assume 128 kbps (typical MP3/M4A): low-bitrate
+# voice files reserve more than they use and are settled down afterwards.
+_ASSUMED_BYTES_PER_SECOND = 16_000
 
 _PASSTHROUGH_HEADERS = ("content-type", "content-disposition", "x-download-path")
 
@@ -282,7 +295,10 @@ async def create_speech(
             if scrub and result.scrubbed_text is not None:
                 text = result.scrubbed_text
 
-    internal = await _prepare(request, auth, enforcer, TaskType.SPEECH, body.model)
+    budget_tokens = math.ceil(len(text) * config.media.token_equivalents.tts_character)
+    internal = await _prepare(
+        request, auth, enforcer, TaskType.SPEECH, body.model, estimated_tokens=budget_tokens
+    )
     voice = body.voice if isinstance(body.voice, str) else json.dumps(body.voice)[:200]
     usage: dict[str, Any] = {
         "characters": len(text),
@@ -297,7 +313,6 @@ async def create_speech(
         enforcer=enforcer,
         request_body={"input": text, "voice": voice},
     )
-    budget_tokens = math.ceil(len(text) * config.media.token_equivalents.tts_character)
 
     def build(client, model: str):
         payload = body.model_dump(exclude_none=True)
@@ -517,13 +532,27 @@ async def _speech_to_text(
     streaming = any(k == "stream" and v.lower() == "true" for k, v in fields)
 
     ctx = setup_request_context(client_id=auth.client_id, model=model, task=task.value)
-    internal = await _prepare(request, auth, enforcer, task, model)
+    wav_duration = _wav_duration_seconds(upload)
+    # Reserve for the audio's length: exact for WAV; for compressed formats,
+    # bounded from the size (settled to the engine's duration afterwards)
+    expected_seconds = (
+        wav_duration if wav_duration is not None else size / _ASSUMED_BYTES_PER_SECOND
+    )
+    internal = await _prepare(
+        request,
+        auth,
+        enforcer,
+        task,
+        model,
+        estimated_tokens=math.ceil(
+            expected_seconds * config.media.token_equivalents.stt_audio_second
+        ),
+    )
     usage: dict[str, Any] = {
         "bytes_in": size,
         "content_type": upload.content_type,
         "language": next((v for k, v in fields if k == "language"), None),
     }
-    wav_duration = _wav_duration_seconds(upload)
     outcome = _MediaOutcome(
         ctx=ctx, task=task, internal_request=internal, audit_logger=audit_logger, enforcer=enforcer
     )
