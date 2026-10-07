@@ -45,8 +45,9 @@ from gateway.storage.schema import audit_journal, audit_log, pii_events
 
 try:
     import fcntl
-except ImportError:  # pragma: no cover - Windows: no cross-process recovery
+except ImportError:  # pragma: no cover - Windows
     fcntl = None  # type: ignore[assignment]
+    import msvcrt
 
 logger = get_logger(__name__)
 
@@ -72,6 +73,24 @@ def _decode_row(row: dict) -> dict:
         k: datetime.fromisoformat(v[_DATETIME]) if isinstance(v, dict) and _DATETIME in v else v
         for k, v in row.items()
     }
+
+
+def _try_lock(handle: Any) -> bool:
+    """Take an exclusive lock on an open lock file without waiting.
+
+    flock on POSIX, msvcrt byte-range locking on Windows. Either way the OS
+    drops the lock when the process dies, which is what orphan recovery
+    relies on to tell a dead process's log from a live one.
+    """
+    try:
+        if fcntl is not None:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        else:  # pragma: no cover - Windows
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+    except OSError:
+        return False
+    return True
 
 
 def _segment_name(number: int) -> str:
@@ -128,8 +147,10 @@ class IntentLog:
     async def start(self) -> None:
         self._dir.mkdir(parents=True, exist_ok=True)
         self._lock_file = (self._dir / "lock").open("w")
-        if fcntl is not None:
-            fcntl.flock(self._lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if not _try_lock(self._lock_file):
+            self._lock_file.close()
+            self._lock_file = None
+            raise RuntimeError(f"Audit intent log {self._dir} is in use by another process")
         self._open_segment(1)
         # Leftovers from previous runs first, so they reach the DB in order
         await self._recover_orphans()
@@ -147,17 +168,19 @@ class IntentLog:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
         self._tasks = []
+        # Close the active segment first: the final drain deletes segments it
+        # has written, and Windows can't delete a file that is still open
+        if self._file is not None:
+            self._file.flush()
+            os.fsync(self._file.fileno())
+            self._file.close()
+            self._file = None
         try:
             await asyncio.wait_for(self._drain(self.instance, self._dir, live=False), drain_timeout)
         except Exception as e:
             logger.warning(
                 "Audit log not fully drained at shutdown; kept for next start", error=str(e)
             )
-        if self._file is not None:
-            self._file.flush()
-            os.fsync(self._file.fileno())
-            self._file.close()
-            self._file = None
         drained = not _segments(self._dir)
         if self._lock_file is not None:
             self._lock_file.close()
@@ -404,7 +427,7 @@ class IntentLog:
     # -- other instances' leftovers ----------------------------------------
 
     async def _recover_orphans(self) -> None:
-        if fcntl is None or not self._root.exists():
+        if not self._root.exists():
             return
         for instance_dir in sorted(p for p in self._root.iterdir() if p.is_dir()):
             if instance_dir.name == self.instance:
@@ -415,13 +438,15 @@ class IntentLog:
             except OSError:
                 continue
             try:
-                try:
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except OSError:
+                if not _try_lock(handle):
                     continue  # its process is alive and draining it
                 records = sum(p.read_bytes().count(b"\n") for p in _segments(instance_dir))
                 await self._drain(instance_dir.name, instance_dir, live=False)
                 if not _segments(instance_dir):
+                    # Unlock before removing the directory (Windows can't delete
+                    # an open file). Nothing is left to drain, so a recoverer
+                    # that takes the lock in between finds nothing to do.
+                    handle.close()
                     await self._forget_instance(instance_dir.name, instance_dir)
                     if records:
                         logger.warning(

@@ -254,12 +254,19 @@ class TestDurabilityModes:
         await log.close()
 
     @pytest.mark.asyncio
-    async def test_grouped_mode_lone_request_does_not_wait_a_window(self, engine, tmp_path):
+    async def test_grouped_mode_lone_request_does_not_wait_a_window(
+        self, engine, tmp_path, monkeypatch
+    ):
+        # fsync stubbed out: how long a real disk flush takes (tens of ms on
+        # Windows runners) is not what this measures; a batching window is
+        calls = []
+        monkeypatch.setattr(os, "fsync", lambda fd: calls.append(fd))
         log = IntentLog(tmp_path / "journal", engine, durability="grouped")
         await log.start()
         started = time.monotonic()
         await log.append("audit_log", [_audit_row("alone")])
-        assert time.monotonic() - started < 0.04  # one fsync, no batching delay
+        assert time.monotonic() - started < 0.04  # no batching delay
+        assert len(calls) == 1
         assert log._synced == 1
         await log.close()
 

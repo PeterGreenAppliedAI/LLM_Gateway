@@ -13,7 +13,10 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-redis_asyncio = pytest.importorskip("redis.asyncio")
+if os.environ.get("GATEWAY_TEST_REQUIRE_SERVICES") == "1":
+    import redis.asyncio as redis_asyncio
+else:
+    redis_asyncio = pytest.importorskip("redis.asyncio")
 
 from gateway.config import (  # noqa: E402
     AdmissionConfig,
@@ -57,7 +60,10 @@ async def _reachable() -> bool:
         await client.aclose()
 
 
-pytestmark = pytest.mark.skipif(not asyncio.run(_reachable()), reason=f"no Redis at {REDIS_URL}")
+_REDIS = asyncio.run(_reachable())
+if os.environ.get("GATEWAY_TEST_REQUIRE_SERVICES") == "1" and not _REDIS:
+    raise RuntimeError(f"GATEWAY_TEST_REQUIRE_SERVICES=1 but no Redis at {REDIS_URL}")
+pytestmark = pytest.mark.skipif(not _REDIS, reason=f"no Redis at {REDIS_URL}")
 
 
 @pytest.fixture
