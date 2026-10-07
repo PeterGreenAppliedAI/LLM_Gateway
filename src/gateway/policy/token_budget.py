@@ -20,6 +20,7 @@ Tiers and model assignments changed at runtime are saved too.
 """
 
 import fnmatch
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -146,6 +147,18 @@ class BudgetState:
 
 UNCLASSIFIED = "unclassified"
 
+# Holds older than this stop counting (never settled: a bug or lost request)
+RESERVATION_TTL = 600.0
+
+
+@dataclass
+class Reservation:
+    key: str
+    tier: str
+    weighted: int
+    raw: int
+    created: float
+
 
 class TokenBudgetTracker:
     """Tracks daily token usage per key and enforces budgets.
@@ -176,6 +189,8 @@ class TokenBudgetTracker:
         self._flushing: dict[str, dict[str, dict[str, UsageCounts]]] = {}
         # Set by BudgetSync; without it past days' usage is simply dropped
         self.persisted = False
+        # Admitted requests' estimated cost, until they finish (D-043)
+        self._reservations: dict[str, Reservation] = {}
 
         # Build tier lookup
         self._tiers: dict[str, ModelTierConfig] = {t.name: t for t in self._config.model_tiers}
@@ -424,7 +439,8 @@ class TokenBudgetTracker:
             )
 
         usage = self._today_usage(key)
-        tokens_used = sum(c.weighted for c in usage.values())
+        # In flight counts as spent (D-043): admitted requests hold reservations
+        tokens_used = sum(c.weighted for c in usage.values()) + self._reserved_weighted(key)
 
         daily_limit = daily_limit_override or self._config.default_daily_limit
         tier = self.resolve_tier(model)
@@ -434,7 +450,8 @@ class TokenBudgetTracker:
 
         # Check per-key daily budget
         if daily_limit > 0 and self._config.enforce_pre_request:
-            if tokens_used + weighted_estimate > daily_limit:
+            # ">=" too: an exhausted budget refuses even a zero estimate
+            if tokens_used >= daily_limit or tokens_used + weighted_estimate > daily_limit:
                 raise TokenBudgetExceeded(
                     message=(
                         f"Daily token budget exceeded for key '{key}': "
@@ -450,9 +467,9 @@ class TokenBudgetTracker:
 
         # Check per-tier global cap
         if tier and tier.daily_limit is not None and tier.daily_limit > 0:
-            tier_used = self._tier_raw_today(tier.name)
+            tier_used = self._tier_raw_today(tier.name) + self._reserved_raw(tier.name)
             # Tier caps use raw tokens (not weighted) since the cap is per-tier
-            if tier_used + estimated_tokens > tier.daily_limit:
+            if tier_used >= tier.daily_limit or tier_used + estimated_tokens > tier.daily_limit:
                 raise TokenBudgetExceeded(
                     message=(
                         f"Daily tier '{tier.name}' budget exceeded: "
@@ -476,11 +493,65 @@ class TokenBudgetTracker:
             request_count=sum(c.requests for c in usage.values()),
         )
 
+    # -- reservations (D-043): hard limits under concurrency ----------------
+
+    def reserve(
+        self,
+        reservation_id: str,
+        key: str,
+        model: str,
+        estimated_tokens: int,
+        daily_limit_override: int | None = None,
+    ) -> BudgetState:
+        """Check the budget and hold the estimate in one step.
+
+        Synchronous on purpose: no await between the check and the hold, so
+        concurrent requests on one event loop can't all pass a check against
+        the same remaining budget (they did, when only finished requests
+        counted). Settle with record_usage(..., reservation_id) or release().
+
+        Raises:
+            TokenBudgetExceeded: The estimate doesn't fit what's left.
+        """
+        if not self._config.enabled:
+            return self.check_budget(key, model, estimated_tokens, daily_limit_override)
+        self._expire_reservations()
+        state = self.check_budget(key, model, estimated_tokens, daily_limit_override)
+        tier = self.resolve_tier(model)
+        multiplier = tier.cost_multiplier if tier else self._config.default_cost_multiplier
+        self._reservations[reservation_id] = Reservation(
+            key=key,
+            tier=tier.name if tier else UNCLASSIFIED,
+            weighted=int(estimated_tokens * multiplier),
+            raw=estimated_tokens,
+            created=time.monotonic(),
+        )
+        return state
+
+    def release(self, reservation_id: str) -> None:
+        """Drop a hold without charging it (request failed before using tokens)."""
+        self._reservations.pop(reservation_id, None)
+
+    def _reserved_weighted(self, key: str) -> int:
+        return sum(r.weighted for r in self._reservations.values() if r.key == key)
+
+    def _reserved_raw(self, tier: str) -> int:
+        return sum(r.raw for r in self._reservations.values() if r.tier == tier)
+
+    def _expire_reservations(self) -> None:
+        # A hold never settled (a bug, a lost request) stops blocking the
+        # budget after RESERVATION_TTL; actual usage is still charged if it
+        # arrives later
+        cutoff = time.monotonic() - RESERVATION_TTL
+        for rid in [rid for rid, r in self._reservations.items() if r.created < cutoff]:
+            del self._reservations[rid]
+
     def record_usage(
         self,
         key: str,
         model: str,
         tokens: int,
+        reservation_id: str | None = None,
     ) -> None:
         """Record actual token usage after a response.
 
@@ -489,6 +560,8 @@ class TokenBudgetTracker:
             model: Model name used
             tokens: Total tokens consumed (prompt + completion)
         """
+        if reservation_id is not None:
+            self._reservations.pop(reservation_id, None)  # actual usage replaces the hold
         if not self._config.enabled or tokens <= 0:
             return
 

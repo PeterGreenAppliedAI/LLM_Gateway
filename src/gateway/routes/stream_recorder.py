@@ -72,6 +72,9 @@ class StreamRecorder:
             self._first_token_seen = True
         if chunk.delta:
             self._parts.append(chunk.delta)
+        # Reasoning and tool-call output cost tokens too: a reasoning-only
+        # stream cut short used to estimate zero (D-043)
+        if chunk.delta or chunk.thinking or chunk.tool_calls:
             self._content_chunks += 1
         if chunk.usage:
             self._usage = chunk.usage

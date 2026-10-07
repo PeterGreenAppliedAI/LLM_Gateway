@@ -604,6 +604,12 @@ async def get_inference_auth(
         if value == "batch":
             auth.priority = "batch"
 
+    # Budget reservations made by this request (D-043); released below if
+    # never settled, so a failed or abandoned request doesn't keep its hold
+    from gateway.policy.enforcer import start_budget_holds
+
+    holds = start_budget_holds()
+
     lease = None
     if auth.max_concurrent is not None:
         slots = _key_slots(request)
@@ -624,6 +630,9 @@ async def get_inference_auth(
     finally:
         if lease is not None:
             await lease.release()
+        enforcer = getattr(request.app.state, "enforcer", None)
+        if holds and enforcer is not None:
+            enforcer.release_budget_holds(holds)
 
 
 def _key_slots(request: Request) -> ConcurrencyBackend:
