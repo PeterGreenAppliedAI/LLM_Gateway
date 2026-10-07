@@ -1,6 +1,7 @@
 # Client Deployment Readiness Assessment
 
 _Last reviewed: 2026-10-06, against `main` at `a17a0d8`. Test suite: 562 passing._
+_Decisions behind the fixes: [DECISIONS.md](DECISIONS.md)._
 
 This replaces the January 2026 assessment. Much of what that version listed as
 missing has since shipped (see [What changed since January](#what-changed-since-january)).
