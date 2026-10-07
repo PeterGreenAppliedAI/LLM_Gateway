@@ -1,5 +1,7 @@
 """Tests for security scan store (training data collection)."""
 
+import json
+
 import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -24,7 +26,7 @@ async def engine():
 
 @pytest_asyncio.fixture
 async def store(engine):
-    return SecurityScanStore(engine)
+    return SecurityScanStore(engine, store_messages="all")  # training-data features opt in
 
 
 SAMPLE_MESSAGES = [
@@ -394,7 +396,7 @@ async def test_messages_redacted_before_storage(engine):
     """Training data must not persist raw PII when detection is enabled."""
     from gateway.security.pii import PIIScrubber
 
-    store = SecurityScanStore(engine, redactor=PIIScrubber().redact)
+    store = SecurityScanStore(engine, redactor=PIIScrubber().redact, store_messages="all")
     await store.store_scan(
         request_id="req-pii",
         client_id="app",
@@ -404,3 +406,97 @@ async def test_messages_redacted_before_storage(engine):
     )
     scan = await store.get_scan_by_id("req-pii")
     assert scan["messages"] == [{"role": "user", "content": "call [PHONE]"}]
+
+
+# =============================================================================
+# Message retention is opt-in (D-041)
+# =============================================================================
+
+
+async def _stored_messages(engine, request_id):
+    from sqlalchemy import select
+
+    from gateway.storage.schema import security_scans
+
+    async with engine.connect() as conn:
+        return (
+            await conn.execute(
+                select(security_scans.c.messages).where(security_scans.c.request_id == request_id)
+            )
+        ).scalar()
+
+
+CONFIDENTIAL = [{"role": "user", "content": "Q3 acquisition target is Initech, price $40M"}]
+
+
+class TestMessageRetention:
+    @pytest.mark.asyncio
+    async def test_default_keeps_verdicts_not_content(self, engine):
+        store = SecurityScanStore(engine)  # the default: store_messages="none"
+        await store.store_scan("r1", "c", CONFIDENTIAL, "none", 0)
+        stored = json.dumps(await _stored_messages(engine, "r1"))
+        assert "Initech" not in stored
+        assert "not stored" in stored
+
+    @pytest.mark.asyncio
+    async def test_flagged_keeps_only_flagged(self, engine):
+        store = SecurityScanStore(engine, store_messages="flagged")
+        await store.store_scan("clean", "c", CONFIDENTIAL, "none", 0)
+        await store.store_scan("hit", "c", CONFIDENTIAL, "high", 2)
+        await store.store_scan("guard", "c", CONFIDENTIAL, "none", 0, guard_safe=False)
+        assert "Initech" not in json.dumps(await _stored_messages(engine, "clean"))
+        assert "Initech" in json.dumps(await _stored_messages(engine, "hit"))
+        assert "Initech" in json.dumps(await _stored_messages(engine, "guard"))
+
+    @pytest.mark.asyncio
+    async def test_stored_messages_redacted_even_without_pii_detection(self, engine):
+        store = SecurityScanStore(engine, store_messages="all")  # no redactor passed
+        await store.store_scan(
+            "r1", "c", [{"role": "user", "content": "mail jane.doe@example.com"}], "none", 0
+        )
+        assert "jane.doe@example.com" not in json.dumps(await _stored_messages(engine, "r1"))
+
+    @pytest.mark.asyncio
+    async def test_withheld_scans_not_exported_as_training_data(self, engine):
+        store = SecurityScanStore(engine)
+        await store.store_scan("r1", "c", CONFIDENTIAL, "high", 1)
+        await store.label_scan("r1", label="unsafe", labeled_by="admin")
+        assert await store.export_training_data(format="raw") == []
+
+    @pytest.mark.asyncio
+    async def test_old_scans_and_pii_events_expire(self, engine):
+        from datetime import datetime, timedelta, timezone
+
+        from sqlalchemy import func, select, update
+
+        from gateway.storage.audit import AuditLogger
+        from gateway.storage.schema import pii_events, security_scans
+
+        store = SecurityScanStore(engine)
+        await store.store_scan("old", "c", CONFIDENTIAL, "none", 0)
+        await store.store_scan("new", "c", CONFIDENTIAL, "none", 0)
+        audit = AuditLogger(engine)
+        async with engine.begin() as conn:
+            await conn.execute(
+                pii_events.insert().values(
+                    request_id="old",
+                    timestamp=datetime.now(timezone.utc) - timedelta(days=100),
+                    client_id="c",
+                    pii_type="email",
+                    message_index=0,
+                    position_start=0,
+                    position_end=1,
+                    value_hash="x" * 64,
+                    was_scrubbed=False,
+                )
+            )
+            await conn.execute(
+                update(security_scans)
+                .where(security_scans.c.request_id == "old")
+                .values(timestamp=datetime.now(timezone.utc) - timedelta(days=100))
+            )
+        assert await store.cleanup_old_scans(90) == 1
+        assert await audit.cleanup_old_pii_events(90) == 1
+        async with engine.connect() as conn:
+            left = (await conn.execute(select(func.count()).select_from(security_scans))).scalar()
+        assert left == 1

@@ -642,6 +642,13 @@ class AuditLogger:
             logger.error("Audit log cleanup failed", error=str(e))
             return 0
 
+    async def cleanup_old_pii_events(self, retention_days: int) -> int:
+        """Delete PII events older than retention_days (D-041). Returns rows deleted."""
+        cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+        async with self._engine.begin() as conn:
+            result = await conn.execute(delete(pii_events).where(pii_events.c.timestamp < cutoff))
+        return result.rowcount or 0
+
     async def log_pii_events(
         self,
         request_id: str,

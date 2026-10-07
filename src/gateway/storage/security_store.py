@@ -1,7 +1,10 @@
 """Persistent storage for security scan results.
 
-Stores every security analysis result (regex + guard verdicts + original messages)
-for training data collection. Supports human labeling workflow and training data export.
+Stores every security analysis result (regex + guard verdicts). Message
+content is kept only by explicit opt-in (GATEWAY_SECURITY_STORE_MESSAGES,
+D-041): before, every prompt was stored here, unredacted unless PII
+detection was on and never deleted, whatever the audit body setting said.
+Supports human labeling workflow and training data export.
 """
 
 from collections.abc import Callable
@@ -17,6 +20,9 @@ from gateway.storage.schema import security_scans
 logger = get_logger(__name__)
 
 
+NOT_STORED = "[messages not stored: GATEWAY_SECURITY_STORE_MESSAGES]"
+
+
 class SecurityScanStore:
     """Persistent storage for security scan results.
 
@@ -26,9 +32,20 @@ class SecurityScanStore:
     - Training data export in finetuning format
     """
 
-    def __init__(self, engine: AsyncEngine, redactor: Callable[[Any], Any] | None = None):
+    def __init__(
+        self,
+        engine: AsyncEngine,
+        redactor: Callable[[Any], Any] | None = None,
+        store_messages: str = "none",
+    ):
         self._engine = engine
-        # Applied to messages before they are persisted (PII scrubbing)
+        self.store_messages = store_messages
+        # Applied to messages before they are persisted. Stored messages are
+        # always redacted: without PII detection configured, use our own.
+        if redactor is None and store_messages != "none":
+            from gateway.security.pii import PIIScrubber
+
+            redactor = PIIScrubber().redact
         self.redactor = redactor
 
     def _redact(self, messages: list[dict]) -> list[dict]:
@@ -69,13 +86,19 @@ class SecurityScanStore:
         if has_guard:
             is_disagreement = regex_flagged != (not guard_safe)
 
+        flagged = regex_flagged or (has_guard and not guard_safe)
+        keep = self.store_messages == "all" or (self.store_messages == "flagged" and flagged)
+        stored_messages = (
+            self._redact(messages) if keep else [{"role": "system", "content": NOT_STORED}]
+        )
+
         values = {
             "request_id": request_id,
             "timestamp": datetime.now(timezone.utc),
             "client_id": client_id,
             "model": model,
             "task": task,
-            "messages": self._redact(messages),
+            "messages": stored_messages,
             "regex_threat_level": regex_threat_level,
             "regex_match_count": regex_match_count,
             "regex_matches": regex_matches,
@@ -262,6 +285,22 @@ class SecurityScanStore:
                 "label_progress_pct": round(labeled / total * 100, 1) if total > 0 else 0,
             }
 
+    async def cleanup_old_scans(self, retention_days: int) -> int:
+        """Delete scans older than retention_days (D-041). Returns rows deleted."""
+        from datetime import timedelta
+
+        from sqlalchemy import delete
+
+        cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+        async with self._engine.begin() as conn:
+            result = await conn.execute(
+                delete(security_scans).where(security_scans.c.timestamp < cutoff)
+            )
+        deleted = result.rowcount or 0
+        if deleted:
+            logger.info("Security scan cleanup", deleted=deleted, retention_days=retention_days)
+        return deleted
+
     async def export_training_data(
         self,
         format: str = "llama_guard",
@@ -286,6 +325,8 @@ class SecurityScanStore:
         async with self._engine.connect() as conn:
             result = await conn.execute(stmt)
             rows = [dict(row._mapping) for row in result.fetchall()]
+        # Scans without stored messages aren't training examples
+        rows = [r for r in rows if not _messages_withheld(r.get("messages"))]
 
         if format == "llama_guard":
             return [_to_llama_guard_format(row) for row in rows]
@@ -361,3 +402,12 @@ def _threat_levels_gte(min_level: str) -> list[str]:
         return order[idx:]
     except ValueError:
         return []
+
+
+def _messages_withheld(messages: Any) -> bool:
+    return (
+        isinstance(messages, list)
+        and len(messages) == 1
+        and isinstance(messages[0], dict)
+        and messages[0].get("content") == NOT_STORED
+    )

@@ -163,6 +163,20 @@ class SecuritySettings(BaseSettings):
         default_factory=list,
         description="Source IPs to skip security scanning (trusted internal services)",
     )
+    # What security scans keep of the request itself (D-041). Verdicts and
+    # metadata are always kept; message content only by explicit opt-in.
+    store_messages: Literal["none", "flagged", "all"] = Field(
+        default="none",
+        description="none: verdicts only. flagged: messages of requests the regex scanner "
+        "or guard model flagged (for review). all: every request's messages (training data "
+        "collection). Stored messages are always PII-redacted.",
+    )
+    retention_days: int = Field(
+        default=90,
+        ge=0,
+        le=3650,
+        description="Delete security scans and PII events older than this (0 = keep)",
+    )
 
 
 class Settings(BaseSettings):

@@ -274,9 +274,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Create security scan store for training data collection
     scan_store = None
     if getattr(app.state, "db_engine", None):
-        scan_store = SecurityScanStore(app.state.db_engine, redactor=body_redactor)
+        scan_store = SecurityScanStore(
+            app.state.db_engine,
+            redactor=body_redactor,
+            store_messages=settings.security.store_messages,
+        )
         app.state.scan_store = scan_store
-        logger.info("Security scan store enabled (training data collection)")
+        logger.info(
+            "Security scan store enabled",
+            stores_messages=settings.security.store_messages,
+            retention_days=settings.security.retention_days,
+        )
 
     scan_allowlist_ips = settings.security.scan_allowlist_ips
     security_analyzer = AsyncSecurityAnalyzer(
@@ -290,17 +298,36 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.info("Security scan allowlist", allowlisted_ips=scan_allowlist_ips)
     logger.info("Security analyzer started")
 
-    # Start periodic audit log cleanup
+    # Retention (D-041): audit rows, security scans, PII events and budget
+    # usage each expire; at startup, then daily
     retention_days = settings.db.retention_days
-    if app.state.audit_logger and retention_days > 0:
+    security_retention = settings.security.retention_days
+    if app.state.audit_logger and (retention_days > 0 or security_retention > 0):
+        from gateway.storage.budgets import BudgetStore
+
+        async def _cleanup_once() -> None:
+            try:
+                if retention_days > 0:
+                    await app.state.audit_logger.cleanup_old_records(retention_days)
+                    await BudgetStore(app.state.db_engine).prune(retention_days)
+                if security_retention > 0:
+                    await app.state.audit_logger.cleanup_old_pii_events(security_retention)
+                    if scan_store is not None:
+                        await scan_store.cleanup_old_scans(security_retention)
+            except Exception as e:
+                logger.error("Retention cleanup failed; will retry tomorrow", error=str(e))
 
         async def _cleanup_loop() -> None:
             while True:
-                await asyncio.sleep(86400)  # Run daily
-                await app.state.audit_logger.cleanup_old_records(retention_days)
+                await _cleanup_once()
+                await asyncio.sleep(86400)  # daily
 
         app.state._cleanup_task = asyncio.create_task(_cleanup_loop())
-        logger.info("Audit log retention policy", retention_days=retention_days)
+        logger.info(
+            "Retention policy",
+            audit_days=retention_days,
+            security_scan_and_pii_days=security_retention,
+        )
 
     yield
 

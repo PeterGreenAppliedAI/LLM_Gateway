@@ -42,6 +42,12 @@ from gateway.models.openai import (
 from gateway.observability import get_logger, get_metrics
 from gateway.observability.logging import clear_request_context
 from gateway.policy import PolicyEnforcer, PolicyViolation
+from gateway.routes.content_parts import (
+    check_content_parts,
+    redact_media,
+    sanitize_content,
+    text_only,
+)
 from gateway.routes.dependencies import (
     AuthResult,
     get_audit_logger,
@@ -150,15 +156,16 @@ async def chat_completions(
         task="chat",
     )
 
-    # Security: Sanitize message content (removes invisible Unicode chars)
+    # Security: Sanitize message content (removes invisible Unicode chars).
+    # Content-part messages keep their structure: text parts are sanitized in
+    # place and inline images pass through (D-011). Flattening them to a
+    # string here used to drop every image silently.
     sanitized_messages = []
     for msg in body.messages:
-        text = msg.content_as_str()
-        if text:
-            result = sanitizer.sanitize(text)
-            sanitized_messages.append({"role": msg.role, "content": result.sanitized})
-        else:
-            sanitized_messages.append({"role": msg.role, "content": ""})
+        check_content_parts(msg.content)
+        sanitized_messages.append(
+            {"role": msg.role, "content": sanitize_content(sanitizer, msg.content)}
+        )
 
     # PII detection (always flags) + optional scrubbing (per-route)
     if pii_scrubber:
@@ -192,7 +199,7 @@ async def chat_completions(
             request_id=ctx.request_id,
             client_id=client_id,
             model=body.model,
-            messages=sanitized_messages,
+            messages=text_only(sanitized_messages),
             source_ip=request.client.host if request.client else None,
         )
 
@@ -238,7 +245,8 @@ async def chat_completions(
             enforcer=enforcer,
             request_body={
                 "messages": [
-                    m.model_dump(exclude_none=True) for m in internal_request.messages or []
+                    redact_media(m.model_dump(exclude_none=True))
+                    for m in internal_request.messages or []
                 ],
                 "response_format": body.response_format,
                 "tool_names": [t.get("function", {}).get("name") for t in (body.tools or [])],
@@ -279,7 +287,8 @@ async def chat_completions(
             completion_tokens=completion_tokens,
             request_body={
                 "messages": [
-                    m.model_dump(exclude_none=True) for m in internal_request.messages or []
+                    redact_media(m.model_dump(exclude_none=True))
+                    for m in internal_request.messages or []
                 ],
                 "response_format": body.response_format,
                 "tool_names": [t.get("function", {}).get("name") for t in (body.tools or [])],
@@ -437,7 +446,7 @@ async def completions(
                         pii_results=[pii_result],
                         was_scrubbed=scrub,
                     )
-                if scrub and pii_result.scrubbed_text:
+                if scrub and pii_result.scrubbed_text is not None:
                     sanitized_prompt = pii_result.scrubbed_text
         elif isinstance(sanitized_prompt, list):
             all_pii_results = []
@@ -452,7 +461,7 @@ async def completions(
                         pii_count=pii_result.detection_count,
                         scrubbed=scrub,
                     )
-                    if scrub and pii_result.scrubbed_text:
+                    if scrub and pii_result.scrubbed_text is not None:
                         sanitized_prompt[idx] = pii_result.scrubbed_text
             if all_pii_results and audit_logger:
                 await audit_logger.log_pii_events(
@@ -697,7 +706,7 @@ async def embeddings(
                         pii_results=[pii_result],
                         was_scrubbed=scrub,
                     )
-            if scrub:
+            if scrub and pii_result.scrubbed_text is not None:
                 sanitized_input = pii_result.scrubbed_text
         elif isinstance(sanitized_input, list):
             total_pii = 0
@@ -710,7 +719,8 @@ async def embeddings(
                     total_pii += pii_result.detection_count
                     if pii_result.has_pii:
                         all_pii_results.append(pii_result)
-                    scrubbed_list.append(pii_result.scrubbed_text if scrub else item)
+                    scrubbed = scrub and pii_result.scrubbed_text is not None
+                    scrubbed_list.append(pii_result.scrubbed_text if scrubbed else item)
                 else:
                     scrubbed_list.append(item)
             if total_pii:
@@ -753,7 +763,10 @@ async def embeddings(
             source_ip=request.client.host if request.client else None,
         )
 
-    # Convert to internal format
+    # Convert to internal format from the sanitized/scrubbed input. Building it
+    # from body.input sent the raw text upstream while logging "scrubbed"
+    # (found by external review; tests/test_wire.py checks what the engine gets)
+    body = body.model_copy(update={"input": sanitized_input})
     internal_request = body.to_internal(client_id=client_id)
     # One ID end to end: the response's id and the audit row share it, so a
     # client's chatcmpl-/cmpl- id finds its request in the audit trail
