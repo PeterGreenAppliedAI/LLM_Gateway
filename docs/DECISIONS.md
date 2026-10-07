@@ -313,3 +313,45 @@ is observe-only).
 - **`connect_timeout` was ignored for endpoints.** The registry never passed it to the adapter,
   so it was always 3s. *Fix:* passed through, along with `stream_idle_timeout`.
 
+
+---
+
+## D-017: Batch-shaped requests were silently reduced to one
+
+- **Status:** Implemented, 2026-10-07, `0ec8d7b`
+- **Problem:** Found while reviewing how the gateway uses continuous batching:
+  - **vLLM embeddings didn't exist.** The vLLM adapter had no `embeddings` method. The base
+    class raised `NotImplementedError`, the dispatcher treated it as an endpoint failure, and
+    clients saw "all providers unavailable", while the README listed vLLM embeddings as
+    "Full".
+  - **Prompt lists on `/v1/completions` used only `prompt[0]`.** A client sending 10 prompts got
+    one answer and no error.
+  - **`n` was ignored.** Unknown request fields are dropped without an error, so `n: 3` returned
+    one choice.
+- **What didn't work:**
+  - *Passing `n` and prompt lists through to the engine:* vLLM supports both, Ollama supports
+    neither, and the internal response carries one output. Making every adapter and the
+    internal model multi-choice would touch the whole pipeline.
+  - *Batching requests inside the gateway:* pointless with continuous-batching engines. They
+    batch whatever is in flight, so the gateway's job is to send concurrent requests, not to
+    batch them itself.
+- **Fix:** Fan out in the route (`routes/fanout.py`). Each requested choice (prompts × n,
+  prompt-major order like OpenAI) is its own upstream generation, dispatched concurrently and
+  merged into one response with summed usage. This works the same on every engine.
+  - Capped at 8 concurrent upstream requests per client request, and 64 choices per request.
+  - `n > 1` with `stream: true` is rejected (422), because interleaving choices in one
+    stream isn't worth the complexity yet.
+  - All-or-nothing: one failed choice fails the request and cancels the rest.
+  - One audit row and one budget charge per client request; one metrics sample per upstream
+    generation, so per-endpoint metrics stay accurate.
+  - vLLM embeddings added via `/v1/embeddings` (the whole list in one call). Embeddings from
+    OpenAI-style upstreams are sorted by `index`, so output *i* always matches input *i*.
+- **What works now:** `tests/test_batch_requests.py`.
+- **Trade-offs:** With vLLM, `n` as separate requests forgoes vLLM's shared-prompt
+  optimization for `n`. Usage reports the prompt once per choice, which matches the compute
+  actually done. Prompt lists still count as one request against rate limits.
+- **Revisit when:** Phase 2 lands. The fan-out should then take slots from the per-endpoint
+  admission queue, and batch keys get a lower priority class. An offline `/v1/batches` API
+  would sit on top of that.
+- **Known issue found, not fixed here:** `/v1/completions` ignores `stream: true` and returns
+  plain JSON, which breaks clients expecting server-sent events.
