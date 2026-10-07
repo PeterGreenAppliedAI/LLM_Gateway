@@ -180,7 +180,16 @@ class EndpointConfig(BaseModel):
     max_concurrent: int | None = Field(default=None, ge=1, le=10000)
     max_retries: int = Field(default=3, ge=0, le=10)
     labels: dict[str, str] = Field(default_factory=dict)  # cold_flexible, prod_eligible, etc.
-    api_key_env: str | None = None  # Environment variable name for API key
+    # Upstream credentials (D-036): a literal key or ${ENV_VAR}, or the name
+    # of an env var; sent as Authorization: Bearer. Plus any extra headers.
+    api_key: str | None = None
+    api_key_env: str | None = None
+    headers: dict[str, str] = Field(default_factory=dict)
+    # Whether this endpoint's models are chat/completion/embedding models
+    # for catalog routing (D-036). None = auto: yes, unless it declares media
+    # capabilities (a Kokoro or Whisper server's models aren't chat models).
+    # Set true for mixed servers (LocalAI, OpenAI) that serve both.
+    serves_text: bool | None = None
     # Media tasks this endpoint serves (D-020). Chat/completions/embeddings
     # need no declaration; media routes only use endpoints that declare it.
     capabilities: list[MediaCapability] = Field(default_factory=list, max_length=4)
@@ -189,6 +198,11 @@ class EndpointConfig(BaseModel):
     profile: SafeIdentifier | None = None
     # Voices for engines that don't list their own (admin-declared, D-020)
     voices: list[str] = Field(default_factory=list, max_length=1000)
+
+    @property
+    def text_models(self) -> bool:
+        """Whether discovered models join the text catalog (see serves_text)."""
+        return self.serves_text if self.serves_text is not None else not self.capabilities
 
     @model_validator(mode="after")
     def _media_needs_openai_contract(self) -> "EndpointConfig":
@@ -431,6 +445,11 @@ class GatewayConfig(BaseModel):
                     stream_idle_timeout=p.stream_idle_timeout,
                     max_retries=p.max_retries,
                     max_concurrent=p.max_concurrent,
+                    # Credentials too: dropping them broke every keyed
+                    # cloud provider in the legacy format (D-036)
+                    api_key=p.api_key,
+                    api_key_env=p.api_key_env,
+                    headers=p.headers,
                 )
                 for p in self.providers
             ]

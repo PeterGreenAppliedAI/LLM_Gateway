@@ -108,6 +108,16 @@ endpoints:
   #   enabled: true
   #   timeout: 300.0
 
+  # Any OpenAI-compatible server (LM Studio, llama.cpp server, LocalAI,
+  # OpenAI itself): models are discovered from GET /v1/models (D-036).
+  # - name: lmstudio
+  #   type: openai
+  #   url: http://192.168.1.50:1234
+  #   api_key_env: LMSTUDIO_API_KEY   # or api_key: "${VAR}"; sent as Bearer
+  #   # headers: {X-Org: acme}        # extra headers, if the server needs them
+  #   # serves_text: true             # only for servers that ALSO declare media
+  #   #                               # capabilities (LocalAI); see below
+
   # Example: Second GPU node
   # - name: gpu-node-2
   #   type: ollama
@@ -121,6 +131,8 @@ endpoints:
   # Voice endpoints (any engine speaking OpenAI's audio API; see
   # docs/MEDIA_ENGINES.md). type is the request style, capabilities say what
   # it serves. Keep these engines on a private network: most have no auth.
+  # Their models don't join the chat catalog (a voice isn't a chat model);
+  # a server that does both sets serves_text: true.
   #
   # Text-to-speech, e.g. Kokoro-FastAPI:
   # - name: kokoro

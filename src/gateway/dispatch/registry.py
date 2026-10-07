@@ -143,6 +143,9 @@ class ProviderRegistry:
             stream_idle_timeout=config.stream_idle_timeout,
             max_retries=config.max_retries,
             max_concurrent=config.max_concurrent,
+            api_key=config.api_key,
+            api_key_env=config.api_key_env,
+            headers=config.headers,
         )
         adapter = create_adapter(provider_config)
         self._adapters[config.name] = adapter

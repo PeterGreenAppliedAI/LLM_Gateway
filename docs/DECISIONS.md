@@ -1004,3 +1004,50 @@ is observe-only).
     - Redis killed → all requests still served under per-process limits, `/health`
       degraded on both, one error line per process, no log spam;
     - Redis restarted → both back to `ok`.
+
+## D-036: Model discovery on OpenAI-compatible endpoints; endpoint credentials
+
+- **Status:** Implemented, 2026-10-07
+- **Problem 1, discovery:** discovery knew Ollama, vLLM, TRT-LLM and SGLang. `type: openai`
+  endpoints were skipped with "Unknown endpoint type": LM Studio, llama.cpp server, LocalAI,
+  OpenAI. Their models never reached the catalog, the dashboard showed "0 models", and a
+  request naming one of their models couldn't be routed to them by name. Found during the
+  D-034 end-to-end run.
+- **Problem 2, credentials (found while fixing 1):** keys never reached the upstream.
+  - The registry built adapters from `endpoints:` entries without `api_key_env`.
+  - The legacy `providers:` format is converted to endpoints at load time, and that
+    conversion dropped `api_key` and `headers`.
+  - So a keyed cloud or LAN server got no `Authorization` header in either format.
+  - The vLLM adapter had no auth support at all, so a vLLM started with `--api-key` was
+    unusable.
+- **Fix:**
+  - **Discovery:** one OpenAI-compatible routine (`GET /v1/models`) serves vLLM, SGLang and
+    `openai` endpoints. It sends the endpoint's credentials.
+  - **Credentials:**
+    - Endpoints accept `api_key` (literal or `${ENV}`), `api_key_env` and `headers`.
+    - The legacy conversion and the registry carry all three through.
+    - Key resolution lives in one place (`providers/auth.py`), used by the OpenAI and vLLM
+      adapters and by discovery.
+  - **Media models stay out of the chat catalog:** a Kokoro server lists `kokoro`/`tts-1`, a
+    Whisper server lists `faster-whisper-small`, and neither is a chat model.
+    - An endpoint that declares media `capabilities` contributes no text models by default.
+    - A mixed server (LocalAI, OpenAI cloud) sets `serves_text: true`.
+    - Either way, models labeled with a media `task` (speaches does this) are skipped.
+- **Alternatives considered:** *guessing media models by name* ("whisper", "tts", "kokoro"…).
+  It's fragile (new engines, renamed models) and silently wrong when it misses. The explicit
+  rule costs one line of config for the uncommon mixed server.
+- **Behavior change to note:** a vLLM endpoint that declares `capabilities: [stt]` (vLLM
+  serving Whisper) no longer adds its Whisper model to the chat catalog. Before, a chat request
+  for it was routed there and failed.
+- **What works now:** `tests/test_discovery.py` (11 tests; there were no discovery tests
+  before):
+  - openai-type discovery, with routing by model name;
+  - Bearer key and extra headers sent, and no header without a key;
+  - one failing endpoint doesn't block others;
+  - vLLM unchanged;
+  - media endpoints skipped, and the mixed-server opt-in with task filtering;
+  - credentials surviving both config formats;
+  - vLLM sending its key.
+
+  On a real gateway, the D-034 fake engine now lists `fake-7b`, chat routes to it by name,
+  and the startup warning is gone.

@@ -13,7 +13,6 @@ Per NEXT_STEPS.md Phase 1: Cloud Provider Support
 
 import asyncio
 import json
-import os
 import time
 from collections.abc import AsyncIterator
 from typing import Any
@@ -38,6 +37,7 @@ from gateway.models.internal import (
     StreamChunk,
     ToolCall,
 )
+from gateway.providers.auth import resolve_api_key
 from gateway.providers.base import ProviderAdapter
 from gateway.providers.streaming import (
     classify_exception,
@@ -81,36 +81,9 @@ class OpenAIAdapter(ProviderAdapter):
 
     def _resolve_api_key(self, config: ProviderConfig) -> str | None:
         """Resolve API key from config or environment variable."""
-        # Direct api_key in config
-        api_key = getattr(config, "api_key", None)
-        if api_key:
-            # Handle ${ENV_VAR} syntax
-            if api_key.startswith("${") and api_key.endswith("}"):
-                env_var = api_key[2:-1]
-                return os.environ.get(env_var)
-            return api_key
-
-        # api_key_env specifies which env var to use
-        api_key_env = getattr(config, "api_key_env", None)
-        if api_key_env:
-            return os.environ.get(api_key_env)
-
-        # Default env vars by common provider names
-        name_lower = config.name.lower()
-        if "openrouter" in name_lower:
-            return os.environ.get("OPENROUTER_API_KEY")
-        elif "openai" in name_lower:
-            return os.environ.get("OPENAI_API_KEY")
-        elif "anthropic" in name_lower:
-            return os.environ.get("ANTHROPIC_API_KEY")
-        elif "groq" in name_lower:
-            return os.environ.get("GROQ_API_KEY")
-        elif "together" in name_lower:
-            return os.environ.get("TOGETHER_API_KEY")
-        elif "fireworks" in name_lower:
-            return os.environ.get("FIREWORKS_API_KEY")
-
-        return None
+        return resolve_api_key(
+            config.name, getattr(config, "api_key", None), getattr(config, "api_key_env", None)
+        )
 
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create HTTP client with authentication headers (thread-safe)."""

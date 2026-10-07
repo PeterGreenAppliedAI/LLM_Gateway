@@ -31,6 +31,7 @@ from gateway.models.internal import (
     StreamChunk,
     ToolCall,
 )
+from gateway.providers.auth import auth_headers
 from gateway.providers.base import ProviderAdapter
 from gateway.providers.streaming import (
     classify_exception,
@@ -57,6 +58,10 @@ class VLLMAdapter(ProviderAdapter):
         super().__init__(config=config, provider_type=ProviderType.VLLM)
         self._client: httpx.AsyncClient | None = None
         self._client_lock = asyncio.Lock()
+        # vLLM started with --api-key requires it on every call (D-036)
+        self._headers = auth_headers(
+            config.name, config.api_key, config.api_key_env, config.headers
+        )
 
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create HTTP client (thread-safe)."""
@@ -66,6 +71,7 @@ class VLLMAdapter(ProviderAdapter):
                     base_url=self.base_url,
                     timeout=self.http_timeout(),
                     limits=self.http_limits(),
+                    headers=self._headers,
                 )
             return self._client
 
