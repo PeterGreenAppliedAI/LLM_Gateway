@@ -84,6 +84,9 @@ class ProviderConfig(BaseModel):
     # Longest gap allowed between streamed chunks once the first one has
     # arrived. The first chunk may take the full `timeout` (cold model load).
     stream_idle_timeout: float = Field(default=60.0, gt=0, le=3600.0)
+    # Most requests this gateway sends the endpoint at once (D-032); more
+    # overflow to the next endpoint or wait. None = unlimited.
+    max_concurrent: int | None = Field(default=None, ge=1, le=10000)
     max_retries: int = Field(
         default=3, ge=0, le=10
     )  # TODO: Not yet used in dispatcher - reserved for retry+backoff implementation
@@ -114,6 +117,16 @@ class CircuitBreakerConfig(BaseModel):
 
     failure_threshold: int = Field(default=5, ge=1, le=100)
     cooldown_seconds: float = Field(default=15.0, gt=0, le=3600)
+
+
+class AdmissionConfig(BaseModel):
+    """Per-endpoint concurrency limits (dispatch/admission.py, D-032).
+
+    When every candidate endpoint is at `max_concurrent`, a request waits up
+    to `max_queue_wait_seconds` for a slot, then gets 503 + Retry-After.
+    """
+
+    max_queue_wait_seconds: float = Field(default=5.0, ge=0, le=300)
 
 
 class MediaTokenEquivalents(BaseModel):
@@ -152,6 +165,9 @@ class EndpointConfig(BaseModel):
     # Longest gap allowed between streamed chunks once the first one has
     # arrived. The first chunk may take the full `timeout` (cold model load).
     stream_idle_timeout: float = Field(default=60.0, gt=0, le=3600.0)
+    # Most requests this gateway sends the endpoint at once (D-032); more
+    # overflow to the next endpoint or wait. None = unlimited.
+    max_concurrent: int | None = Field(default=None, ge=1, le=10000)
     max_retries: int = Field(default=3, ge=0, le=10)
     labels: dict[str, str] = Field(default_factory=dict)  # cold_flexible, prod_eligible, etc.
     api_key_env: str | None = None  # Environment variable name for API key
@@ -210,6 +226,10 @@ class ResolutionConfig(BaseModel):
     ambiguous_behavior: str = Field(
         default="error", pattern="^(error|first_priority)$"
     )  # error or first_priority
+    # priority: the resolved endpoint first, overflowing in order when it is
+    # at max_concurrent. least_loaded: candidates ordered by in-flight share
+    # of max_concurrent (D-032).
+    strategy: Literal["priority", "least_loaded"] = "priority"
 
 
 class ApiKeyConfig(BaseModel):
@@ -345,6 +365,7 @@ class GatewayConfig(BaseModel):
     embedding_queue: EmbeddingQueueYamlConfig = Field(default_factory=EmbeddingQueueYamlConfig)
     media: MediaConfig = Field(default_factory=MediaConfig)
     circuit_breaker: CircuitBreakerConfig = Field(default_factory=CircuitBreakerConfig)
+    admission: AdmissionConfig = Field(default_factory=AdmissionConfig)
 
     # New endpoints architecture
     endpoints: list[EndpointConfig] = Field(default_factory=list, max_length=50)
@@ -388,6 +409,7 @@ class GatewayConfig(BaseModel):
                     connect_timeout=p.connect_timeout,
                     stream_idle_timeout=p.stream_idle_timeout,
                     max_retries=p.max_retries,
+                    max_concurrent=p.max_concurrent,
                 )
                 for p in self.providers
             ]

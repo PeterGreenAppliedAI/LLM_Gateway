@@ -48,6 +48,7 @@ class ErrorCode(str, Enum):
     PROVIDER_NOT_FOUND = "provider_not_found"
     PROVIDER_UNAVAILABLE = "provider_unavailable"
     ALL_PROVIDERS_UNAVAILABLE = "all_providers_unavailable"
+    CAPACITY_EXCEEDED = "capacity_exceeded"
     DISPATCH_ERROR = "dispatch_error"
     AMBIGUOUS_MODEL = "ambiguous_model"
     MODEL_NOT_FOUND = "model_not_found"
@@ -334,6 +335,21 @@ class AllProvidersUnavailableError(DispatchError):
             message=message,
             code=ErrorCode.ALL_PROVIDERS_UNAVAILABLE,
             details=details,
+            retry_after=retry_after,
+        )
+
+
+class CapacityExceededError(DispatchError):
+    """Every candidate endpoint stayed at max_concurrent for the whole queue wait."""
+
+    def __init__(self, endpoints: list[str], waited_seconds: float, retry_after: float):
+        super().__init__(
+            message=(
+                f"All endpoints for this request are at capacity "
+                f"({', '.join(endpoints)}); waited {waited_seconds:.1f}s"
+            ),
+            code=ErrorCode.CAPACITY_EXCEEDED,
+            details={"endpoints": endpoints, "waited_seconds": round(waited_seconds, 2)},
             retry_after=retry_after,
         )
 

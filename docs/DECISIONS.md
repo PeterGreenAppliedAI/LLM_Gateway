@@ -708,3 +708,83 @@ is observe-only).
 
   Also `test_open_circuit_skips_engine` (voice).
 
+
+## D-032: Admission control and overflow routing (phase 2b/2c)
+
+- **Status:** Implemented, 2026-10-07
+- **Problem:** The gateway didn't know how busy an endpoint was. Chat traffic was limited by
+  request *rate*, not by requests *in flight*. Ten long generations sent to an Ollama box with
+  `OLLAMA_NUM_PARALLEL=4` meant six queued invisibly inside Ollama. Then they timed out or
+  blew TTFT, while a second GPU with the same model sat idle. Every request went to the first
+  endpoint by priority until that endpoint *failed*.
+- **Decision:**
+  - **Per-endpoint `max_concurrent`** on `endpoints[]` (unset = unlimited, but still counted).
+    It is a gateway-side mirror of the engine's own parallel slots (`OLLAMA_NUM_PARALLEL`,
+    vLLM `--max-num-seqs`).
+  - **Priority with overflow (default):** candidates keep their resolved order: pin,
+    target_endpoint, model default, priority, then the fallback chain. A request takes the
+    first one with a free slot, so a full primary overflows to the next box *before* anything
+    fails. Pins and `fallback_allowed: false` never overflow.
+  - **`resolution.strategy: least_loaded` (opt-in):** candidates are ordered by in-flight ÷
+    `max_concurrent`, with priority as the tiebreaker. Use it for equal boxes you want evenly
+    used. Priority stays the default: on a home lab the "primary" is usually the better GPU.
+  - **Bounded FIFO wait:** when every candidate is full, the request waits for whichever slot
+    frees first, up to `admission.max_queue_wait_seconds` (default 5 s). It then gets
+    **503 `capacity_exceeded`** with `Retry-After` (≈ the wait, 1–30 s). A freed slot passes
+    *directly* to the oldest waiter, so a newcomer can't jump the queue.
+  - **The slot lasts as long as the work:**
+    - non-streaming: until the response returns;
+    - streams: until the stream closes (in `_chain`'s `finally`);
+    - voice: until the audio has been relayed (`UpstreamMedia.aclose()`).
+
+    Failover releases the failed endpoint's slot before taking the next. Fan-out (`n`>1,
+    prompt lists) goes through `dispatch()`, so each choice takes its own slot.
+  - **Interface, not implementation:** `ConcurrencyBackend` has an `InMemoryConcurrency`
+    implementation. Counts are per process. With several workers, either divide
+    `max_concurrent` by the worker count or wait for the Redis backend (D-010). The
+    interface is the seam for it.
+- **Why 503, not 429:** 429 tells the client *it* sent too much (that's the per-key rate
+  limiter). Here the gateway's capacity is full regardless of who asked. 503 + Retry-After is
+  what OpenAI SDKs and proxies already retry.
+- **Alternatives considered:**
+  - *Round-robin:* ignores how long requests run. One 2k-token generation and one short
+    reply count the same.
+  - *Rely on the engine's own queue:* that's the status quo; the gateway can't overflow what
+    it can't see.
+  - *Unbounded gateway queue:* moves the timeout somewhere else and hides overload from
+    clients.
+  - *Weighting by GPU speed:* nothing to measure it from yet. `least_loaded` with honest
+    `max_concurrent` values gets most of the benefit.
+- **Safety nets:**
+  - A lease dropped without being closed (a stream the client abandoned before its body
+    started) is released when it's garbage-collected. This is logged at debug.
+  - A cancelled waiter passes on a slot handed to it in the same instant.
+  - Releases are idempotent.
+- **Visibility:**
+  - The catalog reports `in_flight` and `max_concurrent`; the dashboard endpoint card shows
+    "2/4 busy".
+  - Prometheus: `*_endpoint_in_flight`, `*_endpoint_max_concurrent`,
+    `*_admission_queue_depth`, `*_admission_wait_seconds` (only requests that waited) and
+    `*_admission_rejected_total`.
+- **What didn't work:**
+  - *Legacy `providers:` configs* get converted into `endpoints` by a config validator that
+    copies fields one by one. The new `max_concurrent` was silently dropped, and the first
+    overflow tests went to the primary as if it were unlimited. Added the field to the
+    conversion.
+  - *Two tests mutated `config.providers` after construction:* that has no effect, because
+    the endpoints were already derived. Rewrote them to build the config with the capacity.
+  - *`except TimeoutError` around `asyncio.wait_for`:* only correct on Python 3.11+. The
+    project supports 3.10, where it raises `asyncio.TimeoutError`, so it now catches that
+    alias.
+- **What works now:** `tests/test_admission.py` (20 tests):
+  - the backend: FIFO order, no queue-jumping, wait-for-any, timeout, cancellation, GC
+    release;
+  - overflow and the primary-first path;
+  - waiting then proceeding, and no overflow when fallback is disabled (503);
+  - a slot held for the request's duration, and released on failover;
+  - `least_loaded`;
+  - streams holding and releasing the slot;
+  - 20 concurrent requests never exceeding the cap on either endpoint;
+  - 503 + Retry-After over HTTP.
+
+  Also `test_full_engine_overflows_and_slot_is_released` (voice).

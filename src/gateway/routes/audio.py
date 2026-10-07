@@ -333,7 +333,7 @@ async def create_speech(
             )
         finally:
             with anyio.CancelScope(shield=True):
-                await upstream.response.aclose()
+                await upstream.aclose()
             if completed:
                 await outcome.record_shielded(
                     "success", usage={**usage, "bytes_out": sent}, budget_tokens=budget_tokens
@@ -546,7 +546,7 @@ async def _speech_to_text(
         try:
             body = await upstream.response.aread()
         finally:
-            await upstream.response.aclose()
+            await upstream.aclose()
         transcript = _transcript_text(body, content_type)
         engine_duration = _engine_duration(body)
         duration = engine_duration if engine_duration is not None else wav_duration
@@ -575,7 +575,7 @@ async def _speech_to_text(
             completed = True
         finally:
             with anyio.CancelScope(shield=True):
-                await upstream.response.aclose()
+                await upstream.aclose()
             text = received.decode("utf-8", errors="replace")
             usage.update(
                 duration_seconds=wav_duration,

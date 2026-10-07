@@ -17,7 +17,9 @@ Per API Error Handling Architecture:
 - Errors propagate to exception handler middleware
 """
 
+import asyncio
 import fnmatch
+import math
 import re
 from collections.abc import AsyncIterator, Collection
 from dataclasses import dataclass, field
@@ -27,10 +29,12 @@ from gateway.config import (
     EnvironmentConfig,
     ResolutionConfig,
 )
+from gateway.dispatch.admission import Lease
 from gateway.dispatch.registry import ProviderRegistry
 from gateway.errors import (
     AllProvidersUnavailableError,
     AmbiguousModelError,
+    CapacityExceededError,
     EndpointNotFoundError,
     ErrorCode,
     GatewayError,
@@ -39,12 +43,57 @@ from gateway.errors import (
     ProviderError,
     ProviderUnavailableError,
 )
-from gateway.models.common import TaskType
+from gateway.models.common import FinishReason, TaskType
 from gateway.models.internal import InternalRequest, InternalResponse, StreamChunk
 from gateway.observability import get_logger
+from gateway.observability.metrics import get_metrics
 from gateway.providers import ProviderAdapter
 
 logger = get_logger(__name__)
+
+
+def order_candidates(registry: ProviderRegistry, strategy: str, candidates: list[str]) -> list[str]:
+    """priority: as resolved. least_loaded: by in-flight share of max_concurrent.
+
+    The sort is stable, so equally loaded endpoints keep priority order.
+    An endpoint without max_concurrent counts its raw in-flight number.
+    """
+    if strategy != "least_loaded":
+        return candidates
+    admission = registry.admission
+
+    def load(name: str) -> float:
+        capacity = admission.capacity(name)
+        in_flight = admission.in_flight(name)
+        return in_flight / capacity if capacity else float(in_flight)
+
+    return sorted(candidates, key=load)
+
+
+async def admit(registry: ProviderRegistry, candidates: list[str], deadline: float) -> Lease:
+    """A slot on the first candidate with room; when all are full, the first to free up.
+
+    Shared by text and media dispatch.
+
+    Raises:
+        CapacityExceededError: Every candidate stayed full until the deadline.
+    """
+    admission = registry.admission
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    lease = await admission.acquire_any(candidates, max(0.0, deadline - started))
+    waited = loop.time() - started
+    metrics = get_metrics()
+    if lease is None:
+        metrics.record_admission_rejected()
+        # It stayed full for the whole wait; suggest waiting about as long
+        retry_after = min(30, max(1, math.ceil(registry.max_queue_wait_seconds)))
+        raise CapacityExceededError(
+            endpoints=candidates, waited_seconds=waited, retry_after=retry_after
+        )
+    if waited > 0.001:
+        metrics.observe_admission_wait(waited)
+    return lease
 
 
 # Maximum number of providers to attempt before failing
@@ -374,55 +423,78 @@ class Dispatcher:
         # WHY (the generic message hides upstream 500 bodies and timeouts)
         errors_seen: list[str] = []
 
-        # Try primary provider. When pinned, error responses raise with the
-        # provider's actual error instead of silently returning None.
-        result = await self._try_provider(
-            provider_name, request, raise_on_error=pinned, error_sink=errors_seen
-        )
-        attempted.append(provider_name)
-
-        if result is not None:
-            return DispatchResult(
-                response=result,
-                provider_used=provider_name,
-                was_fallback=False,
-                attempted_providers=attempted,
+        # Candidates in order: the resolved endpoint, then (unless pinned or
+        # fallback is off) the fallback chain. A pin must go there and ONLY
+        # there; falling back elsewhere would mask its real error.
+        candidates = [provider_name]
+        if not pinned and request.fallback_allowed:
+            fallback_chain = self._permitted(
+                request, self._registry.get_fallback_chain(exclude=provider_name)
             )
+            # Only fall back to endpoints that actually have the model —
+            # anything else converts the real failure into a confusing 404
+            if request.model:
+                with_model = set(self._registry.get_endpoints_with_model(request.model))
+                if with_model:
+                    fallback_chain = [name for name in fallback_chain if name in with_model]
+            # Security: Cap fallback attempts to prevent unbounded attempts
+            candidates += fallback_chain[: MAX_FALLBACK_ATTEMPTS - 1]
+        candidates = self._order_candidates(candidates, pinned)
+        remaining = list(candidates)
+        deadline = self._admission_deadline()
 
-        # Primary failed - try fallbacks if allowed
-        if pinned or not request.fallback_allowed:
-            raise ProviderUnavailableError(provider=provider_name, fallback_disabled=True)
-
-        # Get fallback chain - limited to prevent unbounded attempts
-        fallback_chain = self._permitted(
-            request, self._registry.get_fallback_chain(exclude=provider_name)
-        )
-        # Only fall back to endpoints that actually have the model —
-        # anything else converts the real failure into a confusing 404
-        if request.model:
-            with_model = set(self._registry.get_endpoints_with_model(request.model))
-            if with_model:
-                fallback_chain = [name for name in fallback_chain if name in with_model]
-        # Security: Cap fallback attempts to prevent unbounded attempts
-        max_fallbacks = MAX_FALLBACK_ATTEMPTS - 1  # -1 for primary already tried
-
-        for fallback_name in fallback_chain[:max_fallbacks]:
-            result = await self._try_provider(fallback_name, request, error_sink=errors_seen)
-            attempted.append(fallback_name)
+        while remaining:
+            # Admission (D-032): the first candidate with a free slot; when
+            # all are full, wait for whichever frees first
+            lease = await self._admit(remaining, deadline)
+            name = lease.endpoint
+            remaining.remove(name)
+            try:
+                # When pinned, error responses raise with the provider's
+                # actual error instead of silently returning None
+                result = await self._try_provider(
+                    name, request, raise_on_error=pinned, error_sink=errors_seen
+                )
+            finally:
+                lease.release()
+            attempted.append(name)
 
             if result is not None:
                 return DispatchResult(
                     response=result,
-                    provider_used=fallback_name,
-                    was_fallback=True,
+                    provider_used=name,
+                    was_fallback=name != provider_name,
                     attempted_providers=attempted,
                 )
+
+        if pinned or not request.fallback_allowed:
+            raise ProviderUnavailableError(provider=provider_name, fallback_disabled=True)
 
         # All providers failed
         raise AllProvidersUnavailableError(
             attempted=attempted,
             last_error=errors_seen[-1] if errors_seen else None,
         )
+
+    # ------------------------------------------------------------------
+    # Admission control (dispatch/admission.py, D-032)
+    # ------------------------------------------------------------------
+
+    def _admission_deadline(self) -> float:
+        return asyncio.get_running_loop().time() + self._registry.max_queue_wait_seconds
+
+    def _order_candidates(self, candidates: list[str], pinned: bool) -> list[str]:
+        if pinned:
+            return candidates
+        return order_candidates(self._registry, self._resolution_config.strategy, candidates)
+
+    async def _admit(self, candidates: list[str], deadline: float) -> Lease:
+        """A slot on the first candidate with room, waiting until the deadline if none has.
+
+        Raises:
+            CapacityExceededError: Every candidate stayed full until the deadline.
+        """
+        return await admit(self._registry, candidates, deadline)
 
     async def _try_provider(
         self,
@@ -624,7 +696,6 @@ class Dispatcher:
         Raises:
             DispatchError: If all providers fail
         """
-        from gateway.models.common import FinishReason
 
         pinned = self.split_pin(request.model)[0] is not None
 
@@ -651,81 +722,116 @@ class Dispatcher:
         attempted: list[str] = []
         errors_seen: list[str] = []
 
-        for try_name in providers_to_try[:MAX_FALLBACK_ATTEMPTS]:
-            adapter = self._registry.get(try_name)
-            if adapter is None:
-                continue
+        remaining = [
+            name
+            for name in self._order_candidates(providers_to_try[:MAX_FALLBACK_ATTEMPTS], pinned)
+            if self._registry.get(name) is not None
+        ]
+        deadline = self._admission_deadline()
 
-            if not self._registry.allow_request(try_name):
-                errors_seen.append(f"{try_name}: circuit open (recent failures)")
-                continue
-            attempted.append(try_name)
-
-            # Start the stream and peek at the first chunk to detect errors
-            # before the caller commits to a 200 response
-            # Completion/generate tasks stream from the raw-prompt endpoint
-            # (no chat template), matching their non-streaming dispatch
-            if request.task in (TaskType.COMPLETION, TaskType.GENERATE):
-                stream_iter = adapter.generate_stream(request)
-            else:
-                stream_iter = adapter.chat_stream(request)
+        while remaining:
+            # Admission (D-032); the slot is held until the stream closes
+            lease = await self._admit(remaining, deadline)
+            try_name = lease.endpoint
+            remaining.remove(try_name)
             try:
-                first_chunk = await stream_iter.__anext__()
-            except StopAsyncIteration:
-                self._registry.record_failure(try_name)
-                errors_seen.append(f"{try_name}: empty stream")
-                continue
-            except Exception as e:
-                self._registry.record_failure(try_name)
-                await _close_quietly(stream_iter)
-                errors_seen.append(f"{try_name}: {type(e).__name__}: {e}")
-                continue
+                opened = await self._open_stream(try_name, request, pinned, attempted, errors_seen)
             except BaseException:
-                self._registry.release_probe(try_name)  # cancelled: no verdict
-                await _close_quietly(stream_iter)
+                lease.release()
                 raise
-
-            # An error before any content means this endpoint can't serve
-            # the request (thinking-only and tool-call chunks are content)
-            if (
-                first_chunk.finish_reason == FinishReason.ERROR
-                and not first_chunk.delta
-                and not first_chunk.thinking
-                and not first_chunk.tool_calls
-            ):
-                await _close_quietly(stream_iter)
-                if self._is_retryable_error(first_chunk.error_code):
-                    self._registry.record_failure(try_name)
-                else:
-                    self._registry.record_success(try_name)  # 4xx: alive, request wrong
-                message = first_chunk.error or "stream failed"
-                # Same rule as non-streaming: upstream 4xx means the request
-                # itself is wrong, so trying elsewhere only hides the cause.
-                # A pinned request never tries elsewhere.
-                if pinned or not self._is_retryable_error(first_chunk.error_code):
-                    raise ProviderError(
-                        message=message,
-                        provider=try_name,
-                        details={"error_code": first_chunk.error_code, "model": request.model},
-                        http_status=self._upstream_client_status(first_chunk.error_code),
-                    )
-                logger.warning(
-                    "Provider stream failed before first chunk",
-                    provider=try_name,
-                    model=request.model,
-                    error=message,
-                    error_code=first_chunk.error_code,
-                )
-                errors_seen.append(f"{try_name}: {message}")
+            if opened is None:
+                lease.release()
                 continue
-
-            self._registry.record_success(try_name)
-            return try_name, _chain(first_chunk, stream_iter)
+            first_chunk, stream_iter = opened
+            return try_name, _chain(first_chunk, stream_iter, lease)
 
         raise AllProvidersUnavailableError(
             attempted=attempted,
             last_error=errors_seen[-1] if errors_seen else None,
         )
+
+    async def _open_stream(
+        self,
+        try_name: str,
+        request: InternalRequest,
+        pinned: bool,
+        attempted: list[str],
+        errors_seen: list[str],
+    ) -> tuple[StreamChunk, AsyncIterator[StreamChunk]] | None:
+        """Start a stream on one endpoint and peek at its first chunk.
+
+        Returns None when the endpoint can't serve it and the next one
+        should be tried; raises when trying elsewhere would hide the cause.
+        """
+
+        adapter = self._registry.get(try_name)
+        if adapter is None:
+            return None
+        if not self._registry.allow_request(try_name):
+            errors_seen.append(f"{try_name}: circuit open (recent failures)")
+            return None
+        attempted.append(try_name)
+
+        # Start the stream and peek at the first chunk to detect errors
+        # before the caller commits to a 200 response
+        # Completion/generate tasks stream from the raw-prompt endpoint
+        # (no chat template), matching their non-streaming dispatch
+        if request.task in (TaskType.COMPLETION, TaskType.GENERATE):
+            stream_iter = adapter.generate_stream(request)
+        else:
+            stream_iter = adapter.chat_stream(request)
+        try:
+            first_chunk = await stream_iter.__anext__()
+        except StopAsyncIteration:
+            self._registry.record_failure(try_name)
+            errors_seen.append(f"{try_name}: empty stream")
+            return None
+        except Exception as e:
+            self._registry.record_failure(try_name)
+            await _close_quietly(stream_iter)
+            errors_seen.append(f"{try_name}: {type(e).__name__}: {e}")
+            return None
+        except BaseException:
+            self._registry.release_probe(try_name)  # cancelled: no verdict
+            await _close_quietly(stream_iter)
+            raise
+
+        # An error before any content means this endpoint can't serve
+        # the request (thinking-only and tool-call chunks are content)
+        if (
+            first_chunk.finish_reason == FinishReason.ERROR
+            and not first_chunk.delta
+            and not first_chunk.thinking
+            and not first_chunk.tool_calls
+        ):
+            await _close_quietly(stream_iter)
+            if self._is_retryable_error(first_chunk.error_code):
+                self._registry.record_failure(try_name)
+            else:
+                self._registry.record_success(try_name)  # 4xx: alive, request wrong
+            message = first_chunk.error or "stream failed"
+            # Same rule as non-streaming: upstream 4xx means the request
+            # itself is wrong, so trying elsewhere only hides the cause.
+            # A pinned request never tries elsewhere.
+            if pinned or not self._is_retryable_error(first_chunk.error_code):
+                raise ProviderError(
+                    message=message,
+                    provider=try_name,
+                    details={"error_code": first_chunk.error_code, "model": request.model},
+                    http_status=self._upstream_client_status(first_chunk.error_code),
+                )
+            logger.warning(
+                "Provider stream failed before first chunk",
+                provider=try_name,
+                model=request.model,
+                error=message,
+                error_code=first_chunk.error_code,
+            )
+            errors_seen.append(f"{try_name}: {message}")
+            return None
+
+        self._registry.record_success(try_name)
+        return first_chunk, stream_iter
 
 
 async def _close_quietly(stream: AsyncIterator[StreamChunk]) -> None:
@@ -740,16 +846,21 @@ async def _close_quietly(stream: AsyncIterator[StreamChunk]) -> None:
 
 
 async def _chain(
-    first: StreamChunk, rest: AsyncIterator[StreamChunk]
+    first: StreamChunk, rest: AsyncIterator[StreamChunk], lease: Lease | None = None
 ) -> AsyncIterator[StreamChunk]:
     """The peeked first chunk followed by the rest of the stream.
 
     Closing this generator closes the upstream stream too; `async for`
-    alone would leave it open until garbage collection.
+    alone would leave it open until garbage collection. The endpoint's
+    admission slot is released when the stream ends either way.
     """
     try:
         yield first
         async for chunk in rest:
             yield chunk
     finally:
-        await _close_quietly(rest)
+        try:
+            await _close_quietly(rest)
+        finally:
+            if lease is not None:
+                lease.release()

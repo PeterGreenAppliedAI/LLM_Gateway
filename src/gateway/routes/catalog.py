@@ -274,6 +274,8 @@ class CatalogEndpoint(BaseModel):
     enabled: bool
     healthy: bool
     circuit: str | None = None  # closed | open | half_open (circuit breaker)
+    in_flight: int = 0  # requests this gateway has in flight to it (D-032)
+    max_concurrent: int | None = None  # None = unlimited
     labels: dict[str, str] = Field(default_factory=dict)
     models: list[str] = Field(default_factory=list)
 
@@ -314,6 +316,8 @@ async def get_catalog(
                 enabled=endpoint_config.enabled,
                 healthy=status_enum == HealthStatus.HEALTHY,
                 circuit=circuit.value if circuit else None,
+                in_flight=registry.admission.in_flight(endpoint_config.name),
+                max_concurrent=endpoint_config.max_concurrent,
                 labels=endpoint_config.labels,
                 models=models,
             )

@@ -185,6 +185,37 @@ class MetricsCollector:
             **reg_kwargs,
         )
 
+        # Admission control (D-032). Gauges refreshed from the registry on
+        # each scrape; waits and rejections recorded as they happen.
+        self._endpoint_in_flight = Gauge(
+            f"{prefix}_endpoint_in_flight",
+            "Requests this gateway has in flight to the endpoint",
+            ["endpoint"],
+            **reg_kwargs,
+        )
+        self._endpoint_max_concurrent = Gauge(
+            f"{prefix}_endpoint_max_concurrent",
+            "Configured max_concurrent per endpoint (absent = unlimited)",
+            ["endpoint"],
+            **reg_kwargs,
+        )
+        self._admission_queue_depth = Gauge(
+            f"{prefix}_admission_queue_depth",
+            "Requests waiting for an endpoint slot",
+            **reg_kwargs,
+        )
+        self._admission_wait = Histogram(
+            f"{prefix}_admission_wait_seconds",
+            "Time requests waited for an endpoint slot (only requests that waited)",
+            buckets=(0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60),
+            **reg_kwargs,
+        )
+        self._admission_rejected = Counter(
+            f"{prefix}_admission_rejected_total",
+            "Requests refused with 503 because every candidate endpoint stayed full",
+            **reg_kwargs,
+        )
+
         # Active requests gauge
         self._active_requests = Gauge(
             f"{prefix}_active_requests", "Number of active requests", ["provider"], **reg_kwargs
@@ -266,6 +297,26 @@ class MetricsCollector:
             return
         value = {"closed": 0, "half_open": 1, "open": 2}.get(state, 0)
         self._circuit_state.labels(endpoint=self._sanitize_label(endpoint)).set(value)
+
+    def set_endpoint_load(self, endpoint: str, in_flight: int, capacity: int | None) -> None:
+        if not self._enabled:
+            return
+        endpoint = self._sanitize_label(endpoint)
+        self._endpoint_in_flight.labels(endpoint=endpoint).set(in_flight)
+        if capacity is not None:
+            self._endpoint_max_concurrent.labels(endpoint=endpoint).set(capacity)
+
+    def set_admission_queue_depth(self, waiting: int) -> None:
+        if self._enabled:
+            self._admission_queue_depth.set(waiting)
+
+    def observe_admission_wait(self, seconds: float) -> None:
+        if self._enabled:
+            self._admission_wait.observe(seconds)
+
+    def record_admission_rejected(self) -> None:
+        if self._enabled:
+            self._admission_rejected.inc()
 
     def record_error(self, provider: str, error_type: str) -> None:
         """Record a provider error.

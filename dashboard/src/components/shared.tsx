@@ -30,7 +30,16 @@ export function EndpointCard({ endpoint }: { endpoint: Endpoint }) {
         </div>
       </div>
       <div className="text-gray-400 text-sm mt-1">{endpoint.type} - {endpoint.url}</div>
-      <div className="text-gray-500 text-xs mt-2">{endpoint.models.length} models</div>
+      <div className="text-gray-500 text-xs mt-2 flex gap-3">
+        <span>{endpoint.models.length} models</span>
+        {endpoint.in_flight !== undefined && (
+          <span title="Requests in flight from this gateway / max_concurrent (excess overflows to the next endpoint or waits)">
+            {endpoint.max_concurrent
+              ? `${endpoint.in_flight}/${endpoint.max_concurrent} busy`
+              : `${endpoint.in_flight} in flight`}
+          </span>
+        )}
+      </div>
       <div className="flex flex-wrap gap-1 mt-2">
         {endpoint.models.slice(0, 5).map(model => (
           <span key={model} className="bg-gray-700 px-2 py-0.5 rounded text-xs">{model}</span>

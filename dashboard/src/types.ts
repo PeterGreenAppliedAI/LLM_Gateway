@@ -53,6 +53,8 @@ export interface Endpoint {
   enabled: boolean
   healthy: boolean
   circuit?: 'closed' | 'open' | 'half_open' | null
+  in_flight?: number
+  max_concurrent?: number | null
   labels: Record<string, string>
   models: string[]
 }

@@ -100,6 +100,10 @@ async def prometheus_metrics(request: Request) -> Response:
         for name in registry.list_providers():
             if (state := registry.circuit_state(name)) is not None:
                 metrics.set_circuit_state(name, state.value)
+            metrics.set_endpoint_load(
+                name, registry.admission.in_flight(name), registry.admission.capacity(name)
+            )
+        metrics.set_admission_queue_depth(registry.admission.waiting())
 
     return Response(
         content=generate_latest(),

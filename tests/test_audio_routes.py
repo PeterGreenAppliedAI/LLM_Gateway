@@ -210,6 +210,20 @@ class TestSpeech:
         assert not app.state.test["engines"]["a"].requests
 
     @pytest.mark.asyncio
+    async def test_full_engine_overflows_and_slot_is_released(self, make_app):
+        app = await make_app({"a": (["tts"], _tts_ok), "b": (["tts"], _tts_ok)})
+        app.state.config.resolution.endpoint_priority = ["a", "b"]
+        admission = app.state.registry.admission
+        admission.set_capacity("a", 1)
+        admission.set_capacity("b", 1)
+        held = admission.try_acquire("a")
+        resp = TestClient(app).post("/v1/audio/speech", json=SPEECH)
+        assert resp.status_code == 200
+        assert _audit(app)["endpoint"] == "b"
+        assert admission.in_flight("b") == 0  # released once the audio was relayed
+        held.release()
+
+    @pytest.mark.asyncio
     async def test_input_over_limit_rejected(self, make_app):
         app = await make_app({"a": (["tts"], _tts_ok)}, media=MediaConfig(max_tts_characters=5))
         assert TestClient(app).post("/v1/audio/speech", json=SPEECH).status_code == 422

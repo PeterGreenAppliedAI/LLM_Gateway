@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 
 from gateway.catalog.models import ModelCatalog
 from gateway.config import EndpointConfig, GatewayConfig, ProviderConfig
+from gateway.dispatch.admission import ConcurrencyBackend, InMemoryConcurrency
 from gateway.dispatch.circuit import CircuitBreaker, CircuitState
 from gateway.models.common import HealthStatus
 from gateway.providers import ProviderAdapter, create_adapter
@@ -76,6 +77,8 @@ class ProviderRegistry:
         self._adapters: dict[str, ProviderAdapter] = {}
         self._health: dict[str, ProviderHealth] = {}
         self._breakers: dict[str, CircuitBreaker] = {}
+        # In-process slot counts; a shared backend can replace it (D-010)
+        self._admission = InMemoryConcurrency()
         self._endpoint_configs: dict[str, EndpointConfig] = {}
         self._health_task: asyncio.Task | None = None
         self._shutdown = False
@@ -84,6 +87,15 @@ class ProviderRegistry:
         # Health check settings
         self._health_interval_seconds: float = 30.0
         self._health_timeout_seconds: float = 10.0
+
+    @property
+    def admission(self) -> ConcurrencyBackend:
+        """Per-endpoint concurrency slots (dispatch/admission.py)."""
+        return self._admission
+
+    @property
+    def max_queue_wait_seconds(self) -> float:
+        return self._config.admission.max_queue_wait_seconds
 
     @property
     def catalog(self) -> ModelCatalog:
@@ -110,6 +122,7 @@ class ProviderRegistry:
         self._adapters[config.name] = adapter
         self._health[config.name] = ProviderHealth(config.name)
         self._breakers[config.name] = CircuitBreaker(self._config.circuit_breaker)
+        self._admission.set_capacity(config.name, config.max_concurrent)
 
     async def _register_endpoint(self, config: EndpointConfig) -> None:
         """Create and register an adapter from endpoint config."""
@@ -123,11 +136,13 @@ class ProviderRegistry:
             connect_timeout=config.connect_timeout,
             stream_idle_timeout=config.stream_idle_timeout,
             max_retries=config.max_retries,
+            max_concurrent=config.max_concurrent,
         )
         adapter = create_adapter(provider_config)
         self._adapters[config.name] = adapter
         self._health[config.name] = ProviderHealth(config.name)
         self._breakers[config.name] = CircuitBreaker(self._config.circuit_breaker)
+        self._admission.set_capacity(config.name, config.max_concurrent)
         self._endpoint_configs[config.name] = config
 
     def get(self, name: str) -> ProviderAdapter | None:

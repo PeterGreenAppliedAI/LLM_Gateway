@@ -12,13 +12,20 @@ dispatcher with the same rules as text (D-020):
   endpoint (D-012/D-013)
 """
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 
 import httpx
 
 from gateway.config import MediaCapability, ResolutionConfig
-from gateway.dispatch.dispatcher import MAX_FALLBACK_ATTEMPTS, Dispatcher
+from gateway.dispatch.admission import Lease
+from gateway.dispatch.dispatcher import (
+    MAX_FALLBACK_ATTEMPTS,
+    Dispatcher,
+    admit,
+    order_candidates,
+)
 from gateway.dispatch.registry import ProviderRegistry
 from gateway.errors import (
     AllProvidersUnavailableError,
@@ -46,11 +53,23 @@ CompatibilityCheck = Callable[[str], str | None]
 
 @dataclass
 class UpstreamMedia:
-    """An upstream response whose status is known to be < 400, body unread."""
+    """An upstream response whose status is known to be < 400, body unread.
+
+    Holds the endpoint's admission slot (D-032): call aclose() when the
+    body has been relayed or abandoned.
+    """
 
     endpoint: str
     model: str
     response: httpx.Response
+    lease: Lease | None = None
+
+    async def aclose(self) -> None:
+        try:
+            await self.response.aclose()
+        finally:
+            if self.lease is not None:
+                self.lease.release()
 
 
 class MediaDispatcher:
@@ -142,51 +161,88 @@ class MediaDispatcher:
                 raise ValidationError(message=reasons[candidates[0]])
             candidates = able
 
-        for name in candidates[:MAX_FALLBACK_ATTEMPTS]:
-            adapter = self._registry.get(name)
-            if adapter is None:
-                continue
-            if not self._registry.allow_request(name):
-                errors.append(f"{name}: circuit open (recent failures)")
-                continue
-            attempted.append(name)
+        remaining = [
+            name
+            for name in order_candidates(
+                self._registry, self._resolution.strategy, candidates[:MAX_FALLBACK_ATTEMPTS]
+            )
+            if self._registry.get(name) is not None
+        ]
+        deadline = asyncio.get_running_loop().time() + self._registry.max_queue_wait_seconds
+        while remaining:
+            # Admission (D-032): the slot is held until the body is relayed
+            lease = await admit(self._registry, remaining, deadline)
+            name = lease.endpoint
+            remaining.remove(name)
             try:
-                client = await adapter.media_client()
-                response = await client.send(build(client, model), stream=True)
-            except (httpx.HTTPError, OSError) as e:
-                self._registry.record_failure(name)
-                errors.append(f"{name}: {type(e).__name__}: {e}")
-                logger.warning("Media endpoint failed", endpoint=name, error=str(e))
-                continue
+                upstream = await self._attempt(name, model, build, attempted, errors)
             except BaseException:
-                self._registry.release_probe(name)  # cancelled: no verdict
+                lease.release()
                 raise
-
-            if response.status_code < 400:
-                self._registry.record_success(name)
-                return UpstreamMedia(endpoint=name, model=model, response=response)
-
-            code, message = await upstream_http_error(response)
-            await response.aclose()
-            status = response.status_code
-            if status >= 500:
-                self._registry.record_failure(name)
-            elif status == 429:
-                self._registry.release_probe(name)  # busy, not broken
-            else:
-                self._registry.record_success(name)  # 4xx: alive, request wrong
-            # 4xx means the request is wrong: trying elsewhere would hide it.
-            # 429 (busy) is the exception: another endpoint may have room.
-            if 400 <= status < 500 and status != 429:
-                raise ProviderError(
-                    message=message,
-                    provider=name,
-                    details={"error_code": code, "model": model},
-                    http_status=status,
-                )
-            errors.append(f"{name}: {message}")
-            logger.warning("Media endpoint returned retryable error", endpoint=name, status=status)
+            if upstream is None:
+                lease.release()
+                continue
+            upstream.lease = lease
+            return upstream
 
         raise AllProvidersUnavailableError(
             attempted=attempted, last_error=errors[-1] if errors else None
         )
+
+    async def _attempt(
+        self,
+        name: str,
+        model: str,
+        build: RequestBuilder,
+        attempted: list[str],
+        errors: list[str],
+    ) -> UpstreamMedia | None:
+        """One endpoint: its open response, or None to try the next.
+
+        Raises:
+            ProviderError: Upstream 4xx (other than 429).
+        """
+        adapter = self._registry.get(name)
+        if adapter is None:
+            return None
+        if not self._registry.allow_request(name):
+            errors.append(f"{name}: circuit open (recent failures)")
+            return None
+        attempted.append(name)
+        try:
+            client = await adapter.media_client()
+            response = await client.send(build(client, model), stream=True)
+        except (httpx.HTTPError, OSError) as e:
+            self._registry.record_failure(name)
+            errors.append(f"{name}: {type(e).__name__}: {e}")
+            logger.warning("Media endpoint failed", endpoint=name, error=str(e))
+            return None
+        except BaseException:
+            self._registry.release_probe(name)  # cancelled: no verdict
+            raise
+
+        if response.status_code < 400:
+            self._registry.record_success(name)
+            return UpstreamMedia(endpoint=name, model=model, response=response)
+
+        code, message = await upstream_http_error(response)
+        await response.aclose()
+        status = response.status_code
+        if status >= 500:
+            self._registry.record_failure(name)
+        elif status == 429:
+            self._registry.release_probe(name)  # busy, not broken
+        else:
+            self._registry.record_success(name)  # 4xx: alive, request wrong
+        # 4xx means the request is wrong: trying elsewhere would hide it.
+        # 429 (busy) is the exception: another endpoint may have room.
+        if 400 <= status < 500 and status != 429:
+            raise ProviderError(
+                message=message,
+                provider=name,
+                details={"error_code": code, "model": model},
+                http_status=status,
+            )
+        errors.append(f"{name}: {message}")
+        logger.warning("Media endpoint returned retryable error", endpoint=name, status=status)
+        return None

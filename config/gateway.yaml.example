@@ -29,6 +29,13 @@ circuit_breaker:
   failure_threshold: 5
   cooldown_seconds: 15.0
 
+# Admission control (D-032). Set max_concurrent on an endpoint to cap how
+# many requests this gateway sends it at once (about the engine's parallel
+# slots: vLLM --max-num-seqs, OLLAMA_NUM_PARALLEL). Extra requests overflow
+# to the next endpoint with room, or wait here for a free slot, then 503.
+admission:
+  max_queue_wait_seconds: 5.0
+
 embedding_queue:
   enabled: true
   max_pending: 500
