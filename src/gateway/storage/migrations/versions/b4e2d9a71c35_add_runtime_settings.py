@@ -12,6 +12,8 @@ Create Date: 2026-10-07
 from typing import Sequence, Union
 
 from alembic import op
+
+from gateway.storage.migrations.guards import has_table
 import sqlalchemy as sa
 
 
@@ -24,14 +26,15 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     """Create runtime_settings table."""
-    op.create_table(
-        'runtime_settings',
-        sa.Column('key', sa.String(64), nullable=False),
-        sa.Column('value', sa.JSON(), nullable=False),
-        sa.Column('updated_at', sa.DateTime(), nullable=False),
-        sa.Column('updated_by', sa.String(128), nullable=True),
-        sa.PrimaryKeyConstraint('key'),
-    )
+    if not has_table('runtime_settings'):
+        op.create_table(
+            'runtime_settings',
+            sa.Column('key', sa.String(64), nullable=False),
+            sa.Column('value', sa.JSON(), nullable=False),
+            sa.Column('updated_at', sa.DateTime(), nullable=False),
+            sa.Column('updated_by', sa.String(128), nullable=True),
+            sa.PrimaryKeyConstraint('key'),
+        )
 
 
 def downgrade() -> None:

@@ -12,6 +12,8 @@ Create Date: 2026-10-07
 from typing import Sequence, Union
 
 from alembic import op
+
+from gateway.storage.migrations.guards import has_column
 import sqlalchemy as sa
 
 
@@ -24,6 +26,8 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     """Add media_usage column."""
+    if has_column('audit_log', 'media_usage'):
+        return
     with op.batch_alter_table('audit_log') as batch:
         batch.add_column(sa.Column('media_usage', sa.JSON(), nullable=True))
 

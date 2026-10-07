@@ -76,10 +76,13 @@ async def create_async_db_engine(
     else:
         engine = create_async_engine(url, echo=config.echo)
 
-    # Create tables if requested
+    # Bring the schema up to date: creates a new database, migrates an older
+    # one (create_all alone never added columns to existing tables, D-047)
     if create_tables and config.create_tables:
+        from gateway.storage.migrate import upgrade
+
         async with engine.begin() as conn:
-            await conn.run_sync(metadata.create_all)
+            await conn.run_sync(upgrade)
 
     return engine
 

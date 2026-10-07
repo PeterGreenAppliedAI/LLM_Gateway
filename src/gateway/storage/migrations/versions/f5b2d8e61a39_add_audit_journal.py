@@ -10,6 +10,8 @@ Create Date: 2026-10-07
 from typing import Sequence, Union
 
 from alembic import op
+
+from gateway.storage.migrations.guards import has_table
 import sqlalchemy as sa
 
 
@@ -22,13 +24,14 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     """Create audit_journal."""
-    op.create_table(
-        'audit_journal',
-        sa.Column('instance', sa.String(length=64), nullable=False),
-        sa.Column('segment', sa.String(length=32), nullable=False),
-        sa.Column('byte_offset', sa.BigInteger(), nullable=False),
-        sa.PrimaryKeyConstraint('instance', name=op.f('pk_audit_journal')),
-    )
+    if not has_table('audit_journal'):
+        op.create_table(
+            'audit_journal',
+            sa.Column('instance', sa.String(length=64), nullable=False),
+            sa.Column('segment', sa.String(length=32), nullable=False),
+            sa.Column('byte_offset', sa.BigInteger(), nullable=False),
+            sa.PrimaryKeyConstraint('instance', name=op.f('pk_audit_journal')),
+        )
 
 
 def downgrade() -> None:
