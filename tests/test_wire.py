@@ -115,6 +115,20 @@ class TestPIIScrubbingReachesTheEngine:
         )
         assert EMAIL not in json.dumps(engine.last("/v1/chat/completions"))
 
+    def test_pii_past_100k_characters_is_scrubbed(self, wire):
+        """Second review: an email after character 100,000 reached the engine
+        unchanged, because only a prefix was scanned."""
+        client, engine = wire
+        content = "x " * 60_000 + f"reach me at {EMAIL}"
+        resp = client.post(
+            "/v1/chat/completions",
+            json={"model": "m", "messages": [{"role": "user", "content": content}]},
+        )
+        assert resp.status_code == 200
+        sent = json.dumps(engine.last("/v1/chat/completions"))
+        assert EMAIL not in sent
+        assert "[EMAIL]" in sent
+
     def test_clean_input_unchanged_while_scrubbing(self, wire):
         """Regression: no-PII text scrubbed to None and failed validation (422)."""
         client, engine = wire

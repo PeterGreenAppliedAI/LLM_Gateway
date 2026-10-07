@@ -200,12 +200,25 @@ class TestOverlapFiltering:
         result = scrubber.scan("john@test.com")
         assert result.detection_count == 1
 
-    def test_truncation(self):
-        """Text beyond max_input_length should be truncated."""
-        short_scrubber = PIIScrubber(max_input_length=10)
-        # Email is beyond the 10-char limit
-        result = short_scrubber.scan("0123456789john@test.com")
-        assert not result.has_pii  # email is after truncation point
+    def test_pii_far_into_long_text_is_scrubbed(self, scrubber):
+        """The external review's case: an email after character 100,000 reached
+        the engine unchanged, because only a prefix was scanned."""
+        text = "x " * 60_000 + "write to someone@example.com today"
+        result = scrubber.scan(text, scrub=True)
+        assert result.has_pii
+        assert "someone@example.com" not in result.scrubbed_text
+        assert result.scrubbed_text.endswith("write to [EMAIL] today")
+
+    def test_scan_time_is_linear_on_hostile_input(self, scrubber):
+        """'a.a.a.…' made the old email pattern quadratic (~20 s per 100k chars)."""
+        import time
+
+        started = time.perf_counter()
+        scrubber.scan("a." * 500_000)  # 1M characters
+        assert time.perf_counter() - started < 5  # ~0.2 s; quadratic would be hours
+
+    def test_long_local_parts_still_found(self, scrubber):
+        assert scrubber.scan("x" * 64 + "@example.com").has_pii
 
 
 class TestPolicyEnforcementPerKey:
@@ -325,8 +338,8 @@ class TestRedactForStorage:
         # Input untouched
         assert body["messages"][0]["content"] == "mail me at a.b@example.com"
 
-    def test_text_beyond_scan_limit_not_stored(self):
-        scrubber = PIIScrubber(max_input_length=20)
-        out = scrubber.redact("x" * 20 + " a.b@example.com")
+    def test_long_text_redacted_in_full(self):
+        scrubber = PIIScrubber()
+        out = scrubber.redact("x " * 60_000 + " a.b@example.com")
         assert "example.com" not in out
-        assert out.endswith("[TRUNCATED: not scanned for PII]")
+        assert out.endswith("[EMAIL]")

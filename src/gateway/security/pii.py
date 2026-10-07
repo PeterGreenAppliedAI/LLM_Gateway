@@ -55,8 +55,11 @@ _PII_PATTERNS: list[tuple[str, re.Pattern]] = [
     ("SSN", re.compile(r"\b\d{3}[-\s]\d{2}[-\s]\d{4}\b")),
     # Credit card: 4 groups of 4 digits, with optional separators
     ("CREDIT_CARD", re.compile(r"\b(?:\d{4}[-\s]){3}\d{4}\b")),
-    # Email
-    ("EMAIL", re.compile(r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b")),
+    # Email. Lengths are bounded by the standard's own limits (64 before the
+    # "@", 253 after): unbounded runs made scanning quadratic, so text like
+    # "a.a.a.…" took ~20 s per 100k characters, which is why scans used to be
+    # cut off at 100k (and why text past the cut reached engines unscrubbed)
+    ("EMAIL", re.compile(r"\b[A-Za-z0-9._%+\-]{1,64}@[A-Za-z0-9.\-]{1,253}\.[A-Za-z]{2,63}\b")),
     # Phone: US formats - (123) 456-7890, 123-456-7890, +1 123 456 7890, etc.
     ("PHONE", re.compile(r"\b(?:\+1[-.\s]?)?\(?[2-9]\d{2}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b")),
     # IP address (v4) - but not version numbers like 1.2.3
@@ -73,16 +76,10 @@ class PIIScrubber:
     Detection always runs. Scrubbing (replacement) only happens
     when explicitly requested per-call via the `scrub` parameter.
 
-    Thread-safe: stateless, uses pre-compiled patterns.
+    Thread-safe: stateless, uses pre-compiled patterns. Every pattern runs in
+    linear time, so the whole text is always scanned: a cut-off scan
+    forwarded everything past the cut unscrubbed.
     """
-
-    def __init__(self, max_input_length: int = 100_000):
-        """Initialize PII scrubber.
-
-        Args:
-            max_input_length: Maximum text length to scan (truncates for safety)
-        """
-        self._max_input_length = max_input_length
 
     def scan(self, text: str, scrub: bool = False) -> PIIScanResult:
         """Scan text for PII and optionally scrub it.
@@ -99,8 +96,7 @@ class PIIScrubber:
 
         start = time.perf_counter()
 
-        # Truncate for safety
-        scan_text = text[: self._max_input_length]
+        scan_text = text
 
         # Collect all matches with positions
         all_matches: list[PIIMatch] = []
@@ -203,17 +199,13 @@ class PIIScrubber:
 
         For data at rest (audit bodies, stored scans): independent of the
         per-route scrub setting, so flag-only mode still never persists raw
-        PII. Text beyond the scan limit is dropped rather than stored
-        unscanned.
+        PII.
         """
         if isinstance(value, str):
             if not value:
                 return value
             result = self.scan(value, scrub=True)
-            redacted = result.scrubbed_text if result.scrubbed_text is not None else value
-            if len(value) > self._max_input_length:
-                redacted = redacted[: self._max_input_length] + "[TRUNCATED: not scanned for PII]"
-            return redacted
+            return result.scrubbed_text if result.scrubbed_text is not None else value
         if isinstance(value, dict):
             return {k: self.redact(v) for k, v in value.items()}
         if isinstance(value, list):
