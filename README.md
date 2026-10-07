@@ -33,7 +33,7 @@ This isn't just a proxy. It's a **security and governance layer** with a built-i
 git clone https://github.com/PeterGreenAppliedAI/LLM_Gateway.git
 cd LLM_Gateway
 
-python3 -m venv venv && source venv/bin/activate
+python3 -m venv venv && source venv/bin/activate   # Python 3.11 or newer
 pip install -e ".[dev]"
 
 cp config/gateway.yaml.example config/gateway.yaml
@@ -87,7 +87,7 @@ LiteLLM is a good proxy for routing requests to different LLM providers. DevMesh
 | **Token budgets** | Cost-tier weighted daily quotas per API key | Spend limits per key |
 | **Self-hosted only** | Yes — runs inside your infrastructure | Cloud + self-hosted options |
 | **Dashboard** | Included React UI with security, PII, budgets, requests | Separate UI project |
-| **Test coverage** | 538 tests across Python 3.10/3.11/3.12 | Varies |
+| **Test coverage** | ~915 tests on Python 3.11–3.13, Linux and Windows, SQLite, PostgreSQL and Redis | Varies |
 
 If you just need to route requests to different providers, LiteLLM works. If you need to know what's going through your models, stop PII from leaking, build your own guard model, and prove it all to an auditor — that's what this is for.
 

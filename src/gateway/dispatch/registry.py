@@ -9,7 +9,7 @@ backward compatibility during the migration period.
 """
 
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from gateway.catalog.models import ModelCatalog
 from gateway.config import EndpointConfig, GatewayConfig, ProviderConfig
@@ -33,7 +33,7 @@ class ProviderHealth:
     def record_healthy(self) -> None:
         """Record a successful health check."""
         self.status = HealthStatus.HEALTHY
-        self.last_check = datetime.now(timezone.utc)
+        self.last_check = datetime.now(UTC)
         self.last_healthy = self.last_check
         self.consecutive_failures = 0
         self.error_message = None
@@ -41,7 +41,7 @@ class ProviderHealth:
     def record_unhealthy(self, status: HealthStatus, error: str | None = None) -> None:
         """Record a failed health check."""
         self.status = status
-        self.last_check = datetime.now(timezone.utc)
+        self.last_check = datetime.now(UTC)
         self.consecutive_failures += 1
         self.error_message = error
 
@@ -53,7 +53,7 @@ class ProviderHealth:
         """Get time since last healthy state."""
         if self.last_healthy is None:
             return None
-        return datetime.now(timezone.utc) - self.last_healthy
+        return datetime.now(UTC) - self.last_healthy
 
 
 class ProviderRegistry:
@@ -376,7 +376,7 @@ class ProviderRegistry:
                 if status == HealthStatus.UNHEALTHY:
                     self.trip(name)
 
-        except asyncio.TimeoutError:
+        except TimeoutError:
             self._health[name].record_unhealthy(
                 HealthStatus.UNHEALTHY, error="Health check timed out"
             )

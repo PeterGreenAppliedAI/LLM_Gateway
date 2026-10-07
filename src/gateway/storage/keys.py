@@ -7,7 +7,7 @@ Uses async SQLAlchemy for non-blocking database I/O.
 
 import hashlib
 import secrets
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -60,7 +60,7 @@ class KeyManager:
         key_hash = _hash_key(plaintext)
         key_prefix = plaintext[:12]  # "gw-" + first 9 chars of token
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         async with self._engine.connect() as conn:
             result = await conn.execute(
@@ -160,7 +160,7 @@ class KeyManager:
 
     async def lookup_by_hash(self, key_hash: str) -> dict | None:
         """An active, unexpired key's metadata, without touching last_used_at."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         async with self._engine.connect() as conn:
             row = (
                 await conn.execute(
@@ -206,7 +206,7 @@ class KeyManager:
         """
         info = await self.lookup_by_hash(key_hash)
         if info is not None:
-            await self.touch({info["id"]: datetime.now(timezone.utc)})
+            await self.touch({info["id"]: datetime.now(UTC)})
         return info
 
     async def touch(self, last_used: dict[int, datetime]) -> None:

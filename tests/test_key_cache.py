@@ -2,7 +2,7 @@
 
 import asyncio
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import select, update
@@ -65,7 +65,7 @@ class TestCaching:
     async def test_key_expiring_while_cached_is_refused(self, engine):
         km = KeyManager(engine)
         key = await km.create_key(name="app", client_id="app")
-        soon = datetime.now(timezone.utc) + timedelta(milliseconds=100)
+        soon = datetime.now(UTC) + timedelta(milliseconds=100)
         async with engine.begin() as conn:
             await conn.execute(
                 update(api_keys).where(api_keys.c.id == key["key_id"]).values(expires_at=soon)
@@ -139,15 +139,15 @@ class TestLastUsed:
         await cache.flush()
         used = await _last_used(engine, key["key_id"])
         assert used is not None
-        assert datetime.now(timezone.utc) - used < timedelta(seconds=5)
+        assert datetime.now(UTC) - used < timedelta(seconds=5)
 
     @pytest.mark.asyncio
     async def test_never_moves_backwards(self, engine):
         km = KeyManager(engine)
         key = await km.create_key(name="app", client_id="app")
-        later = datetime.now(timezone.utc) + timedelta(hours=1)
+        later = datetime.now(UTC) + timedelta(hours=1)
         await km.touch({key["key_id"]: later})
-        await km.touch({key["key_id"]: datetime.now(timezone.utc)})  # an older flush arrives late
+        await km.touch({key["key_id"]: datetime.now(UTC)})  # an older flush arrives late
         assert abs((await _last_used(engine, key["key_id"])) - later) < timedelta(seconds=1)
 
     @pytest.mark.asyncio

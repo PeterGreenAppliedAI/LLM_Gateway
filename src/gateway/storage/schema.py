@@ -9,7 +9,7 @@ Tables:
 - api_keys: Database-managed API keys (optional, alternative to config)
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import (
     JSON,
@@ -42,12 +42,12 @@ class UTCDateTime(TypeDecorator):
 
     def process_bind_param(self, value, dialect):
         if isinstance(value, datetime) and value.tzinfo is not None:
-            return value.astimezone(timezone.utc).replace(tzinfo=None)
+            return value.astimezone(UTC).replace(tzinfo=None)
         return value
 
     def process_result_value(self, value, dialect):
         if isinstance(value, datetime) and value.tzinfo is None:
-            return value.replace(tzinfo=timezone.utc)
+            return value.replace(tzinfo=UTC)
         return value
 
 
@@ -73,7 +73,7 @@ audit_log = Table(
     # Primary key
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("request_id", String(64), unique=True, nullable=False),
-    Column("timestamp", UTCDateTime, default=lambda: datetime.now(timezone.utc), nullable=False),
+    Column("timestamp", UTCDateTime, default=lambda: datetime.now(UTC), nullable=False),
     # Who made the request
     Column("client_id", String(128), nullable=False),
     Column("user_id", String(128), nullable=True),
@@ -189,7 +189,7 @@ api_keys = Table(
     Column("client_id", String(128), nullable=False),
     Column("environment", String(64), nullable=True),  # Which environment this key accesses
     # Lifecycle
-    Column("created_at", UTCDateTime, default=lambda: datetime.now(timezone.utc), nullable=False),
+    Column("created_at", UTCDateTime, default=lambda: datetime.now(UTC), nullable=False),
     Column("expires_at", UTCDateTime, nullable=True),
     Column("last_used_at", UTCDateTime, nullable=True),
     Column("is_active", Boolean, default=True),
@@ -218,7 +218,7 @@ security_scans = Table(
     metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("request_id", String(64), unique=True, nullable=False),
-    Column("timestamp", UTCDateTime, default=lambda: datetime.now(timezone.utc), nullable=False),
+    Column("timestamp", UTCDateTime, default=lambda: datetime.now(UTC), nullable=False),
     # Context
     Column("client_id", String(128), nullable=False),
     Column("model", String(128), nullable=True),
@@ -264,7 +264,7 @@ pii_events = Table(
     metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("request_id", String(64), nullable=False),
-    Column("timestamp", UTCDateTime, default=lambda: datetime.now(timezone.utc), nullable=False),
+    Column("timestamp", UTCDateTime, default=lambda: datetime.now(UTC), nullable=False),
     # Context
     Column("client_id", String(128), nullable=False),
     Column("model", String(128), nullable=True),

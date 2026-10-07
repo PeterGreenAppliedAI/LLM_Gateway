@@ -5,7 +5,7 @@ saved here (by an admin, via the API) overrides that default and
 survives restarts. Each row records who changed it and when.
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select
@@ -32,7 +32,7 @@ class RuntimeSettingsStore:
 
     async def set(self, key: str, value: Any, updated_by: str | None) -> datetime:
         """Save value for key (insert or replace). Returns the timestamp written."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         async with self._engine.connect() as conn:
             updated = await conn.execute(
                 runtime_settings.update()

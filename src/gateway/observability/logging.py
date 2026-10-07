@@ -15,7 +15,7 @@ import re
 import sys
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any, Literal, Optional
 
@@ -85,7 +85,7 @@ class RequestContext:
     provider: str | None = None
     model: str | None = None
     task: str | None = None
-    start_time: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    start_time: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     # Timing metrics (populated as request progresses)
     time_to_first_token_ms: float | None = None
@@ -117,7 +117,7 @@ class RequestContext:
 
     def record_first_token(self) -> None:
         """Record time to first token."""
-        elapsed = datetime.now(timezone.utc) - self.start_time
+        elapsed = datetime.now(UTC) - self.start_time
         self.time_to_first_token_ms = elapsed.total_seconds() * 1000
 
     def record_complete(
@@ -126,7 +126,7 @@ class RequestContext:
         completion_tokens: int | None = None,
     ) -> None:
         """Record request completion with token counts."""
-        elapsed = datetime.now(timezone.utc) - self.start_time
+        elapsed = datetime.now(UTC) - self.start_time
         self.total_latency_ms = elapsed.total_seconds() * 1000
         self.status = "success"
 
@@ -144,7 +144,7 @@ class RequestContext:
 
     def record_error(self, error_type: str, error_message: str) -> None:
         """Record request error."""
-        elapsed = datetime.now(timezone.utc) - self.start_time
+        elapsed = datetime.now(UTC) - self.start_time
         self.total_latency_ms = elapsed.total_seconds() * 1000
         self.status = "error"
         self.error_type = error_type
@@ -186,7 +186,7 @@ class StructuredJsonFormatter(logging.Formatter):
         }
 
         if self._config.include_timestamp:
-            log_data["timestamp"] = datetime.now(timezone.utc).isoformat()
+            log_data["timestamp"] = datetime.now(UTC).isoformat()
 
         # Add request context if available
         # Security: Sanitize all user-provided values
@@ -227,7 +227,7 @@ class StructuredTextFormatter(logging.Formatter):
         parts = []
 
         if self._config.include_timestamp:
-            parts.append(datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"))
+            parts.append(datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S"))
 
         parts.append(f"[{record.levelname}]")
         parts.append(f"{record.name}:")

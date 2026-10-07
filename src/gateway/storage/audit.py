@@ -9,7 +9,7 @@ import asyncio
 import json
 import os
 from collections.abc import Callable
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -117,7 +117,7 @@ class AuditLogger:
         """Log a request to the audit table."""
         values = {
             "request_id": request_id,
-            "timestamp": datetime.now(timezone.utc),
+            "timestamp": datetime.now(UTC),
             "client_id": client_id,
             "user_id": user_id,
             "environment": environment,
@@ -332,7 +332,7 @@ class AuditLogger:
         client_id: str | None = None,
     ) -> dict:
         """Get usage statistics for the specified time period."""
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        cutoff = datetime.now(UTC) - timedelta(hours=hours)
 
         async with self._engine.connect() as conn:
             conditions = [audit_log.c.timestamp >= cutoff]
@@ -430,7 +430,7 @@ class AuditLogger:
 
     async def get_models_usage(self, hours: int = 24) -> list[dict]:
         """Get usage statistics grouped by model."""
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        cutoff = datetime.now(UTC) - timedelta(hours=hours)
 
         async with self._engine.connect() as conn:
             stmt = (
@@ -467,7 +467,7 @@ class AuditLogger:
 
     async def get_endpoints_usage(self, hours: int = 24) -> list[dict]:
         """Get usage statistics grouped by endpoint."""
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        cutoff = datetime.now(UTC) - timedelta(hours=hours)
 
         async with self._engine.connect() as conn:
             stmt = (
@@ -509,9 +509,9 @@ class AuditLogger:
         dashboard queries over long time periods.
         """
         if date is None:
-            date = datetime.now(timezone.utc).replace(
-                hour=0, minute=0, second=0, microsecond=0
-            ) - timedelta(days=1)
+            date = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(
+                days=1
+            )
 
         start_of_day = date.replace(hour=0, minute=0, second=0, microsecond=0)
         end_of_day = start_of_day + timedelta(days=1)
@@ -587,7 +587,7 @@ class AuditLogger:
         client_id: str | None = None,
     ) -> list[dict]:
         """Get daily usage from the aggregated table."""
-        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        cutoff = datetime.now(UTC) - timedelta(days=days)
 
         stmt = (
             select(
@@ -624,7 +624,7 @@ class AuditLogger:
 
         Returns the number of records deleted.
         """
-        cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+        cutoff = datetime.now(UTC) - timedelta(days=retention_days)
 
         try:
             async with self._engine.connect() as conn:
@@ -644,7 +644,7 @@ class AuditLogger:
 
     async def cleanup_old_pii_events(self, retention_days: int) -> int:
         """Delete PII events older than retention_days (D-041). Returns rows deleted."""
-        cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+        cutoff = datetime.now(UTC) - timedelta(days=retention_days)
         async with self._engine.begin() as conn:
             result = await conn.execute(delete(pii_events).where(pii_events.c.timestamp < cutoff))
         return result.rowcount or 0
@@ -671,7 +671,7 @@ class AuditLogger:
         """
         import hashlib
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         rows = []
 
         # Map pii_results back to messages — one result per message content
@@ -725,7 +725,7 @@ class AuditLogger:
 
     async def get_pii_stats(self, hours: int = 24) -> dict:
         """Get PII detection statistics."""
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        cutoff = datetime.now(UTC) - timedelta(hours=hours)
 
         async with self._engine.connect() as conn:
             base = pii_events.c.timestamp >= cutoff

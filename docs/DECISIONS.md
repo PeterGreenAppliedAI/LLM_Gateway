@@ -1614,10 +1614,10 @@ Each finding below was reproduced before it was fixed. The fixes are D-041 to D-
   - The reviewer's Windows/Python 3.10 run had 6 failures: 5 in the audit intent log, 1
     timing.
 - **Fix:**
-  - **Linux CI** (Python 3.10, 3.11, 3.12) runs against `postgres:16` and `redis:7` service
+  - **Linux CI** (Python 3.11, 3.12, 3.13) runs against `postgres:16` and `redis:7` service
     containers. `GATEWAY_TEST_REQUIRE_SERVICES=1` makes an unreachable server an
     **error** instead of a skip.
-  - **A `windows-latest` job** (Python 3.10, 3.12) runs the suite on SQLite.
+  - **A `windows-latest` job** (Python 3.11, 3.13) runs the suite on SQLite.
   - **The intent log on Windows:**
     - process locks use `msvcrt` byte-range locking where `fcntl` is missing. Before, orphan
       recovery was simply off on Windows, so a crashed process's log was never drained;
@@ -1640,3 +1640,12 @@ Each finding below was reproduced before it was fixed. The fixes are D-041 to D-
     swallows a cancellation.
   - **Proven by:** `tests/test_aio.py`. The old pattern hangs on 3.10 and not on 3.13,
     which is why it went unseen on 3.13.
+- **Python 3.10 dropped; 3.11 is the minimum.**
+  - **Why:** 3.10 reaches end-of-life in October 2026, and no known deployment needs it. The
+    Docker image doesn't use it.
+  - **Cost:** hosts whose system Python is 3.10 (Ubuntu 22.04) need a newer Python, from
+    `uv`, deadsnakes or the Docker image.
+  - **Code changes:** ruff targets `py311`, so `datetime.UTC` and the built-in
+    `TimeoutError` replace the 3.10 spellings. `(str, Enum)` stays as is (UP042 ignored),
+    because `StrEnum` changes how members format.
+  - **3.11 still has the `wait_for` cancellation bug**, so `wait_event` stays.

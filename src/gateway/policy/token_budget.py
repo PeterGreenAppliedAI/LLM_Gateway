@@ -22,7 +22,7 @@ Tiers and model assignments changed at runtime are saved too.
 import fnmatch
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from pydantic import BaseModel, Field
 
@@ -261,7 +261,7 @@ class TokenBudgetTracker:
 
     def _today(self) -> str:
         """Current UTC date string."""
-        return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        return datetime.now(UTC).strftime("%Y-%m-%d")
 
     # -- usage: persisted baseline + unwritten deltas ---------------------
 
@@ -365,7 +365,7 @@ class TokenBudgetTracker:
 
     def _tomorrow_midnight_utc(self) -> str:
         """ISO timestamp of next midnight UTC."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         tomorrow = now.replace(hour=0, minute=0, second=0, microsecond=0)
         if tomorrow <= now:
             tomorrow += timedelta(days=1)

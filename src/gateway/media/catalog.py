@@ -14,7 +14,7 @@ An endpoint that lists nothing is never blocked: unknown is not invalid.
 """
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from gateway.dispatch.registry import ProviderRegistry
@@ -112,7 +112,7 @@ class MediaCatalog:
             "voices": [],
             "voices_source": None,
             "error": None,
-            "fetched_at": datetime.now(timezone.utc).isoformat(),
+            "fetched_at": datetime.now(UTC).isoformat(),
         }
         errors = []
         try:

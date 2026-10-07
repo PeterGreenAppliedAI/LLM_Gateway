@@ -171,7 +171,7 @@ class InMemoryConcurrency:
         self._waiters[priority].append(waiter)
         try:
             name = await asyncio.wait_for(asyncio.shield(waiter.future), timeout)
-        except asyncio.TimeoutError:  # TimeoutError on 3.11+
+        except TimeoutError:  # TimeoutError on 3.11+
             self._abandon(waiter)
             if waiter.future.done() and not waiter.future.cancelled():
                 return _MemoryLease(waiter.future.result(), self._release)  # handed over in time
@@ -379,7 +379,7 @@ class RedisConcurrency:
         self._wake.set()
         try:
             return await asyncio.wait_for(asyncio.shield(waiter.future), timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             self._abandon(waiter)
             if waiter.future.done() and not waiter.future.cancelled():
                 return waiter.future.result()  # admitted just in time

@@ -21,7 +21,7 @@ import asyncio
 import contextlib
 import time
 from collections import OrderedDict
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -72,7 +72,7 @@ class KeyCache:
         if cached is not None and now - cached[1] < self._ttl:
             info = cached[0]
             expires_at = info.get("expires_at")
-            if expires_at is None or datetime.now(timezone.utc) < expires_at:
+            if expires_at is None or datetime.now(UTC) < expires_at:
                 self.hits += 1
                 self._valid.move_to_end(key_hash)
                 self._record_use(info["id"])
@@ -102,7 +102,7 @@ class KeyCache:
             store.popitem(last=False)
 
     def _record_use(self, key_id: int) -> None:
-        self._last_used[key_id] = datetime.now(timezone.utc)
+        self._last_used[key_id] = datetime.now(UTC)
 
     def invalidate_key(self, key_id: int) -> None:
         """A key was revoked: stop accepting it here immediately."""

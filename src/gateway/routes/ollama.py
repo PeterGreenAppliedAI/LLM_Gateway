@@ -12,7 +12,7 @@ Endpoints:
 
 import json
 from collections.abc import AsyncGenerator
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request
@@ -66,7 +66,7 @@ router = APIRouter(prefix="/api", tags=["ollama"])
 
 def _now_iso() -> str:
     """Get current time in ISO format."""
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _normalize_ollama_format(fmt: str | dict) -> dict:

@@ -15,7 +15,7 @@ tiers and assignments, like other dashboard settings.
 
 import asyncio
 import contextlib
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -32,7 +32,7 @@ CATALOG_SETTING = "budget.catalog"
 
 def _utc(value: datetime) -> datetime:
     """SQLite hands back naive datetimes; they were written as UTC."""
-    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    return value if value.tzinfo else value.replace(tzinfo=UTC)
 
 
 class BudgetStore:
@@ -116,7 +116,7 @@ class BudgetStore:
 
     async def prune(self, keep_days: int) -> int:
         """Delete days older than keep_days. Returns rows removed."""
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=keep_days)).strftime("%Y-%m-%d")
+        cutoff = (datetime.now(UTC) - timedelta(days=keep_days)).strftime("%Y-%m-%d")
         async with self._engine.begin() as conn:
             result = await conn.execute(delete(budget_usage).where(budget_usage.c.day < cutoff))
             return result.rowcount or 0
@@ -172,7 +172,7 @@ class BudgetSync:
             await self._refresh()
 
     async def _refresh(self) -> None:
-        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        day = datetime.now(UTC).strftime("%Y-%m-%d")
         try:
             self._tracker.set_baseline(day, await self._store.day_usage(day))
         except Exception as e:

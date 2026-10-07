@@ -8,7 +8,7 @@ Supports human labeling workflow and training data export.
 """
 
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import and_, desc, func, insert, select, update
@@ -94,7 +94,7 @@ class SecurityScanStore:
 
         values = {
             "request_id": request_id,
-            "timestamp": datetime.now(timezone.utc),
+            "timestamp": datetime.now(UTC),
             "client_id": client_id,
             "model": model,
             "task": task,
@@ -149,7 +149,7 @@ class SecurityScanStore:
             "label": label,
             "label_category": label_category,
             "labeled_by": labeled_by,
-            "labeled_at": datetime.now(timezone.utc),
+            "labeled_at": datetime.now(UTC),
             "label_notes": label_notes,
         }
 
@@ -291,7 +291,7 @@ class SecurityScanStore:
 
         from sqlalchemy import delete
 
-        cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+        cutoff = datetime.now(UTC) - timedelta(days=retention_days)
         async with self._engine.begin() as conn:
             result = await conn.execute(
                 delete(security_scans).where(security_scans.c.timestamp < cutoff)

@@ -4,7 +4,7 @@ import asyncio
 import contextlib
 import os
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import func, select
@@ -23,7 +23,7 @@ def engine(db_engine):
 def _audit_row(request_id: str) -> dict:
     return {
         "request_id": request_id,
-        "timestamp": datetime.now(timezone.utc),
+        "timestamp": datetime.now(UTC),
         "client_id": "tenant",
         "task": "chat",
         "model": "m",
@@ -35,7 +35,7 @@ def _audit_row(request_id: str) -> dict:
 def _pii_row(request_id: str) -> dict:
     return {
         "request_id": request_id,
-        "timestamp": datetime.now(timezone.utc),
+        "timestamp": datetime.now(UTC),
         "client_id": "tenant",
         "pii_type": "email",
         "message_index": 0,

@@ -1,6 +1,7 @@
 """Tests for security scan store (training data collection)."""
 
 import json
+from datetime import UTC
 
 import pytest
 import pytest_asyncio
@@ -465,7 +466,7 @@ class TestMessageRetention:
 
     @pytest.mark.asyncio
     async def test_old_scans_and_pii_events_expire(self, engine):
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
 
         from sqlalchemy import func, select, update
 
@@ -480,7 +481,7 @@ class TestMessageRetention:
             await conn.execute(
                 pii_events.insert().values(
                     request_id="old",
-                    timestamp=datetime.now(timezone.utc) - timedelta(days=100),
+                    timestamp=datetime.now(UTC) - timedelta(days=100),
                     client_id="c",
                     pii_type="email",
                     message_index=0,
@@ -493,7 +494,7 @@ class TestMessageRetention:
             await conn.execute(
                 update(security_scans)
                 .where(security_scans.c.request_id == "old")
-                .values(timestamp=datetime.now(timezone.utc) - timedelta(days=100))
+                .values(timestamp=datetime.now(UTC) - timedelta(days=100))
             )
         assert await store.cleanup_old_scans(90) == 1
         assert await audit.cleanup_old_pii_events(90) == 1

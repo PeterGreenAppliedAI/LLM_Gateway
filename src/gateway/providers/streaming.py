@@ -44,7 +44,7 @@ async def iter_lines_with_timeouts(
             line = await asyncio.wait_for(lines.__anext__(), timeout=timeout)
         except StopAsyncIteration:
             return
-        except asyncio.TimeoutError:
+        except TimeoutError:
             phase = "first data" if timeout == first_timeout else "next data"
             raise StreamStalled(f"Stream stalled: no {phase} for {timeout:g}s") from None
         if line.strip():

@@ -10,7 +10,7 @@ an endpoint declaring media capabilities is skipped here unless it sets
 """
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import httpx
 
@@ -140,7 +140,7 @@ class ModelDiscoveryService:
                 else:
                     results[endpoint.name] = result
 
-        self._catalog.last_discovery = datetime.now(timezone.utc)
+        self._catalog.last_discovery = datetime.now(UTC)
         return results
 
     async def _discover_endpoint(self, endpoint: EndpointConfig) -> list[str]:

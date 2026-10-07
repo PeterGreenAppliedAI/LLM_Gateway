@@ -16,8 +16,8 @@ A **Fixed** row names four things, so the claim can be checked rather than trust
 - **Requires:** configuration needed for the fix to apply. "Default" means none.
 - **Proven by:** the test file that fails if the fix regresses.
 - **Platform:** where that test runs. Unless a row says otherwise:
-  - **All** means every CI job: Linux with Python 3.10, 3.11 and 3.12, and Windows with
-    Python 3.10 and 3.12.
+  - **All** means every CI job: Linux with Python 3.11, 3.12 and 3.13, and Windows with
+    Python 3.11 and 3.13. Python 3.11 is the minimum supported version.
   - **SQLite + PG** means the test runs on SQLite and on PostgreSQL 16. PostgreSQL runs on
     Linux CI only.
   - **Redis** means against a real Redis 7, on Linux CI only.
@@ -26,7 +26,7 @@ A **Fixed** row names four things, so the claim can be checked rather than trust
   (`GATEWAY_TEST_REQUIRE_SERVICES=1`, D-045).
 
 **Test baseline:** 914 passed, 0 skipped, run locally with PostgreSQL and Redis required
-(Linux, Python 3.13). The CI result on the PR is the authoritative run for 3.10 to 3.12 and
+(Linux, Python 3.13). The CI result on the PR is the authoritative run for 3.11 and 3.12 and
 for Windows.
 
 **Severity key:**

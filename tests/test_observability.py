@@ -2,7 +2,7 @@
 
 import json
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from prometheus_client import CollectorRegistry
@@ -55,7 +55,7 @@ class TestRequestContext:
     def test_record_first_token(self):
         """record_first_token calculates TTFT."""
         ctx = RequestContext(request_id="req-123")
-        ctx.start_time = datetime.now(timezone.utc) - timedelta(milliseconds=150)
+        ctx.start_time = datetime.now(UTC) - timedelta(milliseconds=150)
 
         ctx.record_first_token()
 
@@ -65,7 +65,7 @@ class TestRequestContext:
     def test_record_complete(self):
         """record_complete calculates latency and throughput."""
         ctx = RequestContext(request_id="req-123")
-        ctx.start_time = datetime.now(timezone.utc) - timedelta(milliseconds=500)
+        ctx.start_time = datetime.now(UTC) - timedelta(milliseconds=500)
 
         ctx.record_complete(prompt_tokens=100, completion_tokens=200)
 
