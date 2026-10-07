@@ -1295,3 +1295,48 @@ worker" readiness item), not SQLite.
   - 256 rows, each matched to its response ID, 0 missing, 0 duplicates.
 - **PostgreSQL end-to-end:** `auto` chose direct writes; rows landed with correct UTC
   timestamps.
+
+## D-039: Deployment tiers: Postgres is a scaling/security decision, not an install tax
+
+- **Status:** Proposed, 2026-10-07 (from Peter's discussion with a reviewer). Nothing built
+  yet beyond what D-035 and D-038 already provide.
+- **Problem:** "SQLite hit write contention, so use Postgres" is an expensive answer to a
+  narrow problem.
+  - Postgres brings another service with credentials, backups, upgrades, health checks,
+    connection handling, network exposure and its own failure domain.
+  - For one user or a small trusted team, the workload is SQLite-shaped: many small,
+    independent writes and mostly reads. D-038 removed the actual bottleneck (bursts of
+    writes) at the application layer.
+- **The real reason to move is tenant isolation, not write volume.** In SQLite, isolation can
+  only be enforced in application code: every query must carry the tenant filter, and one
+  missed `AND tenant_id = ?` is a cross-tenant leak. PostgreSQL row-level security makes the
+  database refuse other tenants' rows even when a query forgets the filter:
+  `CREATE POLICY tenant_isolation ON audit_log USING (tenant_id = current_setting('app.tenant_id'));`
+- **Proposed tiers:**
+
+  | Tier | Store | For |
+  |---|---|---|
+  | **Embedded** (default) | SQLite + intent log (D-038), single writer per process | one user, trusted office or team; install and run, no DBA |
+  | **Server** | PostgreSQL; tenant ID on every row; RLS policies; per-tenant roles and quotas; connection pooling | multiple customers or untrusted user groups; several app instances on one database |
+  | **Enterprise** | Server + external identity (OIDC/SAML), stricter audit and retention, separate audit store | regulated deployments |
+
+  Redis (D-035) is orthogonal: an add-on for several gateway processes, at any tier.
+- **When to cross from Embedded to Server:**
+  - tenants that must not see each other's data;
+  - several independent services mutating shared state concurrently;
+  - or the write funnel turning into a distributed coordination system. If D-038's log ever
+    needs cross-process ordering or consensus, stop and use Postgres instead.
+- **Where the code stands:**
+  - Embedded works and is the default.
+  - PostgreSQL works as a store: tested against a real Postgres since D-038, which also
+    fixed its broken audit writes.
+  - There is **no tenant concept**. API keys have a `client_id`, and the dashboard filters
+    reads by it in application code (D-005). Server mode needs:
+    - a `tenant_id` on keys and on every stored row;
+    - the tenant set per database session (`SET app.tenant_id`);
+    - RLS policies, applied by migration on PostgreSQL only;
+    - tests proving a query without a tenant filter returns nothing across tenants.
+- **Not decided yet:**
+  - whether Server mode requires PostgreSQL, or SQLite tenants are allowed with a warning;
+  - how the dashboard's admin role spans tenants;
+  - whether audit gets its own database at Enterprise.
