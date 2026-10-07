@@ -355,3 +355,32 @@ is observe-only).
   would sit on top of that.
 - **Known issue found, not fixed here:** `/v1/completions` ignores `stream: true` and returns
   plain JSON, which breaks clients expecting server-sent events.
+
+## D-018: Completions streaming, raw-prompt streams, and unscrubbed completion prompts
+
+- **Status:** Implemented, 2026-10-07, `868947a` (scrubbing fix landed earlier in `0ec8d7b`)
+- **Problem:**
+  - `/v1/completions` ignored `stream: true` and returned plain JSON to clients expecting
+    server-sent events.
+  - **Every stream went through each engine's chat endpoint**, which applies the model's chat
+    template. Non-streaming completions use the raw completion endpoint (`/v1/completions`,
+    Ollama `/api/generate`). So base models and fill-in-the-middle prompts behaved differently
+    streamed vs not, and Ollama `/api/generate` streams lost `system`/`template`/`context`
+    handling.
+  - **Found while fixing this:** before `0ec8d7b`, `/v1/completions` sent the **raw client prompt**
+    to the model. The Unicode sanitizer and PII scrubber wrote into a `sanitized_prompt`
+    variable, but the internal request was built from `body.prompt`. With PII scrubbing on,
+    completion prompts reached the model unscrubbed.
+- **What didn't work:** *Streaming completions by turning the prompt into a chat message:* the
+  quick fix, and the wrong semantics. It would apply a chat template to a raw-text prompt.
+- **Fix:**
+  - Adapters gain `generate_stream`: vLLM and OpenAI stream `/v1/completions` (OpenAI falls back
+    to chat on 404, like its `generate()`), Ollama streams `/api/generate`. The base class falls
+    back to a single chunk from `generate()`. The dispatcher uses `generate_stream` for
+    completion and generate tasks.
+  - The route streams `text_completion` frames under the same contract as chat (D-013).
+    Several prompts or `n > 1` with streaming is rejected (422).
+  - The model receives the sanitized and scrubbed prompts, now pinned by a regression test.
+  - vLLM completions now pass `stop` sequences, which they had silently dropped.
+- **What works now:** `tests/test_completions_streaming.py`, including
+  `test_scrubbed_prompt_is_what_the_model_gets` for both streaming and non-streaming.

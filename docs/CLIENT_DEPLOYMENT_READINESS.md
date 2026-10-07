@@ -100,7 +100,7 @@ Also fixed in phase 1 (D-016): streams ignored endpoint priority, `target_endpoi
 |-----|-----|-------|--------|
 | P1 | OpenAI-route images silently dropped | `models/openai.py:66` `content_as_str` | Content-part arrays are flattened to text only, so `image_url` parts never reach the model. Vision works only through the Ollama API. The request should either pass images through or be rejected. |
 | ~~P1~~ | **Fixed (D-017):** batch requests silently reduced to one | `providers/vllm.py`, `routes/fanout.py` | vLLM embeddings were missing entirely; completions prompt lists used only the first prompt; `n` was ignored. All three now work. |
-| P1 | `/v1/completions` ignores `stream: true` | `routes/openai.py` `completions` | Returns plain JSON to a client expecting server-sent events. Found during D-017. |
+| ~~P1~~ | **Fixed (D-018):** `/v1/completions` ignored `stream: true` | `routes/openai.py`, `providers/*` `generate_stream` | Streams `text_completion` frames from each engine's raw completion endpoint. Also found: before `0ec8d7b`, completion prompts reached the model unsanitized and unscrubbed. |
 | P2 | No offline batch API | — | No `/v1/files` or `/v1/batches`. Large offline jobs suit vLLM's continuous batching best; build on the phase 2 priority queue. |
 | P2 | No request ID returned to the client | — | `request_id` is generated and audited but never sent in a response header (`X-Request-ID`), so clients can't correlate a failure with the audit log. Honor an inbound `X-Request-ID` too. |
 | P2 | No request-size bounds | `models/openai.py`, `models/ollama.py` | No limit on message count, body size or image payload size. The regex and PII scans run synchronously over the whole body. |
