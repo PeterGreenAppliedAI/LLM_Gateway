@@ -1655,3 +1655,60 @@ Each finding below was reproduced before it was fixed. The fixes are D-041 to D-
   also jump with NTP and give negative latencies on any OS. `RequestContext` now measures
   durations with `time.perf_counter`; `start_time` stays a wall-clock timestamp for logs.
   This was the review's sixth Windows failure (`test_observability.py::test_full_request_flow`).
+
+## D-046: Never cancel a task mid-transaction (SQLite write lock left held on Python 3.11)
+
+- **Status:** Implemented, 2026-10-07. Found by the first CI run on `main` after #10.
+- **Problem:** `main`'s Linux/Python 3.11 job failed two tests. 3.12, 3.13, Windows and lint
+  passed.
+  - **Crash recovery:** the survivor hit `database is locked` for the full 5 s busy timeout
+    and drained 15 of 25 rows (`test_intent_log.py::test_kill_9_…[sqlite]`).
+  - **Key-cache revocation:** a key expected to still be cached was gone
+    (`test_key_cache.py::test_other_process_follows_within_ttl[sqlite]`).
+- **Cause 1, a real bug:**
+  - **Trigger:** on Python 3.11 with SQLAlchemy 2.1 and aiosqlite 0.22, cancelling a task in
+    the middle of a database call can leave its SQLite connection unclosed. Python's cycle
+    collector is the only thing that eventually frees it.
+  - **Effect:** until then it holds the write lock, so every other writer waits out the busy
+    timeout and fails.
+  - **How it was pinned down:**
+    - Isolated reproducer: cancel a transaction at a random moment, then write from another
+      connection. It failed in 3–4% of runs on 3.11 and 0 of 600 on 3.12 and 3.13.
+    - Savepoints made no difference.
+    - While the write was blocked, no aiosqlite worker thread was left for the old
+      connection, and `gc.collect()` released the lock at once.
+  - **What didn't work:** telling SQLAlchemy the aiosqlite dialect has no "terminate", so an
+    invalidated connection is closed normally (3 to 8 failures in 250, same as before).
+  - **Where it bites:** this isn't confined to tests. A gateway shutting down cancels its
+    background loops, and the drainer, orphan recovery, budget sync, key-cache flush and
+    retention cleanup can each be cut off mid-transaction. The stress test hit it during
+    `IntentLog.close()` itself.
+- **Fix:**
+  - Background database work runs shielded (`gateway.aio.Uninterruptible`). Cancelling a loop
+    stops it between units of work, and shutdown waits for the transaction in progress
+    instead of abandoning it. This is correct on every Python version and database.
+  - Retention cleanup waits at most 10 s at shutdown, then is cancelled after all; the
+    process exits next, which releases SQLite's locks.
+  - Shielding also closes two smaller gaps:
+    - **key cache:** pending `last_used_at` times taken for a flush were dropped when it was
+      cancelled;
+    - **budgets:** a flush cancelled after its commit but before confirming would be re-sent
+      and counted twice. Usage was never lost, though: an unconfirmed batch is re-sent.
+- **Still exposed:** a client disconnect cancels its request handler, and on 3.11 that can
+  hit a database call. On SQLite the request path rarely writes by design:
+  - audit rows go through the intent log (D-038);
+  - keys are cached (D-040);
+  - WAL read transactions don't block writers.
+
+  An operator choosing `GATEWAY_DB_AUDIT_DURABILITY=sync` on SQLite with Python 3.11 is the
+  exposed case; Python 3.12 or newer avoids it.
+- **Cause 2, a test bug:** the key-cache test used a 100 ms cache lifetime around a real
+  revoke. On a slow CI disk the revoke's commit took 125 ms, so the entry expired before the
+  "still cached" check. The test now uses a controlled clock.
+- **What works now:**
+  - **Stress test of shutdown and crash recovery on 3.11:** 0 failures in 300 runs with the
+    fix; 11 in 300 without it.
+  - **`tests/test_aio.py`:** cancelling a loop doesn't cut off its work; `finish()` waits for
+    it; `finish(timeout)` cancels after the timeout.
+  - **Full suite:** 919 passed on 3.11 and on 3.13.
+  - **The two failing tests:** 15 runs in a row on 3.11 without a failure.

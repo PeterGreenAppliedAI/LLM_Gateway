@@ -339,9 +339,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             except Exception as e:
                 logger.error("Retention cleanup failed; will retry tomorrow", error=str(e))
 
+        from gateway.aio import Uninterruptible
+
+        app.state._cleanup_work = Uninterruptible()  # never cut off mid-DELETE (D-046)
+
         async def _cleanup_loop() -> None:
             while True:
-                await _cleanup_once()
+                await app.state._cleanup_work.run(_cleanup_once())
                 await asyncio.sleep(86400)  # daily
 
         app.state._cleanup_task = asyncio.create_task(_cleanup_loop())
@@ -360,6 +364,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             await app.state._cleanup_task
         except asyncio.CancelledError:
             pass
+        await app.state._cleanup_work.finish(timeout=10)
 
     if getattr(app.state, "budget_sync", None) is not None:
         await app.state.budget_sync.stop()  # writes the last batch of usage
