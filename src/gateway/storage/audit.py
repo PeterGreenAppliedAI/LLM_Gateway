@@ -104,6 +104,7 @@ class AuditLogger:
         estimated_cost_usd: float | None = None,
         request_body: dict | None = None,
         response_body: dict | None = None,
+        media_usage: dict | None = None,
     ) -> None:
         """Log a request to the audit table."""
         values = {
@@ -129,6 +130,8 @@ class AuditLogger:
             "completion_tokens": completion_tokens,
             "total_tokens": prompt_tokens + completion_tokens,
             "estimated_cost_usd": estimated_cost_usd,
+            # Metadata only, never media content (D-023)
+            "media_usage": media_usage,
         }
 
         if self._store_request_body and request_body:

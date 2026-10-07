@@ -22,6 +22,7 @@ PII_SCAN_ROUTES: tuple[str, ...] = (
     "/api/generate",
     "/api/embed",
     "/api/embeddings",
+    "/v1/audio/speech",  # TTS input text (scrubbed text is spoken as "[EMAIL]" etc.)
 )
 
 SETTING_KEY = "pii.scrub"

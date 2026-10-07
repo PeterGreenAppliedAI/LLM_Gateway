@@ -3,7 +3,7 @@
 import os
 import re
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import yaml
 from pydantic import AfterValidator, BaseModel, Field, model_validator
@@ -103,6 +103,32 @@ class ProviderConfig(BaseModel):
 # =============================================================================
 
 
+MediaCapability = Literal["tts", "stt", "image", "video"]
+
+# Endpoint types whose adapters speak OpenAI's media routes
+MEDIA_CAPABLE_TYPES = frozenset({ProviderType.OPENAI, ProviderType.VLLM})
+
+
+class MediaTokenEquivalents(BaseModel):
+    """Token-equivalents per native media unit, for budgets (D-021).
+
+    Budgets are token-based; media is metered in its own units and converted
+    here, then the model's tier multiplier applies as for any model.
+    Defaults are rough parity with text, meant to be tuned per deployment.
+    """
+
+    tts_character: float = Field(default=0.25, ge=0)  # ~4 characters per token
+    stt_audio_second: float = Field(default=10.0, ge=0)
+
+
+class MediaConfig(BaseModel):
+    """Limits and metering for voice/image/video routes."""
+
+    max_upload_mb: float = Field(default=25.0, gt=0, le=1024)
+    max_tts_characters: int = Field(default=4096, gt=0, le=1_000_000)
+    token_equivalents: MediaTokenEquivalents = Field(default_factory=MediaTokenEquivalents)
+
+
 class EndpointConfig(BaseModel):
     """Configuration for a single endpoint (physical runtime).
 
@@ -122,6 +148,21 @@ class EndpointConfig(BaseModel):
     max_retries: int = Field(default=3, ge=0, le=10)
     labels: dict[str, str] = Field(default_factory=dict)  # cold_flexible, prod_eligible, etc.
     api_key_env: str | None = None  # Environment variable name for API key
+    # Media tasks this endpoint serves (D-020). Chat/completions/embeddings
+    # need no declaration; media routes only use endpoints that declare it.
+    capabilities: list[MediaCapability] = Field(default_factory=list, max_length=4)
+
+    @model_validator(mode="after")
+    def _media_needs_openai_contract(self) -> "EndpointConfig":
+        # Media routes speak OpenAI's audio/image/video API (D-020); other
+        # endpoint types would accept the declaration and then fail every call
+        if self.capabilities and self.type not in MEDIA_CAPABLE_TYPES:
+            raise ValueError(
+                f"Endpoint '{self.name}': capabilities {self.capabilities} need type "
+                f"{sorted(t.value for t in MEDIA_CAPABLE_TYPES)} (OpenAI-compatible media API), "
+                f"not '{self.type.value}'"
+            )
+        return self
 
 
 class EnvironmentConfig(BaseModel):
@@ -290,6 +331,7 @@ class GatewayConfig(BaseModel):
 
     # Embedding admission queue
     embedding_queue: EmbeddingQueueYamlConfig = Field(default_factory=EmbeddingQueueYamlConfig)
+    media: MediaConfig = Field(default_factory=MediaConfig)
 
     # New endpoints architecture
     endpoints: list[EndpointConfig] = Field(default_factory=list, max_length=50)

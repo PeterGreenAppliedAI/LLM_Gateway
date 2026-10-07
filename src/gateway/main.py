@@ -26,7 +26,7 @@ from gateway.config import GatewayConfig, load_config
 from gateway.dispatch import ProviderRegistry
 from gateway.exception_handlers import register_exception_handlers
 from gateway.observability import get_logger
-from gateway.routes import devmesh_router, ollama_router, openai_router
+from gateway.routes import audio_router, devmesh_router, ollama_router, openai_router
 from gateway.security import AsyncSecurityAnalyzer
 from gateway.security.guard import create_guard_client
 from gateway.settings import Settings, get_settings
@@ -281,6 +281,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # Include routers
     app.include_router(openai_router)
+    app.include_router(audio_router)
     app.include_router(devmesh_router)
     app.include_router(ollama_router)
 

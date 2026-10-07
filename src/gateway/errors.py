@@ -396,6 +396,18 @@ class ValidationError(GatewayError):
         )
 
 
+class PayloadTooLargeError(GatewayError):
+    """Upload exceeds the gateway's size limit (HTTP 413)."""
+
+    def __init__(self, message: str):
+        super().__init__(
+            message=message,
+            code=ErrorCode.VALIDATION_ERROR,
+            category=ErrorCategory.VALIDATION,
+            http_status=413,
+        )
+
+
 # =============================================================================
 # Provider Errors
 # =============================================================================

@@ -151,6 +151,8 @@ Both OpenAI and Ollama formats — your apps don't need to change.
 
 **OpenAI:** `POST /v1/chat/completions`, `POST /v1/completions`, `POST /v1/embeddings`, `GET /v1/models`
 
+**Voice (OpenAI audio API):** `POST /v1/audio/speech` (text-to-speech, streamed), `POST /v1/audio/transcriptions` and `/v1/audio/translations` (speech-to-text, multipart). Works with any engine that speaks OpenAI's audio API (Kokoro-FastAPI, speaches/faster-whisper, vLLM, vLLM-Omni, ...): declare the endpoint with `type: openai` and `capabilities: [tts]` or `[stt]`. Same auth, scope, PII, audit and budget rules as chat. Engine setup notes: [docs/MEDIA_ENGINES.md](docs/MEDIA_ENGINES.md).
+
 **Ollama:** `POST /api/chat`, `POST /api/generate`, `POST /api/embed`, `POST /api/embeddings` (legacy), `GET /api/tags`
 
 Full Ollama passthrough: `format` (JSON mode and schema-constrained decoding), `options` (`num_ctx`, `top_k`, `stop`, ...), `keep_alive`, `tools` (object arguments, streaming included), and vision `images` all reach the engine untouched. The gateway never invents defaults — unset parameters use the engine's own defaults, and policy caps reject loudly (4xx) instead of silently clamping.

@@ -14,6 +14,14 @@ rate_limits:
 # Embedding admission queue: embedding bursts wait for rate-limit
 # headroom instead of getting 429s (chat stays fail-fast). 429 only when
 # the queue is full or a request waits past max_wait_seconds.
+# Voice/image/video limits and metering (D-021)
+media:
+  max_upload_mb: 25          # transcription uploads; larger -> 413
+  max_tts_characters: 4096   # text-to-speech input; longer -> 422
+  token_equivalents:         # budgets are token-based; media converts at these rates
+    tts_character: 0.25      # ~4 characters per token
+    stt_audio_second: 10.0
+
 embedding_queue:
   enabled: true
   max_pending: 500
@@ -89,6 +97,23 @@ endpoints:
   #   max_retries: 3
   #   labels:
   #     tier: primary
+
+  # Voice endpoints (any engine speaking OpenAI's audio API; see
+  # docs/MEDIA_ENGINES.md). type is the request style, capabilities say what
+  # it serves. Keep these engines on a private network: most have no auth.
+  #
+  # Text-to-speech, e.g. Kokoro-FastAPI:
+  # - name: kokoro
+  #   type: openai
+  #   url: http://192.168.1.100:8880
+  #   capabilities: [tts]
+  #
+  # Speech-to-text, e.g. speaches (faster-whisper) or vLLM with vllm[audio]:
+  # - name: whisper
+  #   type: openai
+  #   url: http://192.168.1.100:8000
+  #   timeout: 600.0          # long recordings take a while
+  #   capabilities: [stt]
 
 # =============================================================================
 # Environments

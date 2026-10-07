@@ -68,6 +68,10 @@ class VLLMAdapter(ProviderAdapter):
                 )
             return self._client
 
+    async def media_client(self) -> httpx.AsyncClient:
+        """vLLM serves /v1/audio/transcriptions and /translations (vllm[audio])."""
+        return await self._get_client()
+
     async def close(self) -> None:
         """Close the HTTP client."""
         if self._client and not self._client.is_closed:

@@ -182,6 +182,15 @@ class ProviderAdapter(ABC):
             usage=response.usage,
         )
 
+    async def media_client(self):
+        """HTTP client for OpenAI-shaped media routes (/v1/audio/*, /v1/images/*).
+
+        Carries the endpoint's base URL and auth but no default Content-Type,
+        so multipart uploads keep their own. Adapters whose engines speak the
+        OpenAI media API override this (D-020).
+        """
+        raise NotImplementedError(f"{self.name} does not serve media routes")
+
     # =========================================================================
     # Provider Info
     # =========================================================================

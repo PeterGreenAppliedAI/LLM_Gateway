@@ -512,3 +512,42 @@ is observe-only).
 - **Decision:** No Ollama-specific image adapter. A Mac pinned to ≤0.32.5 works as a `type: openai`
   image endpoint (D-020).
 - **Lesson:** Check release history, not just current main, before declaring a feature absent.
+
+## D-027: Voice routes (M1a)
+
+- **Status:** Implemented, 2026-10-07
+- **What:** `POST /v1/audio/speech`, `/v1/audio/transcriptions` and `/v1/audio/translations`
+  over any OpenAI-compatible engine with `capabilities: [tts]` / `[stt]` (D-020). Media gets
+  its own small dispatcher, because binary bodies don't fit the text request model. It follows
+  the same rules as text:
+  - capability, then key/environment scope (D-003), then pins and `target_endpoint`, then
+    healthy and priority order;
+  - the status is known before the first byte (D-013);
+  - upstream 4xx passes through; 5xx, 429 and connection failures fail over (D-012).
+
+  Speech audio is relayed as it arrives. TTS input text goes through PII detection and
+  scrubbing (`/v1/audio/speech` is in the scrub route list). Audit rows carry `media_usage`
+  metadata only (D-023, migration `c7d1e5f20a84`). Budgets charge characters × 0.25, or audio
+  seconds × 10 (both configurable, D-021). Disconnects are recorded and charged, shielded as
+  in D-004.
+- **What didn't work:**
+  - *httpx's own multipart encoder for the upload:* FastAPI gives the route a synchronous
+    spooled file, httpx turns it into a sync stream, and the `AsyncClient` refuses to send it
+    ("Attempted to send a sync request with an AsyncClient"). **Every real transcription would
+    have crashed.** Caught by the first test run. Fixed by building the multipart body as an
+    async stream that reads the spool in chunks, with an exact `Content-Length`. A test now
+    parses it on a real FastAPI engine (repeated fields, file bytes, a malicious filename).
+  - *Reusing the OpenAI adapter's HTTP client:* its default `Content-Type: application/json`
+    would override the multipart header. Media calls get a separate client with auth only.
+  - *Expecting 503 when no endpoint serves a capability:* the gateway's convention is
+    `400 no_provider` ("nothing can serve this request"). Kept it consistent.
+- **Also found:** `python-multipart` was installed but never declared in `pyproject.toml` or
+  `requirements.txt`. FastAPI needs it for any form route, so a clean install would have
+  failed. Now declared.
+- **Metering limits:** audio duration comes from the engine (`verbose_json`) or the WAV header.
+  For other formats it's unknown, and the budget falls back to the transcript's approximate
+  token count (`duration_source` records which was used).
+- **Not yet (M1b):** voice/model discovery, engine profiles, validating voice and speed against
+  the registry, `GET /v1/audio/voices`. Today an unknown voice is rejected by the engine (400
+  passed through) or silently replaced, depending on the engine.
+- **What works now:** `tests/test_audio_routes.py` (18 tests).

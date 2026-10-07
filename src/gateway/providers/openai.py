@@ -70,6 +70,7 @@ class OpenAIAdapter(ProviderAdapter):
         """
         super().__init__(config=config, provider_type=ProviderType.OPENAI)
         self._client: httpx.AsyncClient | None = None
+        self._media_client: httpx.AsyncClient | None = None
         self._client_lock = asyncio.Lock()
 
         # Resolve API key from config or environment
@@ -130,11 +131,32 @@ class OpenAIAdapter(ProviderAdapter):
                 )
             return self._client
 
+    async def media_client(self) -> httpx.AsyncClient:
+        """Client for media routes: auth and custom headers, no JSON Content-Type.
+
+        The main client's default Content-Type: application/json would win over
+        httpx's multipart header and break transcription uploads.
+        """
+        async with self._client_lock:
+            if self._media_client is None or self._media_client.is_closed:
+                headers = dict(self._custom_headers)
+                if self._api_key:
+                    headers["Authorization"] = f"Bearer {self._api_key}"
+                self._media_client = httpx.AsyncClient(
+                    base_url=self.base_url,
+                    timeout=httpx.Timeout(self.timeout, connect=self.connect_timeout),
+                    headers=headers,
+                )
+            return self._media_client
+
     async def close(self) -> None:
-        """Close the HTTP client."""
+        """Close the HTTP clients."""
         if self._client and not self._client.is_closed:
             await self._client.aclose()
             self._client = None
+        if self._media_client and not self._media_client.is_closed:
+            await self._media_client.aclose()
+            self._media_client = None
 
     # =========================================================================
     # Required Methods

@@ -79,6 +79,8 @@ audit_log = Table(
     # Use JSON for SQLite compatibility, JSONB preferred for PostgreSQL
     Column("request_body", JSON, nullable=True),
     Column("response_body", JSON, nullable=True),
+    # Native media units (characters, audio seconds, bytes, voice, format; D-021/D-023)
+    Column("media_usage", JSON, nullable=True),
     # Indexes for common queries
     Index("ix_audit_log_timestamp", "timestamp"),
     Index("ix_audit_log_client_id", "client_id"),
