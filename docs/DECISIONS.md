@@ -384,3 +384,42 @@ is observe-only).
   - vLLM completions now pass `stop` sequences, which they had silently dropped.
 - **What works now:** `tests/test_completions_streaming.py`, including
   `test_scrubbed_prompt_is_what_the_model_gets` for both streaming and non-streaming.
+
+## D-019: PII scrubbing is configurable from the dashboard
+
+- **Status:** Implemented, 2026-10-07
+- **Problem:** Scrubbing was set only by `GATEWAY_PII_SCRUB_ENABLED` / `GATEWAY_PII_SCRUB_ROUTES`,
+  so changing it meant editing the environment and restarting the gateway.
+- **What didn't work / rejected:**
+  - *Making detection togglable from the dashboard as well:* rejected. Turning detection off also
+    stops PII being redacted from stored data (D-005), so a single click could start storing
+    raw PII. Detection stays an environment setting; the dashboard shows it read-only.
+  - *Keeping the change in memory only:* rejected. A restart would silently undo an operator's
+    compliance decision.
+  - *Exposing the API's "empty route list = all routes" directly as checkboxes:* unchecking
+    everything would mean "scrub everything". The UI has an explicit *All routes / Selected
+    routes* choice instead, and Save is disabled with nothing selected.
+  - *First UI pass:* the main checkbox label rendered offset to the right, because the Vite
+    template's `#root { text-align: center }` centered the shorter first line. Caught in a
+    browser screenshot; fixed with `text-left`.
+- **Fix:**
+  - Admin-only `GET/PUT /api/pii/config` (D-002). Changes apply to the next request.
+  - Saved in a new `runtime_settings` table (key, value, updated_at, updated_by; Alembic
+    `b4e2d9a71c35`) and loaded at startup over the environment defaults. An unreadable saved
+    value falls back to the environment default rather than failing startup.
+  - Route names are validated against the routes that run PII detection, so a typo can't leave
+    a route unscrubbed. Changes are refused (422) when detection is off.
+  - Each change is logged at WARNING with before/after values and who made it.
+  - The dashboard card shows the policy in effect, where it came from (environment or
+    dashboard, by whom and when), and asks for confirmation before turning scrubbing off.
+    It warns when there's no database to save to.
+- **What works now:** `tests/test_pii_config.py`, covering admin-only access, live effect,
+  selected routes, validation, the detection requirement, persistence across restart, and a
+  bad saved value. Also verified end to end against a running gateway and dashboard in headless
+  Chromium: save, cancel on the confirm dialog, confirm, and the setting surviving a restart.
+  Migration checked upgrade → downgrade → upgrade on SQLite.
+- **Trade-offs:** Only the current value is stored, not a history of changes. The change history
+  lives in the WARNING log lines.
+- **Revisit when:** Compliance needs a queryable change history. Then add a
+  `runtime_settings_history` table. The same store can hold other runtime settings
+  (budgets, D-010).

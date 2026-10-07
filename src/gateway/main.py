@@ -35,6 +35,26 @@ from gateway.storage import AuditLogger, DatabaseConfig, SecurityScanStore, crea
 logger = get_logger(__name__)
 
 
+async def _load_saved_pii_scrub(app: FastAPI) -> None:
+    """Apply a dashboard-saved PII scrubbing policy, if one exists."""
+    from gateway.security.pii_config import SETTING_KEY, PIIScrubConfig
+
+    try:
+        saved = await app.state.runtime_settings.get(SETTING_KEY)
+        if saved is None:
+            return
+        app.state.pii_settings = PIIScrubConfig.from_saved(saved)
+        logger.info(
+            "PII scrubbing policy loaded from dashboard setting",
+            scrub_enabled=app.state.pii_settings.scrub_enabled,
+            scrub_routes=app.state.pii_settings.scrub_routes or ["all"],
+            updated_by=app.state.pii_settings.updated_by,
+        )
+    except Exception:
+        # Keep the environment default rather than failing startup
+        logger.exception("Saved PII scrubbing policy unreadable; using environment default")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan manager."""
@@ -70,10 +90,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     pii_scrubber = None
     if settings.pii.enabled:
         from gateway.security.pii import PIIScrubber
+        from gateway.security.pii_config import PIIScrubConfig
 
         pii_scrubber = PIIScrubber()
         app.state.pii_scrubber = pii_scrubber
-        app.state.pii_settings = settings.pii
+        # Environment default; a dashboard-saved value replaces it below
+        app.state.pii_settings = PIIScrubConfig(
+            scrub_enabled=settings.pii.scrub_enabled,
+            scrub_routes=settings.pii.scrub_routes,
+        )
         logger.info(
             "PII detection enabled",
             scrub_enabled=settings.pii.scrub_enabled,
@@ -131,6 +156,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 logger.warning("Recovered audit rows from spill file", rows=replayed)
         except Exception:
             logger.exception("Audit spill replay failed; rows remain in the spill file")
+
+    # Operator settings saved from the dashboard override env defaults
+    if app.state.db_engine is not None:
+        from gateway.storage import RuntimeSettingsStore
+
+        app.state.runtime_settings = RuntimeSettingsStore(app.state.db_engine)
+        if pii_scrubber is not None:
+            await _load_saved_pii_scrub(app)
 
     # Initialize registry and discovery service if endpoints are configured
     if app.state.config and app.state.config.endpoints:

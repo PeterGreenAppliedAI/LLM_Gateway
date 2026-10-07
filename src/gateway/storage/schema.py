@@ -256,3 +256,18 @@ pii_events = Table(
     Index("ix_pii_events_pii_type", "pii_type"),
     Index("ix_pii_events_value_hash", "value_hash"),
 )
+
+
+# =============================================================================
+# Runtime Settings Table (operator changes made from the dashboard)
+# =============================================================================
+
+runtime_settings = Table(
+    "runtime_settings",
+    metadata,
+    # Dotted setting name, e.g. "pii.scrub"
+    Column("key", String(64), primary_key=True),
+    Column("value", JSON, nullable=False),
+    Column("updated_at", DateTime, nullable=False),
+    Column("updated_by", String(128), nullable=True),
+)

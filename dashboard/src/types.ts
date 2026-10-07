@@ -197,6 +197,17 @@ export interface PIIStats {
   unique_values: number
 }
 
+export interface PIIConfig {
+  detection_enabled: boolean
+  scrub_enabled: boolean
+  scrub_routes: string[] // empty = all routes
+  available_routes: string[]
+  source: 'environment' | 'dashboard'
+  updated_at: string | null
+  updated_by: string | null
+  persisted: boolean
+}
+
 export interface PIIEvent {
   id: number
   request_id: string

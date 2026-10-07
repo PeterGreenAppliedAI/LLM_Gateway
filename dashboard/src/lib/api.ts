@@ -1,4 +1,4 @@
-import type { Stats, Request, RequestDetail, Catalog, HealthResponse, SecurityAlert, SecurityStats, SecurityResult, ApiKeyInfo, BudgetConfig, BudgetUsage, SecurityScan, LabelStats, PIIStats, PIIEvent } from '../types'
+import type { Stats, Request, RequestDetail, Catalog, HealthResponse, SecurityAlert, SecurityStats, SecurityResult, ApiKeyInfo, BudgetConfig, BudgetUsage, SecurityScan, LabelStats, PIIStats, PIIEvent, PIIConfig } from '../types'
 
 // API base URL - gateway server
 export const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8001'
@@ -194,3 +194,24 @@ export async function fetchPIIEvents(limit = 50, piiType?: string): Promise<{ ev
   if (!res.ok) return { events: [], total: 0 }
   return res.json()
 }
+
+export async function fetchPIIConfig(): Promise<PIIConfig | null> {
+  const res = await apiFetch(`${API_BASE}/api/pii/config`)
+  if (!res.ok) return null
+  return res.json()
+}
+
+// Resolves with the new config, or rejects with the gateway's error message
+export async function updatePIIConfig(body: { scrub_enabled: boolean; scrub_routes: string[] }): Promise<PIIConfig> {
+  const res = await apiFetch(`${API_BASE}/api/pii/config`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) {
+    throw new Error(data?.error?.message || data?.detail?.[0]?.msg || `Request failed (${res.status})`)
+  }
+  return data
+}
+

@@ -15,6 +15,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
+from gateway.observability import get_logger
 from gateway.policy import PolicyEnforcer
 from gateway.routes.dependencies import (
     get_audit_logger,
@@ -22,9 +23,11 @@ from gateway.routes.dependencies import (
     get_enforcer,
     require_admin,
 )
+from gateway.security.pii_config import PIIScrubUpdate
 from gateway.storage import AuditLogger
 
 router = APIRouter(tags=["dashboard"])
+logger = get_logger(__name__)
 
 
 # =============================================================================
@@ -617,6 +620,82 @@ async def pii_stats(
 
     stats = await audit_logger.get_pii_stats(hours=hours)
     return {"enabled": True, **stats}
+
+
+def _pii_config_view(request: Request) -> dict:
+    """Current scrubbing policy as the dashboard shows it."""
+    from gateway.security.pii_config import PII_SCAN_ROUTES
+
+    detection_enabled = getattr(request.app.state, "pii_scrubber", None) is not None
+    config = getattr(request.app.state, "pii_settings", None)
+    return {
+        "detection_enabled": detection_enabled,
+        "scrub_enabled": bool(config and config.scrub_enabled),
+        "scrub_routes": list(config.scrub_routes) if config else [],
+        "available_routes": list(PII_SCAN_ROUTES),
+        "source": getattr(config, "source", "environment"),
+        "updated_at": config.updated_at.isoformat()
+        if getattr(config, "updated_at", None)
+        else None,
+        "updated_by": getattr(config, "updated_by", None),
+        "persisted": getattr(request.app.state, "runtime_settings", None) is not None,
+    }
+
+
+@router.get("/api/pii/config")
+async def get_pii_config(
+    request: Request,
+    _client_id: Annotated[str, Depends(require_admin)],
+) -> dict:
+    """PII scrubbing policy in effect. scrub_routes empty = all routes."""
+    return _pii_config_view(request)
+
+
+@router.put("/api/pii/config")
+async def update_pii_config(
+    request: Request,
+    body: PIIScrubUpdate,
+    admin_id: Annotated[str, Depends(require_admin)],
+) -> dict:
+    """Change PII scrubbing at runtime (admin only).
+
+    Takes effect on the next request and is saved, so it survives restarts
+    and overrides the GATEWAY_PII_SCRUB_* environment defaults. Detection
+    itself stays an environment setting.
+    """
+    from gateway.errors import ValidationError
+    from gateway.security.pii_config import SETTING_KEY, PIIScrubConfig
+
+    if getattr(request.app.state, "pii_scrubber", None) is None:
+        raise ValidationError(
+            message="PII detection is disabled (GATEWAY_PII_ENABLED=false); scrubbing needs "
+            "detection, which is set by environment variable, not the dashboard"
+        )
+    update = body
+    previous = request.app.state.pii_settings
+    store = getattr(request.app.state, "runtime_settings", None)
+    updated_at = None
+    if store is not None:
+        # Save first: if this fails, the running policy stays unchanged
+        updated_at = await store.set(SETTING_KEY, update.model_dump(), updated_by=admin_id)
+
+    request.app.state.pii_settings = PIIScrubConfig(
+        scrub_enabled=update.scrub_enabled,
+        scrub_routes=update.scrub_routes,
+        source="dashboard",
+        updated_at=updated_at,
+        updated_by=admin_id,
+    )
+    logger.warning(
+        "PII scrubbing policy changed",
+        changed_by=admin_id,
+        scrub_enabled_before=previous.scrub_enabled,
+        scrub_enabled=update.scrub_enabled,
+        scrub_routes_before=list(previous.scrub_routes) or ["all"],
+        scrub_routes=update.scrub_routes or ["all"],
+        persisted=store is not None,
+    )
+    return _pii_config_view(request)
 
 
 @router.get("/api/pii/events")

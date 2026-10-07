@@ -1,8 +1,144 @@
 import { useEffect, useState } from 'react'
-import type { PIIStats, PIIEvent } from '../types'
-import { formatTime } from '../lib/format'
+import type { PIIStats, PIIEvent, PIIConfig } from '../types'
+import { formatTime, formatTimestamp } from '../lib/format'
 import { StatCard } from './shared'
-import { fetchPIIStats, fetchPIIEvents } from '../lib/api'
+import { fetchPIIStats, fetchPIIEvents, fetchPIIConfig, updatePIIConfig } from '../lib/api'
+
+/** Scrubbing policy editor. Detection itself is set by environment variable. */
+export function PIIScrubSettings() {
+  const [config, setConfig] = useState<PIIConfig | null>(null)
+  const [enabled, setEnabled] = useState(false)
+  const [allRoutes, setAllRoutes] = useState(true)
+  const [routes, setRoutes] = useState<string[]>([])
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [saved, setSaved] = useState(false)
+
+  const load = (c: PIIConfig | null) => {
+    setConfig(c)
+    if (!c) return
+    setEnabled(c.scrub_enabled)
+    setAllRoutes(c.scrub_routes.length === 0)
+    setRoutes(c.scrub_routes)
+  }
+
+  useEffect(() => {
+    fetchPIIConfig().then(load)
+  }, [])
+
+  if (!config) return null
+
+  const draftRoutes = allRoutes ? [] : routes
+  const dirty =
+    enabled !== config.scrub_enabled ||
+    draftRoutes.length !== config.scrub_routes.length ||
+    draftRoutes.some(r => !config.scrub_routes.includes(r))
+  const noRouteSelected = enabled && !allRoutes && routes.length === 0
+  const locked = !config.detection_enabled || saving
+
+  const toggleRoute = (route: string) =>
+    setRoutes(routes.includes(route) ? routes.filter(r => r !== route) : [...routes, route])
+
+  const save = async () => {
+    if (config.scrub_enabled && !enabled &&
+        !window.confirm('Turn PII scrubbing off? Models will receive detected PII unmodified.')) {
+      return
+    }
+    setSaving(true)
+    setError(null)
+    setSaved(false)
+    try {
+      load(await updatePIIConfig({ scrub_enabled: enabled, scrub_routes: draftRoutes }))
+      setSaved(true)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="bg-gray-900 rounded border border-gray-700 p-4 space-y-3 text-left">
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <div className="flex items-center gap-2">
+          <h3 className="font-semibold">PII Scrubbing</h3>
+          <span className={`px-2 py-0.5 rounded text-xs font-bold ${config.scrub_enabled ? 'bg-green-900 text-green-300' : 'bg-orange-900 text-orange-300'}`}>
+            {config.scrub_enabled ? (config.scrub_routes.length ? `ON · ${config.scrub_routes.length} routes` : 'ON · all routes') : 'OFF · flag only'}
+          </span>
+        </div>
+        <span className="text-xs text-gray-500">
+          {config.source === 'dashboard'
+            ? `Set from dashboard by ${config.updated_by ?? 'unknown'}${config.updated_at ? ` · ${formatTimestamp(config.updated_at)}` : ''}`
+            : 'From environment (GATEWAY_PII_SCRUB_*)'}
+        </span>
+      </div>
+
+      {!config.detection_enabled ? (
+        <div className="text-sm text-orange-300">
+          PII detection is off. Set <code>GATEWAY_PII_ENABLED=true</code> and restart the gateway to configure scrubbing.
+        </div>
+      ) : (
+        <>
+          <label className="flex items-start gap-2 text-sm cursor-pointer">
+            <input type="checkbox" className="mt-1" checked={enabled} disabled={locked}
+              onChange={e => { setEnabled(e.target.checked); setSaved(false) }} />
+            <span>
+              Replace detected PII with placeholders (<code>[EMAIL]</code>, <code>[SSN]</code>, …) before it reaches the model
+              <span className="block text-xs text-gray-500">
+                Off = flag only: PII is detected and logged as hashes, and the model receives the original text.
+                Stored request bodies are redacted either way.
+              </span>
+            </span>
+          </label>
+
+          {enabled && (
+            <div className="pl-6 space-y-2 text-sm">
+              <div className="flex gap-4">
+                <label className="flex items-center gap-1 cursor-pointer">
+                  <input type="radio" checked={allRoutes} disabled={locked}
+                    onChange={() => { setAllRoutes(true); setSaved(false) }} /> All routes
+                </label>
+                <label className="flex items-center gap-1 cursor-pointer">
+                  <input type="radio" checked={!allRoutes} disabled={locked}
+                    onChange={() => { setAllRoutes(false); setSaved(false) }} /> Selected routes
+                </label>
+              </div>
+              {!allRoutes && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-1">
+                  {config.available_routes.map(route => (
+                    <label key={route} className="flex items-center gap-2 cursor-pointer font-mono text-xs">
+                      <input type="checkbox" checked={routes.includes(route)} disabled={locked}
+                        onChange={() => { toggleRoute(route); setSaved(false) }} />
+                      {route}
+                    </label>
+                  ))}
+                </div>
+              )}
+              {noRouteSelected && <div className="text-xs text-orange-300">Select at least one route.</div>}
+            </div>
+          )}
+
+          <div className="flex items-center gap-3">
+            <button
+              className="px-3 py-1.5 rounded text-sm bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 disabled:text-gray-500"
+              disabled={!dirty || noRouteSelected || locked}
+              onClick={save}
+            >
+              {saving ? 'Saving…' : 'Save'}
+            </button>
+            {saved && !dirty && <span className="text-xs text-green-400">Saved · applies to new requests now</span>}
+            {error && <span className="text-xs text-red-400">{error}</span>}
+          </div>
+          {!config.persisted && (
+            <div className="text-xs text-orange-300">
+              No database: changes apply now but revert to the environment setting on restart.
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  )
+}
 
 export function PIISection() {
   const [stats, setStats] = useState<PIIStats | null>(null)
@@ -45,6 +181,8 @@ export function PIISection() {
 
       {!collapsed && (
         <div className="p-4 pt-0 space-y-4">
+          <PIIScrubSettings />
+
           {/* Stats grid */}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             <StatCard label="Total Detections" value={stats.total_detections} />

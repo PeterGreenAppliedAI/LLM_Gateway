@@ -102,7 +102,7 @@ React + TypeScript monitoring UI with four tabs:
 <!-- ![Requests Tab](docs/screenshots/requests-tab.png) -->
 
 - **Dashboard** — Request volume, success rates, latency, token usage, endpoint health, top models
-- **Security** — Guard model verdicts, regex vs guard comparison, PII detection audit with hash-only event log, security scan labeling with bulk actions and training data export
+- **Security** — Guard model verdicts, regex vs guard comparison, PII scrubbing controls (admin, applied live) and detection audit with hash-only event log, security scan labeling with bulk actions and training data export
 - **Keys & Budgets** — API key management (create/revoke with model/endpoint policies), token budget tiers, model-to-tier assignments, per-key usage tracking
 - **Requests** — Full audit log with click-to-expand request/response details, token counts, latency, streaming metrics
 
@@ -220,7 +220,7 @@ auth:
 | `GATEWAY_GUARD_MODEL_NAME` | `ibm/granite3.2-guardian:5b` | Guard model name |
 | `GATEWAY_GUARD_BASE_URL` | `http://localhost:11434` | Ollama server hosting guard model |
 | `GATEWAY_PII_ENABLED` | `false` | Enable PII detection. Also redacts PII from stored audit bodies and security scans, even when scrubbing is off |
-| `GATEWAY_PII_SCRUB_ENABLED` | `false` | Replace PII with placeholders |
+| `GATEWAY_PII_SCRUB_ENABLED` | `false` | Replace PII with placeholders. Startup default only: admins can change scrubbing (on/off, all or selected routes) live from the dashboard's Security tab, and that saved setting overrides this |
 | `GATEWAY_ADMIN_API_KEY` | | Operator key for the dashboard, key management, budgets, and security labeling |
 | `GATEWAY_CORS_ORIGINS` | `["*"]` | Allowed CORS origins |
 
