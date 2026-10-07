@@ -11,7 +11,7 @@ import os
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import Integer, Table, and_, bindparam, case, cast, delete, func, insert, select
 from sqlalchemy.exc import IntegrityError
@@ -19,6 +19,9 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from gateway.observability import get_logger, get_metrics
 from gateway.storage.schema import audit_log, pii_events, usage_daily
+
+if TYPE_CHECKING:
+    from gateway.storage.intent_log import IntentLog
 
 logger = get_logger(__name__)
 
@@ -66,8 +69,13 @@ class AuditLogger:
         store_response_body: bool = False,
         body_redactor: Callable[[Any], Any] | None = None,
         spill_path: str | Path | None = None,
+        intent_log: "IntentLog | None" = None,
     ):
         self._engine = engine
+        # Audit intent log (D-038): when set, rows are appended to a local
+        # log and written to the database in the background, so requests
+        # don't wait on the database. Without it, writes are synchronous.
+        self.intent_log = intent_log
         self._store_request_body = store_request_body
         self._store_response_body = store_response_body
         # Applied to bodies before they are persisted (PII scrubbing), so
@@ -144,8 +152,15 @@ class AuditLogger:
     async def _write_rows(self, table: Table, rows: list[dict], request_id: str) -> bool:
         """Insert rows, retrying transient failures, spilling to disk if the DB stays down.
 
-        Returns True if the rows reached the database.
+        Returns True if the rows reached the database (or the intent log).
         """
+        if self.intent_log is not None and self.intent_log.accepting:
+            try:
+                await self.intent_log.append(table.name, rows)
+                return True
+            except Exception:
+                # Disk full or unwritable: fall back to writing directly
+                logger.exception("Audit intent log append failed; writing to the DB directly")
         last_error: Exception | None = None
         for delay in (0.0, *WRITE_RETRY_DELAYS):
             if delay:

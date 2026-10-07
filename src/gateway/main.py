@@ -149,6 +149,28 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         app.state.db_engine = None
         app.state.audit_logger = None
 
+    # Audit intent log (D-038): requests append to a local log; a background
+    # task writes the rows to the database. sync mode keeps direct writes.
+    app.state.intent_log = None
+    durability = settings.db.audit_durability
+    if durability == "auto" and app.state.db_engine is not None:
+        # SQLite: one writer at a time, so funnel writes through the log.
+        # PostgreSQL handles concurrent writers, and often runs where local
+        # disk is ephemeral (containers), so write directly.
+        durability = "process" if app.state.db_engine.dialect.name == "sqlite" else "sync"
+    if app.state.audit_logger and durability != "sync":
+        from gateway.storage.intent_log import IntentLog
+
+        intent_log = IntentLog(
+            settings.db.audit_journal_path,
+            app.state.db_engine,
+            durability=durability,
+            max_bytes=settings.db.audit_journal_max_mb * 1024 * 1024,
+        )
+        await intent_log.start()
+        app.state.intent_log = intent_log
+        app.state.audit_logger.intent_log = intent_log
+
     if app.state.audit_logger:
         try:
             replayed = await app.state.audit_logger.replay_spill()
@@ -300,6 +322,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     if getattr(app.state, "shared_state", None) is not None:
         await app.state.shared_state.close()
+
+    # Last writer to stop: everything above may still have logged audit rows
+    if getattr(app.state, "intent_log", None) is not None:
+        await app.state.intent_log.close()
 
     # Dispose async database engine
     if hasattr(app.state, "db_engine") and app.state.db_engine:

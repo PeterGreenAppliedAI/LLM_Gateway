@@ -9,7 +9,6 @@ from gateway.policy.token_budget import (
     TokenBudgetExceeded,
     TokenBudgetTracker,
 )
-from gateway.storage import DatabaseConfig, create_async_db_engine
 from gateway.storage.budgets import BudgetStore, BudgetSync
 
 
@@ -31,12 +30,9 @@ def _config(**overrides) -> TokenBudgetConfig:
 
 
 @pytest.fixture
-async def engine(tmp_path):
-    engine = await create_async_db_engine(
-        DatabaseConfig(url=f"sqlite:///{tmp_path}/budgets.db"), create_tables=True
-    )
-    yield engine
-    await engine.dispose()
+def engine(db_engine):
+    """SQLite and PostgreSQL (see conftest.py)."""
+    return db_engine
 
 
 async def _gateway(engine) -> tuple[TokenBudgetTracker, BudgetSync]:

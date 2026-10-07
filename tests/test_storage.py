@@ -160,14 +160,6 @@ class TestAuditLogger:
     """Tests for AuditLogger class."""
 
     @pytest.fixture
-    async def db_engine(self):
-        """Create in-memory database for testing."""
-        config = DatabaseConfig(url="sqlite:///:memory:", create_tables=True)
-        engine = await create_async_db_engine(config)
-        yield engine
-        await engine.dispose()
-
-    @pytest.fixture
     def audit_logger(self, db_engine):
         """Create AuditLogger instance."""
         return AuditLogger(
@@ -353,14 +345,6 @@ class TestAuditLoggerQueries:
     """Tests for AuditLogger query methods."""
 
     @pytest.fixture
-    async def db_engine(self):
-        """Create in-memory database for testing."""
-        config = DatabaseConfig(url="sqlite:///:memory:", create_tables=True)
-        engine = await create_async_db_engine(config)
-        yield engine
-        await engine.dispose()
-
-    @pytest.fixture
     def audit_logger(self, db_engine):
         """Create AuditLogger instance."""
         return AuditLogger(engine=db_engine)
@@ -444,14 +428,6 @@ class TestAuditLoggerQueries:
 
 class TestAuditLoggerStats:
     """Tests for AuditLogger stats methods."""
-
-    @pytest.fixture
-    async def db_engine(self):
-        """Create in-memory database for testing."""
-        config = DatabaseConfig(url="sqlite:///:memory:", create_tables=True)
-        engine = await create_async_db_engine(config)
-        yield engine
-        await engine.dispose()
 
     @pytest.fixture
     def audit_logger(self, db_engine):

@@ -218,6 +218,18 @@ class MetricsCollector:
             **reg_kwargs,
         )
 
+        # Audit intent log (D-038): records not yet in the database
+        self._audit_backlog = Gauge(
+            f"{prefix}_audit_backlog_records",
+            "Audit records in the intent log not yet written to the database",
+            **reg_kwargs,
+        )
+        self._audit_backlog_age = Gauge(
+            f"{prefix}_audit_backlog_oldest_seconds",
+            "Age of the oldest audit record not yet written to the database",
+            **reg_kwargs,
+        )
+
         # Active requests gauge
         self._active_requests = Gauge(
             f"{prefix}_active_requests", "Number of active requests", ["provider"], **reg_kwargs
@@ -307,6 +319,11 @@ class MetricsCollector:
         self._endpoint_in_flight.labels(endpoint=endpoint).set(in_flight)
         if capacity is not None:
             self._endpoint_max_concurrent.labels(endpoint=endpoint).set(capacity)
+
+    def set_audit_backlog(self, records: int, oldest_seconds: float) -> None:
+        if self._enabled:
+            self._audit_backlog.set(records)
+            self._audit_backlog_age.set(oldest_seconds)
 
     def set_admission_queue_depth(self, waiting: int) -> None:
         if self._enabled:

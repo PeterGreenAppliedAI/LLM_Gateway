@@ -47,6 +47,9 @@ class HealthResponse(BaseModel):
     # Where rate limits and concurrency slots are kept (D-035):
     # {"backend": "memory"|"redis", "status": "ok"|"degraded"}
     shared_state: dict | None = None
+    # Audit intent log (D-038): mode, backlog not yet in the database, its
+    # age, and whether the database is reachable
+    audit: dict | None = None
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -85,6 +88,9 @@ async def health_check(request: Request) -> HealthResponse:
         shared_state=shared.status
         if (shared := getattr(request.app.state, "shared_state", None))
         else None,
+        audit=intent_log.status()
+        if (intent_log := getattr(request.app.state, "intent_log", None))
+        else ({"mode": "sync"} if getattr(request.app.state, "audit_logger", None) else None),
     )
 
 
@@ -110,6 +116,9 @@ async def prometheus_metrics(request: Request) -> Response:
                 metrics.set_circuit_state(name, state.value)
             metrics.set_endpoint_load(name, in_flight[name], registry.admission.capacity(name))
         metrics.set_admission_queue_depth(registry.admission.waiting())
+    if (intent_log := getattr(request.app.state, "intent_log", None)) is not None:
+        status = intent_log.status()
+        get_metrics().set_audit_backlog(status["backlog_records"], status["oldest_pending_seconds"])
 
     return Response(
         content=generate_latest(),

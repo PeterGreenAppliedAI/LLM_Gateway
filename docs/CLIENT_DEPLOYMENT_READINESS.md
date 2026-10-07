@@ -73,8 +73,8 @@ The gaps are in capacity management and in streaming correctness.
 
 | Pri | Gap | Where | Detail |
 |-----|-----|-------|--------|
-| P1 | Two DB writes before the request can complete | `storage/keys.py:185`, `storage/audit.py` | Each DB-backed key check runs a SELECT plus an UPDATE and commit of `last_used_at`, with no cache. The audit insert is then awaited before the response returns, and before `[DONE]` on streams. On SQLite (`NullPool`, a new connection per write) these all contend for the single writer lock, adding latency and, past the default 5s lock wait, "database is locked" errors that drop audit rows. Cache validated keys for ~30–60s, batch `last_used_at`, and move audit writes to a bounded background writer. |
-| P1 | PII audit write runs before dispatch | `routes/openai.py` (chat), `routes/ollama.py` | When PII is detected, `log_pii_events` is awaited before the upstream call starts, so DB latency is added directly to TTFT. |
+| P1 | **Partly fixed (D-038):** two DB writes before the request can complete | `storage/keys.py:185`, `storage/intent_log.py` | Audit rows no longer hold up responses or `[DONE]` on SQLite: they go to a local intent log and are drained in batches. At 50 concurrent requests, p99 fell from 4.8 s to 0.9 s and throughput rose ~50%. **Still open:** each DB-backed key check runs a SELECT plus an UPDATE of `last_used_at` with no cache. Cache validated keys for ~30–60 s and batch `last_used_at` (it could ride the same intent log). |
+| ~~P1~~ | **Fixed (D-038):** PII audit write ran before dispatch | `routes/openai.py`, `routes/ollama.py` | PII events go to the intent log like other audit rows, so detection no longer adds database time to time-to-first-token (on SQLite; on PostgreSQL the direct write is fast). |
 | ~~P1~~ | **Fixed (D-031):** unhealthy endpoint triggered a health check inside the request | `dispatch/circuit.py` | A per-endpoint circuit breaker opens after `failure_threshold` consecutive retryable failures, skips the endpoint without a network call, and lets one half-open probe through after the cooldown. The health loop feeds the same breaker. |
 
 ### Streaming correctness

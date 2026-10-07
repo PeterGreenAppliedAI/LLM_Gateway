@@ -182,6 +182,7 @@ def build_enforcer(app) -> PolicyEnforcer:
 
         policy_config = PolicyConfig(
             rate_limit=PolicyRateLimitConfig(
+                enabled=config.rate_limits.enabled,
                 requests_per_minute=config.rate_limits.requests_per_minute_per_user,
                 requests_per_hour=config.rate_limits.requests_per_hour_per_user,
                 burst_limit=config.rate_limits.burst_limit,

@@ -1126,3 +1126,172 @@ is observe-only).
     - clean restart → usage still 60 tokens / 3 requests, tier still there; the 7th request
       overall → 403 `token_budget_exceeded`;
     - `kill -9` three seconds after the last request, then restart → no usage lost.
+
+## D-038: Audit intent log: a write funnel in front of SQLite
+
+- **Status:** Implemented, 2026-10-07. Replaces the plan in D-007 (an in-memory queue).
+- **Problem:**
+  - Every response, and `[DONE]` on every stream, waited for its audit insert to commit.
+    When PII was found, that insert even ran *before* the model call.
+  - SQLite allows one writer at a time, and each write opened its own connection and forced
+    a disk flush. Under load, requests queued for the lock.
+  - **Measured** (fake instant engine, so only gateway overhead): at 50 concurrent requests,
+    p95 2.5 s and p99 4.8 s, almost all of it waiting on SQLite.
+- **Decision (Peter):** a ZFS-SLOG-style intent log, not "switch to Postgres". It keeps the
+  gateway deployable as a simple local system:
+  - a request appends its audit rows to a local, append-only log file and responds;
+  - one background drainer per gateway process writes them to the database in batches.
+
+  As an outside review put it: an application-level write funnel, a tiny write-ahead broker
+  in front of SQLite, not a database replacement. It fits because the writes are many small,
+  independent facts, not concurrent relational transactions.
+- **PostgreSQL path:** `GATEWAY_DB_AUDIT_DURABILITY=auto` (the default) picks the log on
+  SQLite and direct writes on PostgreSQL. Postgres handles concurrent writers, and it usually
+  runs in containers where a pod's local disk can vanish with unwritten records on it. Either
+  database can choose any mode explicitly.
+
+### The specification (the review's questions, answered)
+
+Once the gateway acknowledges before the database commits, the log is part of the storage
+system. These questions are its contract.
+
+1. **What happens if the process crashes after acknowledging a request?**
+   The record is already in the log file.
+   - `process` mode: written to the OS (survives any gateway crash, including `kill -9`). A
+     power cut or kernel crash can lose what the OS hadn't written back, up to ~30 s with
+     Linux defaults (`vm.dirty_expire_centisecs`).
+   - `grouped` mode: the request waits until its record has been forced to disk, so nothing
+     acknowledged is ever lost, even on power loss.
+   - `sync` mode: no log; the database commit happens before the response.
+2. **How do we know which log entries reached the database?**
+   Each process's log has a position (segment file and byte offset) stored in the
+   `audit_journal` table. It's updated **in the same transaction** as the rows it covers, so
+   rows and position commit together or not at all.
+3. **Are operations idempotent?**
+   They don't need to be. Correctness comes from that atomic position, not from re-running
+   being harmless. (`audit_log.request_id` is unique, which also guards it; `pii_events` has
+   no unique key, so it relies on the position alone.)
+4. **How do we replay without double-applying?**
+   Replay starts at the committed position, and every batch moves the position in the same
+   transaction. A crash before a commit replays that batch once; after it, the batch is past
+   the position. Exactly-once.
+5. **When can a log segment be discarded?**
+   Only a *closed* segment, and only after the position has moved past its last byte. If
+   the process dies between that commit and deleting the file, the next drain finds nothing
+   after the position and deletes it then.
+   - One explicit exception: the size cap (see 6).
+6. **What happens when the log grows faster than SQLite can drain it?**
+   **Measured:**
+   - the drainer writes **~14,500 rows/s** into SQLite (batches of 500, one transaction
+     each);
+   - one gateway process tops out around 120–140 req/s on the same machine;
+   - an append costs ~18 µs.
+
+   So in normal operation the drain can't fall behind (~100× headroom). The log grows only
+   while the database is unreachable or locked:
+   - it buffers up to `GATEWAY_DB_AUDIT_JOURNAL_MAX_MB` (default 1 GB, millions of rows);
+   - past that, the **oldest** closed segment is dropped, logged as critical and counted in
+     `*_audit_write_failures_total{outcome="lost"}`;
+   - the gateway keeps serving. Refusing requests at the cap ("strict audit") would be an
+     opt-in setting if a deployment needs it; not built yet.
+7. **Does ordering matter globally, per table, or per key?**
+   - **Within a process:** strict log order, preserved by the drainer.
+   - **Across processes:** no order. Each process has its own log and drainer; rows carry
+     their own timestamps.
+
+   That's sufficient because everything in the funnel is an **insert-only fact** (audit rows,
+   PII events). There are no updates or deletes whose order could matter. Anything needing
+   read-your-writes or conflict detection (API keys, settings) stays a direct transaction. If
+   more traffic goes through the funnel later, the same rule applies: only append-only facts
+   or commutative increments (like budget usage, D-037).
+
+### Other details
+
+- **Layout:**
+  - `<journal>/<pid-random>/` holds one process's numbered 64 MB segments and a lock file
+    held for its lifetime.
+  - At startup, and every 30 s, a process looks for log directories whose lock is free (their
+    process died), drains them in order, and removes them. That covers restarts and dead
+    workers alike.
+  - A torn final record (a crash mid-write) is left alone, never half-parsed.
+- **A bad row doesn't block the log:** on a constraint error the batch is retried row by
+  row; rejected rows are logged and counted (`outcome="rejected"`), and the rest go in.
+- **If an append fails** (disk full), that row is written directly to the database instead.
+- **Visibility:**
+  - `/health` → `audit: {mode, backlog_records, oldest_pending_seconds, log_bytes,
+    database_reachable, records_dropped}`;
+  - Prometheus `*_audit_backlog_records` and `*_audit_backlog_oldest_seconds`;
+  - one error log when the database becomes unreachable, and one when it's back.
+- **Group commit (`grouped`):** leader-based. The first request needing durability starts
+  an fsync right away; requests arriving meanwhile share the next one.
+  - *The first version* waited a fixed 50 ms window, so a lone request paid 50 ms (63 ms
+    median at concurrency 1). Now a lone request pays one fsync. Measured fsync here:
+    0.2 ms; expect 1–5 ms on SSDs, more on spinning disks or network volumes.
+- **Containers:** put `GATEWAY_DB_AUDIT_JOURNAL_PATH` on a persistent volume, next to the
+  SQLite file. A log on ephemeral storage defeats the point.
+
+### Bugs found while building this
+
+- **Audit writes on PostgreSQL were broken, and had been for a while.** The gateway writes
+  timezone-aware times into `TIMESTAMP WITHOUT TIME ZONE` columns. SQLite accepts that;
+  PostgreSQL's driver rejects it, so every audit row (and budget setting) on PostgreSQL
+  failed and spilled. Nothing was tested against PostgreSQL before.
+  - Fix: a `UTCDateTime` column type stores UTC with no zone (same type on disk, no
+    migration) and always reads back UTC-aware.
+  - The intent-log, budget and storage tests now run on both SQLite and a real PostgreSQL
+    16 (`tests/conftest.py` `db_engine`; the PostgreSQL run skips when none is reachable).
+- **Response IDs didn't match audit request IDs.** `chatcmpl-…` came from a second random
+  ID, so a client couldn't find its request in the audit trail. Found when the crash test
+  tried to match responses to rows. The OpenAI routes now use the audit request ID end to
+  end.
+- **`rate_limits.enabled`** was missing from `gateway.yaml` (needed to load-test with one
+  client). Added; default on.
+
+### What didn't work
+
+- *Fixed-window group commit:* see above.
+- *A column named `offset`:* a reserved word in SQL. Renamed to `byte_offset` before it
+  shipped.
+- *Killing benchmark servers with `pkill -f`:* the pattern also matched the shell running
+  the benchmark. Switched to PID files.
+
+### Measured (fake instant engine, SQLite, one gateway process)
+
+| mode | concurrency | p50 | p95 | p99 | req/s |
+|---|---|---|---|---|---|
+| sync (old) | 1 | 19.7 ms | 25.9 ms | 29.4 ms | 50 |
+| sync (old) | 50 | 151.6 ms | 2,541 ms | 4,753 ms | 81 |
+| process | 1 | 13.2 ms | 22.4 ms | 36.4 ms | 70 |
+| process | 50 | 373 ms | 676 ms | 931 ms | 122 |
+| grouped | 1 | 14.3 ms | 21.9 ms | 30.0 ms | 68 |
+| grouped | 50 | 352 ms | 555 ms | 724 ms | 134 |
+
+Streams look the same (time to `[DONE]`): sync p99 5.8 s → 0.55 s at 50 concurrent.
+
+**Why the median at 50 concurrent rose:** in sync mode, requests that win the SQLite lock
+finish fast and the rest wait seconds. That gives a low median and a huge tail. Average
+latency is concurrency ÷ throughput: 50 ÷ 81 = 617 ms (sync) vs 50 ÷ 122 = 410 ms (log).
+The gateway's single Python process, at ~120–140 req/s here, is now the limit (the "single
+worker" readiness item), not SQLite.
+
+### What works now
+
+- `tests/test_intent_log.py`: 14 tests, each run on SQLite and PostgreSQL:
+  - rows reach the database, in order, across segments; segments are deleted;
+  - a clean close drains everything;
+  - **`kill -9` loses nothing and repeats nothing** (checked on `pii_events`, which has no
+    unique key);
+  - a live process's log isn't taken by another;
+  - a torn record is left alone;
+  - an outage keeps the backlog and drains it after;
+  - the size cap drops the oldest and keeps serving;
+  - group commit shares fsyncs, and a lone request isn't delayed;
+  - `process` mode never fsyncs;
+  - a rejected row doesn't block its batch;
+  - `AuditLogger` integration, and the disk-full fallback.
+- **End-to-end `kill -9` under load** (20 concurrent clients, real gateway, SQLite):
+  - 256 requests got a 200 before the kill; 36 of them were only in the log at that moment;
+  - after restart, the new process drained the dead one's log;
+  - 256 rows, each matched to its response ID, 0 missing, 0 duplicates.
+- **PostgreSQL end-to-end:** `auto` chose direct writes; rows landed with correct UTC
+  timestamps.

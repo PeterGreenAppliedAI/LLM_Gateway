@@ -315,6 +315,8 @@ class AuthConfig(BaseModel):
 class RateLimitConfig(BaseModel):
     """Rate limiting configuration."""
 
+    # Off for trusted single-user labs and load testing; on by default
+    enabled: bool = True
     requests_per_minute_global: int = Field(default=1000, gt=0)
     requests_per_minute_per_user: int = Field(default=100, gt=0)
     requests_per_hour_per_user: int = Field(

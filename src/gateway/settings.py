@@ -52,6 +52,26 @@ class DatabaseSettings(BaseSettings):
         description="Refuse to start if the database can't be initialized. Set false only "
         "for deployments that accept running with no audit trail.",
     )
+    audit_durability: Literal["auto", "process", "grouped", "sync"] = Field(
+        default="auto",
+        description="Audit intent log (D-038). process: rows go to a local log and the "
+        "response returns; a background task writes them to the DB (survives any gateway "
+        "crash; a power cut can lose up to ~30 s the OS hadn't written yet). grouped: the "
+        "response also waits for the log to reach disk (~50 ms batches; nothing "
+        "acknowledged is lost). sync: each response waits for the DB commit. auto: process "
+        "on SQLite, sync on PostgreSQL.",
+    )
+    audit_journal_path: str = Field(
+        default="data/audit-journal",
+        description="Directory for the audit intent log (local disk, not a network share)",
+    )
+    audit_journal_max_mb: int = Field(
+        default=1024,
+        ge=16,
+        le=1_048_576,
+        description="Cap on the intent log while the DB is unreachable; past it the "
+        "oldest records are dropped (logged as critical)",
+    )
     audit_spill_path: str = Field(
         default="data/audit-spill.jsonl",
         description="Where audit rows go when the database is unreachable; replayed on "

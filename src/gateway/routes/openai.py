@@ -204,6 +204,9 @@ async def chat_completions(
 
     # Convert to internal format
     internal_request = body.to_internal(client_id=client_id, task=TaskType.CHAT)
+    # One ID end to end: the response's id and the audit row share it, so a
+    # client's chatcmpl-/cmpl- id finds its request in the audit trail
+    internal_request.request_id = ctx.request_id
     check_choice_count(body.n, stream=body.stream)
 
     # Apply per-key and per-environment routing restrictions
@@ -477,6 +480,9 @@ async def completions(
 
     # Convert to internal format
     internal_request = body.to_internal(client_id=client_id, task=TaskType.COMPLETION)
+    # One ID end to end: the response's id and the audit row share it, so a
+    # client's chatcmpl-/cmpl- id finds its request in the audit trail
+    internal_request.request_id = ctx.request_id
 
     # Apply per-key and per-environment routing restrictions
     internal_request = internal_request.model_copy(
@@ -749,6 +755,9 @@ async def embeddings(
 
     # Convert to internal format
     internal_request = body.to_internal(client_id=client_id)
+    # One ID end to end: the response's id and the audit row share it, so a
+    # client's chatcmpl-/cmpl- id finds its request in the audit trail
+    internal_request.request_id = ctx.request_id
 
     # Apply per-key and per-environment routing restrictions
     internal_request = internal_request.model_copy(
