@@ -117,6 +117,8 @@ class ProviderRegistry:
             base_url=config.url,
             enabled=config.enabled,
             timeout=config.timeout,
+            connect_timeout=config.connect_timeout,
+            stream_idle_timeout=config.stream_idle_timeout,
             max_retries=config.max_retries,
         )
         adapter = create_adapter(provider_config)

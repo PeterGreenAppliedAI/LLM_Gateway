@@ -6,6 +6,7 @@ Per PRD Section 6: Ollama is a required local runtime with full support.
 """
 
 import asyncio
+import json
 import time
 from collections.abc import AsyncIterator
 from typing import Any
@@ -34,6 +35,12 @@ from gateway.models.internal import (
     ToolCall,
 )
 from gateway.providers.base import ProviderAdapter
+from gateway.providers.streaming import (
+    classify_exception,
+    error_chunk,
+    iter_lines_with_timeouts,
+    upstream_http_error,
+)
 
 
 class OllamaAdapter(ProviderAdapter):
@@ -314,9 +321,6 @@ class OllamaAdapter(ProviderAdapter):
     # Streaming
     # =========================================================================
 
-    # Per-chunk timeout: if no chunk arrives within this window, the stream is dead
-    STREAM_CHUNK_TIMEOUT = 120.0  # seconds between chunks
-
     async def chat_stream(self, request: InternalRequest) -> AsyncIterator[StreamChunk]:
         """Stream chat completion via Ollama /api/chat with stream=true."""
         try:
@@ -354,14 +358,23 @@ class OllamaAdapter(ProviderAdapter):
                     )
 
             async with client.stream("POST", "/api/chat", json=ollama_request) as response:
-                response.raise_for_status()
+                if response.status_code >= 400:
+                    code, message = await upstream_http_error(response)
+                    yield error_chunk(request, code, message)
+                    return
                 index = 0
-                async for line in self._iter_lines_with_timeout(response):
+                lines = iter_lines_with_timeouts(response, self.timeout, self.stream_idle_timeout)
+                async for line in lines:
                     if not line:
                         continue
-                    import json
-
                     chunk_data = json.loads(line)
+
+                    if chunk_data.get("error"):
+                        # Ollama reports mid-stream failures as an error line
+                        yield error_chunk(
+                            request, "upstream_error", str(chunk_data["error"])[:500], index
+                        )
+                        return
 
                     message = chunk_data.get("message", {})
                     content = message.get("content", "")
@@ -401,40 +414,8 @@ class OllamaAdapter(ProviderAdapter):
                     )
                     index += 1
 
-        except asyncio.TimeoutError:
-            yield StreamChunk(
-                request_id=request.request_id,
-                index=0,
-                delta="",
-                finish_reason=FinishReason.ERROR,
-            )
-        except Exception:
-            yield StreamChunk(
-                request_id=request.request_id,
-                index=0,
-                delta="",
-                finish_reason=FinishReason.ERROR,
-            )
-
-    async def _iter_lines_with_timeout(self, response: httpx.Response) -> AsyncIterator[str]:
-        """Iterate response lines with a per-chunk timeout.
-
-        If no data arrives within STREAM_CHUNK_TIMEOUT seconds,
-        raises asyncio.TimeoutError to prevent hanging connections.
-        """
-        aiter = response.aiter_lines().__aiter__()
-        while True:
-            try:
-                line = await asyncio.wait_for(
-                    aiter.__anext__(),
-                    # At least as patient as the endpoint's configured
-                    # timeout: cold-loading a large model can stall the
-                    # first chunk far beyond the 120s floor
-                    timeout=max(self.STREAM_CHUNK_TIMEOUT, self.timeout),
-                )
-                yield line
-            except StopAsyncIteration:
-                break
+        except Exception as e:
+            yield error_chunk(request, *classify_exception(e))
 
     # =========================================================================
     # Provider Metadata

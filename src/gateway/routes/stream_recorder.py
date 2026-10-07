@@ -17,13 +17,16 @@ completion or a handled error, and `finish_disconnected()` from their
 from collections.abc import AsyncIterator
 
 import anyio
+from fastapi import Request
 
 from gateway.dispatch import Dispatcher
+from gateway.errors import GatewayError
 from gateway.models.common import FinishReason
 from gateway.models.internal import InternalRequest, StreamChunk
 from gateway.observability import get_logger, get_metrics
 from gateway.observability.logging import RequestContext
 from gateway.policy import PolicyEnforcer
+from gateway.routes.dependencies import ClientDisconnected, run_unless_disconnected
 from gateway.storage import AuditLogger
 
 logger = get_logger(__name__)
@@ -160,6 +163,43 @@ class StreamRecorder:
             error_message=error_message,
             request_body=self._request_body,
             response_body=response_body,
+        )
+
+    async def start(self, request: Request, dispatcher: Dispatcher) -> AsyncIterator[StreamChunk]:
+        """Pick an endpoint and wait for its first chunk, before any response is sent.
+
+        Failing here, before the status line goes out, lets the route return
+        a real HTTP error (4xx/503) instead of a 200 carrying an error
+        event, which load balancers and SDK retry logic can't see. Waiting
+        for the first chunk can take a while (cold model load), so a client
+        that leaves meanwhile cancels the upstream request.
+
+        Raises:
+            GatewayError: No endpoint could start the stream (recorded first).
+            ClientDisconnected: The client left while waiting (recorded first).
+        """
+        try:
+            self.provider, stream = await run_unless_disconnected(
+                request, dispatcher.dispatch_stream(self._request)
+            )
+        except ClientDisconnected:
+            await self.finish(
+                status="error",
+                error_code="client_disconnected",
+                error_message="Client disconnected before the stream started",
+            )
+            raise
+        except GatewayError as e:
+            await self.finish(status="error", error_code=e.code.value, error_message=str(e))
+            raise
+        return stream
+
+    async def finish_error_chunk(self, chunk: StreamChunk) -> None:
+        """Record a provider error that arrived mid-stream, with its cause."""
+        await self.finish(
+            status="error",
+            error_code=chunk.error_code or "stream_error",
+            error_message=chunk.error or "Provider stream failed",
         )
 
     async def finish_disconnected(self, stream: AsyncIterator[StreamChunk] | None) -> None:

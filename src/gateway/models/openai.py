@@ -9,6 +9,7 @@ References:
 - https://platform.openai.com/docs/api-reference/embeddings
 """
 
+import json as _json
 import time
 from typing import Any, Literal
 from uuid import uuid4
@@ -231,6 +232,8 @@ class OpenAIChatStreamDelta(BaseModel):
 
     role: str | None = None
     content: str | None = None
+    # [{"index", "id", "type", "function": {"name", "arguments": <JSON string>}}]
+    tool_calls: list[dict[str, Any]] | None = None
 
 
 class OpenAIChatStreamChoice(BaseModel):
@@ -251,18 +254,51 @@ class OpenAIChatStreamResponse(BaseModel):
     choices: list[OpenAIChatStreamChoice]
 
     @classmethod
-    def from_chunk(cls, chunk: StreamChunk, model: str) -> "OpenAIChatStreamResponse":
-        """Create from internal stream chunk."""
+    def from_chunk(
+        cls,
+        chunk: StreamChunk,
+        model: str,
+        tool_call_start: int = 0,
+        finish_reason: str | None = None,
+    ) -> "OpenAIChatStreamResponse":
+        """Create from internal stream chunk.
+
+        Args:
+            tool_call_start: Index of this chunk's first tool call within the
+                whole response (tool call indexes run across chunks).
+            finish_reason: Override the mapped finish reason (e.g. "tool_calls"
+                when Ollama reports "stop" after emitting tool calls).
+        """
+        tool_calls = None
+        if chunk.tool_calls:
+            tool_calls = []
+            for offset, tc in enumerate(chunk.tool_calls):
+                position = tool_call_start + offset
+                arguments = tc.function.get("arguments", {})
+                tool_calls.append(
+                    {
+                        "index": position,
+                        "id": tc.id or f"call_{position}",
+                        "type": "function",
+                        "function": {
+                            "name": tc.function.get("name", ""),
+                            "arguments": arguments
+                            if isinstance(arguments, str)
+                            else _json.dumps(arguments),
+                        },
+                    }
+                )
+        if finish_reason is None and chunk.finish_reason:
+            finish_reason = _map_finish_reason(chunk.finish_reason)
         return cls(
             id=f"chatcmpl-{chunk.request_id[:24]}",
             model=model,
             choices=[
                 OpenAIChatStreamChoice(
-                    index=chunk.index,
-                    delta=OpenAIChatStreamDelta(content=chunk.delta),
-                    finish_reason=_map_finish_reason(chunk.finish_reason)
-                    if chunk.finish_reason
-                    else None,
+                    # Choice index, not chunk sequence: there is one choice
+                    index=0,
+                    delta=OpenAIChatStreamDelta(content=chunk.delta, tool_calls=tool_calls),
+                    finish_reason=finish_reason,
                 )
             ],
         )

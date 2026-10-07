@@ -252,3 +252,8 @@ class StreamChunk(BaseModel):
     tool_calls: list[ToolCall] | None = None  # Tool calls arriving mid-stream
     finish_reason: FinishReason | None = None
     usage: UsageStats | None = None  # Only in final chunk
+    # Set on finish_reason=ERROR chunks: why the stream failed, and a code
+    # (timeout, connection_error, http_404, ...) the dispatcher uses to
+    # decide whether another endpoint could succeed
+    error: str | None = Field(default=None, max_length=1000)
+    error_code: str | None = Field(default=None, max_length=64)

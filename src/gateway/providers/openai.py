@@ -39,6 +39,13 @@ from gateway.models.internal import (
     ToolCall,
 )
 from gateway.providers.base import ProviderAdapter
+from gateway.providers.streaming import (
+    classify_exception,
+    error_chunk,
+    iter_lines_with_timeouts,
+    parse_openai_sse,
+    upstream_http_error,
+)
 
 
 class OpenAIAdapter(ProviderAdapter):
@@ -304,25 +311,6 @@ class OpenAIAdapter(ProviderAdapter):
     # Streaming
     # =========================================================================
 
-    # Per-chunk timeout: if no chunk arrives within this window, the stream is dead
-    STREAM_CHUNK_TIMEOUT = 120.0  # seconds between chunks
-
-    async def _iter_lines_with_timeout(self, response: httpx.Response) -> AsyncIterator[str]:
-        """Iterate response lines with a per-chunk timeout."""
-        aiter = response.aiter_lines().__aiter__()
-        while True:
-            try:
-                line = await asyncio.wait_for(
-                    aiter.__anext__(),
-                    # At least as patient as the endpoint's configured
-                    # timeout: cold-loading a large model can stall the
-                    # first chunk far beyond the 120s floor
-                    timeout=max(self.STREAM_CHUNK_TIMEOUT, self.timeout),
-                )
-                yield line
-            except StopAsyncIteration:
-                break
-
     async def chat_stream(self, request: InternalRequest) -> AsyncIterator[StreamChunk]:
         """Stream chat completion via /v1/chat/completions with stream=true."""
         try:
@@ -336,74 +324,16 @@ class OpenAIAdapter(ProviderAdapter):
             async with client.stream(
                 "POST", "/v1/chat/completions", json=openai_request
             ) as response:
-                response.raise_for_status()
-                index = 0
-                # The finish chunk is held back: usage arrives AFTER it, in a
-                # frame with empty choices. Attach usage, then emit as final.
-                pending_final: StreamChunk | None = None
-
-                async for line in self._iter_lines_with_timeout(response):
-                    if not line or not line.startswith("data: "):
-                        continue
-
-                    data_str = line[6:]  # Remove "data: " prefix
-                    if data_str == "[DONE]":
-                        break
-
-                    try:
-                        chunk_data = json.loads(data_str)
-                    except json.JSONDecodeError:
-                        continue
-
-                    usage = None
-                    usage_data = chunk_data.get("usage")
-                    if usage_data:
-                        usage = UsageStats(
-                            prompt_tokens=usage_data.get("prompt_tokens", 0),
-                            completion_tokens=usage_data.get("completion_tokens", 0),
-                            total_tokens=usage_data.get("total_tokens", 0),
-                        )
-
-                    choices = chunk_data.get("choices", [])
-                    if not choices:
-                        # Usage-only frame (stream_options.include_usage)
-                        if usage and pending_final:
-                            pending_final = pending_final.model_copy(update={"usage": usage})
-                        continue
-
-                    choice = choices[0]
-                    delta = choice.get("delta", {})
-                    content = delta.get("content", "")
-                    finish_reason_str = choice.get("finish_reason")
-
-                    finish_reason = None
-                    if finish_reason_str:
-                        finish_reason = self._map_finish_reason(finish_reason_str)
-
-                    chunk = StreamChunk(
-                        request_id=request.request_id,
-                        index=index,
-                        delta=content,
-                        finish_reason=finish_reason,
-                        usage=usage,
-                    )
-                    index += 1
-
-                    if finish_reason is not None:
-                        pending_final = chunk
-                        continue
+                if response.status_code >= 400:
+                    code, message = await upstream_http_error(response)
+                    yield error_chunk(request, code, message)
+                    return
+                lines = iter_lines_with_timeouts(response, self.timeout, self.stream_idle_timeout)
+                async for chunk in parse_openai_sse(lines, request, self._map_finish_reason):
                     yield chunk
 
-                if pending_final is not None:
-                    yield pending_final
-
-        except Exception:
-            yield StreamChunk(
-                request_id=request.request_id,
-                index=0,
-                delta="",
-                finish_reason=FinishReason.ERROR,
-            )
+        except Exception as e:
+            yield error_chunk(request, *classify_exception(e))
 
     # =========================================================================
     # Provider Metadata

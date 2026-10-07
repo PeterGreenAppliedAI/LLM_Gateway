@@ -81,6 +81,9 @@ class ProviderConfig(BaseModel):
     # Separate connect timeout so a dead upstream fails in seconds instead
     # of holding the connection for the full read timeout
     connect_timeout: float = Field(default=3.0, gt=0, le=30.0)
+    # Longest gap allowed between streamed chunks once the first one has
+    # arrived. The first chunk may take the full `timeout` (cold model load).
+    stream_idle_timeout: float = Field(default=60.0, gt=0, le=3600.0)
     max_retries: int = Field(
         default=3, ge=0, le=10
     )  # TODO: Not yet used in dispatcher - reserved for retry+backoff implementation
@@ -113,6 +116,9 @@ class EndpointConfig(BaseModel):
     enabled: bool = True
     timeout: float = Field(default=30.0, gt=0, le=3600.0)
     connect_timeout: float = Field(default=3.0, gt=0, le=30.0)
+    # Longest gap allowed between streamed chunks once the first one has
+    # arrived. The first chunk may take the full `timeout` (cold model load).
+    stream_idle_timeout: float = Field(default=60.0, gt=0, le=3600.0)
     max_retries: int = Field(default=3, ge=0, le=10)
     labels: dict[str, str] = Field(default_factory=dict)  # cold_flexible, prod_eligible, etc.
     api_key_env: str | None = None  # Environment variable name for API key
@@ -308,6 +314,7 @@ class GatewayConfig(BaseModel):
                     enabled=ep.enabled,
                     timeout=ep.timeout,
                     connect_timeout=ep.connect_timeout,
+                    stream_idle_timeout=ep.stream_idle_timeout,
                     max_retries=ep.max_retries,
                 )
                 for ep in self.endpoints
@@ -324,6 +331,7 @@ class GatewayConfig(BaseModel):
                     enabled=p.enabled,
                     timeout=p.timeout,
                     connect_timeout=p.connect_timeout,
+                    stream_idle_timeout=p.stream_idle_timeout,
                     max_retries=p.max_retries,
                 )
                 for p in self.providers

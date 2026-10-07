@@ -119,7 +119,11 @@ class ModelCatalog(BaseModel):
         Returns:
             List of endpoint names that have this model
         """
-        return list({m.endpoint for m in self.discovered if self._same_model(m.name, model)})
+        # Ordered and de-duplicated: a set here made endpoint choice depend on
+        # per-process string hashing, i.e. change between restarts
+        return list(
+            dict.fromkeys(m.endpoint for m in self.discovered if self._same_model(m.name, model))
+        )
 
     def get_models_for_endpoint(self, endpoint: str) -> list[str]:
         """Get all models available on a specific endpoint.

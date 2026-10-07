@@ -55,6 +55,7 @@ class ProviderAdapter(ABC):
         self.base_url = config.base_url  # Already validated by ProviderConfig
         self.timeout = config.timeout
         self.connect_timeout = config.connect_timeout
+        self.stream_idle_timeout = config.stream_idle_timeout
         self.max_retries = config.max_retries
 
     # =========================================================================

@@ -27,7 +27,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 
 from gateway.dispatch import Dispatcher
-from gateway.errors import DispatchError, StreamError
+from gateway.errors import StreamError
 from gateway.models.common import TaskType
 from gateway.models.openai import (
     OpenAIChatRequest,
@@ -164,11 +164,6 @@ async def chat_completions(
     # Convert to internal format
     internal_request = body.to_internal(client_id=client_id, task=TaskType.CHAT)
 
-    # Force non-streaming when tools are present (streaming tool call format
-    # requires complex delta fragmentation; non-streaming works with OpenAI SDK)
-    if body.tools and body.stream:
-        internal_request = internal_request.model_copy(update={"stream": False})
-
     # Apply per-key and per-environment routing restrictions
     internal_request = internal_request.model_copy(
         update=await resolve_access_scope(request, auth, internal_request.model)
@@ -186,9 +181,10 @@ async def chat_completions(
     except PolicyViolation as e:
         translate_policy_violation(e)
 
-    # Handle streaming (skip for tool calls - return non-streaming JSON instead)
-    if body.stream and not body.tools:
+    # Handle streaming (tool calls stream too, as complete calls per delta)
+    if body.stream:
         return await _stream_chat_response(
+            request,
             dispatcher,
             internal_request,
             body.model,
@@ -200,6 +196,7 @@ async def chat_completions(
                     m.model_dump(exclude_none=True) for m in internal_request.messages or []
                 ],
                 "response_format": body.response_format,
+                "tool_names": [t.get("function", {}).get("name") for t in (body.tools or [])],
             },
         )
 
@@ -259,33 +256,11 @@ async def chat_completions(
         )
 
     # Convert to OpenAI format
-    openai_response = OpenAIChatResponse.from_internal(result.response)
-
-    # If client requested streaming + tools, wrap the complete response in SSE
-    # so the OpenAI SDK's stream parser is satisfied
-    if body.stream and body.tools:
-        # Rewrite to streaming chunk format: object → chunk, message → delta
-        d = openai_response.model_dump()
-        d["object"] = "chat.completion.chunk"
-        for choice in d.get("choices", []):
-            if "message" in choice:
-                choice["delta"] = choice.pop("message")
-        response_json = json.dumps(d)
-        sse_body = f"data: {response_json}\n\ndata: [DONE]\n\n"
-        return StreamingResponse(
-            iter([sse_body.encode()]),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no",
-            },
-        )
-
-    return openai_response
+    return OpenAIChatResponse.from_internal(result.response)
 
 
 async def _stream_chat_response(
+    request: Request,
     dispatcher: Dispatcher,
     internal_request,
     model: str,
@@ -296,8 +271,9 @@ async def _stream_chat_response(
 ) -> StreamingResponse:
     """Create streaming response for chat completions.
 
-    Note: Streaming errors are sent as SSE error events rather than
-    raising exceptions, since the HTTP response has already started.
+    The endpoint is chosen and its first chunk received before the response
+    starts, so failures up to that point raise and return a real HTTP error.
+    Failures after the first byte are sent as an SSE error event.
     """
     recorder = StreamRecorder(
         ctx=ctx,
@@ -308,36 +284,38 @@ async def _stream_chat_response(
         enforcer=enforcer,
         request_body=request_body,
     )
+    stream = await recorder.start(request, dispatcher)
 
     async def generate() -> AsyncGenerator[bytes, None]:
-        stream = None
+        tool_calls_sent = 0
         try:
-            recorder.provider, stream = await dispatcher.dispatch_stream(internal_request)
-
             async for chunk in stream:
                 recorder.observe(chunk)
 
-                # Convert to OpenAI streaming format
-                response = OpenAIChatStreamResponse.from_chunk(chunk, model)
+                if recorder.is_error(chunk):
+                    # Mid-stream provider failure: OpenAI's own wire format
+                    # for this is an error object in a data frame
+                    error = StreamError(message=chunk.error or "Stream interrupted")
+                    yield f"data: {json.dumps(error.to_dict())}\n\n".encode()
+                    await recorder.finish_error_chunk(chunk)
+                    break
+
+                finish_reason = None
+                if chunk.finish_reason and (chunk.tool_calls or tool_calls_sent):
+                    # Ollama reports "stop" after tool calls; OpenAI clients
+                    # key off "tool_calls" to run them
+                    finish_reason = "tool_calls"
+                response = OpenAIChatStreamResponse.from_chunk(
+                    chunk, model, tool_call_start=tool_calls_sent, finish_reason=finish_reason
+                )
+                tool_calls_sent += len(chunk.tool_calls or [])
                 yield f"data: {response.model_dump_json()}\n\n".encode()
 
                 if chunk.finish_reason:
-                    if recorder.is_error(chunk):
-                        await recorder.finish(
-                            status="error",
-                            error_code="stream_error",
-                            error_message="Provider stream failed",
-                        )
-                    else:
-                        await recorder.finish()
+                    await recorder.finish()
 
             # Send [DONE] marker
             yield b"data: [DONE]\n\n"
-
-        except DispatchError as e:
-            # For streaming, send error as SSE event
-            yield f"data: {json.dumps(e.to_dict())}\n\n".encode()
-            await recorder.finish(status="error", error_code=e.code.value, error_message=str(e))
 
         except Exception as e:
             # Wrap unexpected errors

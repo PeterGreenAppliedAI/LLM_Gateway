@@ -268,6 +268,7 @@ async def ollama_chat(
 
     if body.stream:
         return await _stream_ollama_chat(
+            request,
             dispatcher,
             internal_request,
             body.model,
@@ -347,6 +348,7 @@ async def ollama_chat(
 
 
 async def _stream_ollama_chat(
+    request: Request,
     dispatcher: Dispatcher,
     internal_request: InternalRequest,
     model: str,
@@ -366,22 +368,20 @@ async def _stream_ollama_chat(
         request_body=request_body,
     )
 
-    async def generate() -> AsyncGenerator[bytes, None]:
-        stream = None
-        try:
-            recorder.provider, stream = await dispatcher.dispatch_stream(internal_request)
+    # Endpoint chosen and first chunk received before the response starts,
+    # so failures up to here return a real HTTP error
+    stream = await recorder.start(request, dispatcher)
 
+    async def generate() -> AsyncGenerator[bytes, None]:
+        try:
             async for chunk in stream:
                 recorder.observe(chunk)
 
                 if recorder.is_error(chunk):
                     # Provider failed mid-stream: tell the client, record an error
-                    yield json.dumps({"error": "Stream interrupted", "done": True}) + "\n"
-                    await recorder.finish(
-                        status="error",
-                        error_code="stream_error",
-                        error_message="Provider stream failed",
-                    )
+                    error = {"error": chunk.error or "Stream interrupted", "done": True}
+                    yield json.dumps(error) + "\n"
+                    await recorder.finish_error_chunk(chunk)
                     return
 
                 # Tool calls stream through untouched (Ollama shape:
@@ -584,6 +584,7 @@ async def ollama_generate(
 
     if body.stream:
         return await _stream_ollama_generate(
+            request,
             dispatcher,
             internal_request,
             body.model,
@@ -644,6 +645,7 @@ async def ollama_generate(
 
 
 async def _stream_ollama_generate(
+    request: Request,
     dispatcher: Dispatcher,
     internal_request: InternalRequest,
     model: str,
@@ -663,21 +665,19 @@ async def _stream_ollama_generate(
         request_body=request_body,
     )
 
-    async def generate() -> AsyncGenerator[bytes, None]:
-        stream = None
-        try:
-            recorder.provider, stream = await dispatcher.dispatch_stream(internal_request)
+    # Endpoint chosen and first chunk received before the response starts,
+    # so failures up to here return a real HTTP error
+    stream = await recorder.start(request, dispatcher)
 
+    async def generate() -> AsyncGenerator[bytes, None]:
+        try:
             async for chunk in stream:
                 recorder.observe(chunk)
 
                 if recorder.is_error(chunk):
-                    yield json.dumps({"error": "Stream interrupted", "done": True}) + "\n"
-                    await recorder.finish(
-                        status="error",
-                        error_code="stream_error",
-                        error_message="Provider stream failed",
-                    )
+                    error = {"error": chunk.error or "Stream interrupted", "done": True}
+                    yield json.dumps(error) + "\n"
+                    await recorder.finish_error_chunk(chunk)
                     return
 
                 response = {

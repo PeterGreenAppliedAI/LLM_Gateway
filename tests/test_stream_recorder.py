@@ -58,16 +58,29 @@ def _dispatcher(chunks, hang_after: bool = False):
     return dispatcher
 
 
+class _ConnectedClient:
+    """Stand-in for the HTTP request: a client that stays connected."""
+
+    async def receive(self):
+        await asyncio.Event().wait()
+
+
+def _factory(route_fn):
+    return lambda d, audit, enforcer: route_fn(
+        _ConnectedClient(),
+        d,
+        _request(),
+        "phi4:14b",
+        RequestContext(request_id="req-1"),
+        audit,
+        enforcer=enforcer,
+    )
+
+
 STREAM_FACTORIES = {
-    "openai_chat": lambda d, audit, enforcer: _stream_chat_response(
-        d, _request(), "phi4:14b", RequestContext(request_id="req-1"), audit, enforcer=enforcer
-    ),
-    "ollama_chat": lambda d, audit, enforcer: _stream_ollama_chat(
-        d, _request(), "phi4:14b", RequestContext(request_id="req-1"), audit, enforcer=enforcer
-    ),
-    "ollama_generate": lambda d, audit, enforcer: _stream_ollama_generate(
-        d, _request(), "phi4:14b", RequestContext(request_id="req-1"), audit, enforcer=enforcer
-    ),
+    "openai_chat": _factory(_stream_chat_response),
+    "ollama_chat": _factory(_stream_ollama_chat),
+    "ollama_generate": _factory(_stream_ollama_generate),
 }
 
 

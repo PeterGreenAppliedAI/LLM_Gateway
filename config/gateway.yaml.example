@@ -62,7 +62,12 @@ endpoints:
     type: ollama
     url: http://localhost:11434
     enabled: true
+    # Request timeout; for streams, how long to wait for the FIRST chunk
+    # (cold model loads can be slow)
     timeout: 120.0
+    # Streams only: longest silence allowed between chunks once the first
+    # has arrived. Longer means the stream is dead, not slow (default 60)
+    stream_idle_timeout: 60.0
     max_retries: 3
     labels:
       tier: primary

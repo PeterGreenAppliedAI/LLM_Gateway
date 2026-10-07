@@ -529,7 +529,15 @@ class Dispatcher:
             # http_<status>: only server-side errors are retryable
             status = error_code.removeprefix("http_")
             return status.startswith("5")
-        return error_code in {"timeout", "connection_error", "unknown_error", "empty_response"}
+        # upstream_error: the runtime reported a failure in-band (Ollama
+        # error line, OpenAI error frame) — server-side, another box may work
+        return error_code in {
+            "timeout",
+            "connection_error",
+            "unknown_error",
+            "empty_response",
+            "upstream_error",
+        }
 
     async def _execute_request(
         self, adapter: ProviderAdapter, request: InternalRequest
@@ -566,42 +574,34 @@ class Dispatcher:
     ) -> list[str]:
         """Build ordered list of providers to try for streaming.
 
-        Uses the model catalog to prefer providers that have the model,
-        then falls back to health-based ordering. A pinned request
-        (explicit endpoint/model prefix) tries its endpoint and nothing
-        else — never another endpoint the user didn't ask for.
+        Same order as non-streaming dispatch: the resolved primary first
+        (it already reflects pins, target_endpoint, per-model defaults and
+        priority), then other endpoints that have the model (healthy before
+        unhealthy), then the general fallback chain. A pinned request, or
+        one with fallback disabled, tries only the primary.
         """
-        if pinned:
+        if pinned or not request.fallback_allowed:
             return [primary]
 
-        providers: list[str] = []
-        seen: set[str] = set()
+        providers: list[str] = [primary]
+        seen: set[str] = {primary}
 
-        # First: check catalog for providers that have this model
         if model_name:
             catalog_endpoints = self._registry.get_endpoints_with_model(model_name)
-            # Prefer healthy endpoints from catalog
             for ep in catalog_endpoints:
                 if ep not in seen and self._registry.is_healthy(ep):
                     providers.append(ep)
                     seen.add(ep)
-            # Then unhealthy catalog endpoints (model might still work)
+            # Unhealthy catalog endpoints last among those with the model
             for ep in catalog_endpoints:
                 if ep not in seen:
                     providers.append(ep)
                     seen.add(ep)
 
-        # Second: the resolved primary provider
-        if primary not in seen:
-            providers.append(primary)
-            seen.add(primary)
-
-        # Third: fallback chain (if allowed)
-        if request.fallback_allowed:
-            for fb in self._registry.get_fallback_chain(exclude=primary):
-                if fb not in seen:
-                    providers.append(fb)
-                    seen.add(fb)
+        for fb in self._registry.get_fallback_chain(exclude=primary):
+            if fb not in seen:
+                providers.append(fb)
+                seen.add(fb)
 
         return providers
 
@@ -647,6 +647,7 @@ class Dispatcher:
             raise NoProviderError()
 
         attempted: list[str] = []
+        errors_seen: list[str] = []
 
         for try_name in providers_to_try[:MAX_FALLBACK_ATTEMPTS]:
             adapter = self._registry.get(try_name)
@@ -656,34 +657,78 @@ class Dispatcher:
             attempted.append(try_name)
 
             # Start the stream and peek at the first chunk to detect errors
+            # before the caller commits to a 200 response
             stream_iter = adapter.chat_stream(request)
             try:
                 first_chunk = await stream_iter.__anext__()
             except StopAsyncIteration:
-                # Empty stream - provider returned nothing, try next
+                errors_seen.append(f"{try_name}: empty stream")
                 continue
-            except Exception:
-                # Provider threw during stream startup, try next
+            except Exception as e:
+                await _close_quietly(stream_iter)
+                errors_seen.append(f"{try_name}: {type(e).__name__}: {e}")
                 continue
 
-            # If first chunk is an error, try next provider
-            # (thinking-only and tool-call chunks are valid content)
+            # An error before any content means this endpoint can't serve
+            # the request (thinking-only and tool-call chunks are content)
             if (
                 first_chunk.finish_reason == FinishReason.ERROR
                 and not first_chunk.delta
                 and not first_chunk.thinking
                 and not first_chunk.tool_calls
             ):
+                await _close_quietly(stream_iter)
+                message = first_chunk.error or "stream failed"
+                # Same rule as non-streaming: upstream 4xx means the request
+                # itself is wrong, so trying elsewhere only hides the cause.
+                # A pinned request never tries elsewhere.
+                if pinned or not self._is_retryable_error(first_chunk.error_code):
+                    raise ProviderError(
+                        message=message,
+                        provider=try_name,
+                        details={"error_code": first_chunk.error_code, "model": request.model},
+                        http_status=self._upstream_client_status(first_chunk.error_code),
+                    )
+                logger.warning(
+                    "Provider stream failed before first chunk",
+                    provider=try_name,
+                    model=request.model,
+                    error=message,
+                    error_code=first_chunk.error_code,
+                )
+                errors_seen.append(f"{try_name}: {message}")
                 continue
-
-            # Success - return a chained stream (first_chunk + rest)
-            async def _chain(
-                first: StreamChunk, rest: AsyncIterator[StreamChunk]
-            ) -> AsyncIterator[StreamChunk]:
-                yield first
-                async for chunk in rest:
-                    yield chunk
 
             return try_name, _chain(first_chunk, stream_iter)
 
-        raise AllProvidersUnavailableError(attempted=attempted)
+        raise AllProvidersUnavailableError(
+            attempted=attempted,
+            last_error=errors_seen[-1] if errors_seen else None,
+        )
+
+
+async def _close_quietly(stream: AsyncIterator[StreamChunk]) -> None:
+    """Close an upstream stream we're abandoning, so its connection is released now."""
+    aclose = getattr(stream, "aclose", None)
+    if aclose is None:
+        return
+    try:
+        await aclose()
+    except Exception:
+        logger.debug("Error closing abandoned stream", exc_info=True)
+
+
+async def _chain(
+    first: StreamChunk, rest: AsyncIterator[StreamChunk]
+) -> AsyncIterator[StreamChunk]:
+    """The peeked first chunk followed by the rest of the stream.
+
+    Closing this generator closes the upstream stream too; `async for`
+    alone would leave it open until garbage collection.
+    """
+    try:
+        yield first
+        async for chunk in rest:
+            yield chunk
+    finally:
+        await _close_quietly(rest)
