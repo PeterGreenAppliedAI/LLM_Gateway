@@ -31,6 +31,11 @@ from gateway.models.internal import (
 # =============================================================================
 
 
+# Most choices one request may ask for (len(prompts) x n). Each choice is a
+# separate upstream generation, fanned out by the route.
+MAX_CHOICES = 64
+
+
 class OpenAIToolCallFunction(BaseModel):
     """Function details in an OpenAI tool call."""
 
@@ -89,6 +94,8 @@ class OpenAIChatRequest(BaseModel):
     stop: str | list[str] | None = None
     stream: bool = False
     user: str | None = None
+    # Completions to generate (fanned out as separate upstream requests)
+    n: int = Field(default=1, ge=1, le=MAX_CHOICES)
     # Tool calling
     tools: list[dict[str, Any]] | None = None
     tool_choice: str | dict[str, Any] | None = None
@@ -226,6 +233,22 @@ class OpenAIChatResponse(BaseModel):
             ),
         )
 
+    @classmethod
+    def from_internal_many(cls, responses: list[InternalResponse]):
+        """One response with a choice per internal response, in order.
+
+        Usage is summed: every choice was a separate generation, so the
+        prompt was processed once per choice.
+        """
+        parts = [cls.from_internal(r) for r in responses]
+        choices = [part.choices[0].model_copy(update={"index": i}) for i, part in enumerate(parts)]
+        usage = OpenAIChatUsage(
+            prompt_tokens=sum(p.usage.prompt_tokens for p in parts),
+            completion_tokens=sum(p.usage.completion_tokens for p in parts),
+            total_tokens=sum(p.usage.total_tokens for p in parts),
+        )
+        return parts[0].model_copy(update={"choices": choices, "usage": usage})
+
 
 class OpenAIChatStreamDelta(BaseModel):
     """Delta content in streaming chat response."""
@@ -321,6 +344,8 @@ class OpenAICompletionRequest(BaseModel):
     stop: str | list[str] | None = None
     stream: bool = False
     user: str | None = None
+    # Completions per prompt (fanned out as separate upstream requests)
+    n: int = Field(default=1, ge=1, le=MAX_CHOICES)
     echo: bool = False
     suffix: str | None = None
 
@@ -388,6 +413,22 @@ class OpenAICompletionResponse(BaseModel):
                 total_tokens=response.usage.total_tokens,
             ),
         )
+
+    @classmethod
+    def from_internal_many(cls, responses: list[InternalResponse]):
+        """One response with a choice per internal response, in order.
+
+        Usage is summed: every choice was a separate generation, so the
+        prompt was processed once per choice.
+        """
+        parts = [cls.from_internal(r) for r in responses]
+        choices = [part.choices[0].model_copy(update={"index": i}) for i, part in enumerate(parts)]
+        usage = OpenAIChatUsage(
+            prompt_tokens=sum(p.usage.prompt_tokens for p in parts),
+            completion_tokens=sum(p.usage.completion_tokens for p in parts),
+            total_tokens=sum(p.usage.total_tokens for p in parts),
+        )
+        return parts[0].model_copy(update={"choices": choices, "usage": usage})
 
 
 # =============================================================================

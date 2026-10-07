@@ -26,7 +26,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 
-from gateway.dispatch import Dispatcher
+from gateway.dispatch import Dispatcher, DispatchResult
 from gateway.errors import StreamError
 from gateway.models.common import TaskType
 from gateway.models.openai import (
@@ -56,6 +56,7 @@ from gateway.routes.dependencies import (
     should_scrub_pii,
     translate_policy_violation,
 )
+from gateway.routes.fanout import check_choice_count, dispatch_choices
 from gateway.routes.stream_recorder import StreamRecorder
 from gateway.security import AsyncSecurityAnalyzer, PIIScrubber, Sanitizer
 from gateway.storage import AuditLogger
@@ -73,6 +74,45 @@ def _audit_response_body(response) -> dict:
     if response.tool_calls:
         body["tool_calls"] = [{"function": tc.function} for tc in response.tool_calls]
     return body
+
+
+def _audit_choices_body(results: list[DispatchResult]) -> dict:
+    """Audit output for one or more choices (one row per client request)."""
+    if len(results) == 1:
+        return _audit_response_body(results[0].response)
+    return {
+        "choices": [
+            {**_audit_response_body(r.response), "endpoint": r.provider_used} for r in results
+        ]
+    }
+
+
+def _summed_usage(results: list[DispatchResult]) -> tuple[int, int]:
+    """(prompt_tokens, completion_tokens) across all choices."""
+    return (
+        sum(r.response.usage.prompt_tokens or 0 for r in results),
+        sum(r.response.usage.completion_tokens or 0 for r in results),
+    )
+
+
+def _endpoints_used(results: list[DispatchResult]) -> str:
+    """Endpoint column for the audit row; choices may land on different endpoints."""
+    return ",".join(dict.fromkeys(r.provider_used for r in results))[:64]
+
+
+def _record_choice_metrics(results: list[DispatchResult], ctx, task: str) -> None:
+    """One metrics sample per upstream generation, so per-endpoint metrics stay true."""
+    for r in results:
+        metrics.record_request(
+            provider=r.provider_used,
+            model=r.response.model,
+            task=task,
+            status="success",
+            latency_ms=(ctx.total_latency_ms if len(results) == 1 else r.response.latency_ms) or 0,
+            prompt_tokens=r.response.usage.prompt_tokens,
+            completion_tokens=r.response.usage.completion_tokens,
+            tokens_per_second=ctx.tokens_per_second if len(results) == 1 else None,
+        )
 
 
 # =============================================================================
@@ -163,6 +203,7 @@ async def chat_completions(
 
     # Convert to internal format
     internal_request = body.to_internal(client_id=client_id, task=TaskType.CHAT)
+    check_choice_count(body.n, stream=body.stream)
 
     # Apply per-key and per-environment routing restrictions
     internal_request = internal_request.model_copy(
@@ -200,42 +241,29 @@ async def chat_completions(
             },
         )
 
-    # Non-streaming: dispatch and wait
-    # DispatchError propagates to exception handler
+    # Non-streaming: one upstream generation per requested choice (n),
+    # run concurrently. DispatchError propagates to exception handler.
     with metrics.track_request("dispatch"):
-        result = await run_unless_disconnected(request, dispatcher.dispatch(internal_request))
+        results = await dispatch_choices(request, dispatcher, [internal_request] * body.n)
 
-    # Record metrics
-    ctx.record_complete(
-        prompt_tokens=result.response.usage.prompt_tokens,
-        completion_tokens=result.response.usage.completion_tokens,
-    )
-    metrics.record_request(
-        provider=result.provider_used,
-        model=result.response.model,
-        task="chat",
-        status="success",
-        latency_ms=ctx.total_latency_ms or 0,
-        prompt_tokens=result.response.usage.prompt_tokens,
-        completion_tokens=result.response.usage.completion_tokens,
-        tokens_per_second=ctx.tokens_per_second,
-    )
+    prompt_tokens, completion_tokens = _summed_usage(results)
+    ctx.record_complete(prompt_tokens=prompt_tokens, completion_tokens=completion_tokens)
+    _record_choice_metrics(results, ctx, "chat")
 
     # Record token usage for daily budget tracking
-    total_tokens = (result.response.usage.prompt_tokens or 0) + (
-        result.response.usage.completion_tokens or 0
-    )
-    if total_tokens > 0:
-        enforcer.record_token_usage(client_id, result.response.model, total_tokens)
+    if prompt_tokens + completion_tokens > 0:
+        enforcer.record_token_usage(
+            client_id, results[0].response.model, prompt_tokens + completion_tokens
+        )
 
-    # Audit log the request
+    # Audit log the request (one row, however many choices)
     if audit_logger:
         await audit_logger.log_request(
             request_id=ctx.request_id,
             client_id=client_id,
             task="chat",
-            model=result.response.model,
-            endpoint=result.provider_used,
+            model=results[0].response.model,
+            endpoint=_endpoints_used(results),
             status="success",
             user_id=body.user,
             stream=False,
@@ -243,20 +271,21 @@ async def chat_completions(
             temperature=body.temperature,
             latency_ms=ctx.total_latency_ms,
             tokens_per_second=ctx.tokens_per_second,
-            prompt_tokens=result.response.usage.prompt_tokens,
-            completion_tokens=result.response.usage.completion_tokens,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
             request_body={
                 "messages": [
                     m.model_dump(exclude_none=True) for m in internal_request.messages or []
                 ],
                 "response_format": body.response_format,
                 "tool_names": [t.get("function", {}).get("name") for t in (body.tools or [])],
+                "n": body.n,
             },
-            response_body=_audit_response_body(result.response),
+            response_body=_audit_choices_body(results),
         )
 
     # Convert to OpenAI format
-    return OpenAIChatResponse.from_internal(result.response)
+    return OpenAIChatResponse.from_internal_many([r.response for r in results])
 
 
 async def _stream_chat_response(
@@ -369,6 +398,10 @@ async def completions(
         task="completion",
     )
 
+    # One choice per prompt per n. Validate first: to_internal reads prompt[0]
+    prompt_count = 1 if isinstance(body.prompt, str) else len(body.prompt)
+    check_choice_count(prompt_count * body.n)
+
     # Security: Sanitize prompt content
     sanitized_prompt = body.prompt
     if isinstance(body.prompt, str):
@@ -471,41 +504,35 @@ async def completions(
     except PolicyViolation as e:
         translate_policy_violation(e)
 
-    # Dispatch request - DispatchError propagates to exception handler
+    # One upstream generation per prompt per n, run concurrently and returned
+    # in OpenAI order (prompt-major). Before, extra prompts were dropped.
+    prompts = [sanitized_prompt] if isinstance(sanitized_prompt, str) else list(sanitized_prompt)
+    choice_requests = [
+        internal_request.model_copy(update={"prompt": prompt})
+        for prompt in prompts
+        for _ in range(body.n)
+    ]
     with metrics.track_request("dispatch"):
-        result = await run_unless_disconnected(request, dispatcher.dispatch(internal_request))
+        results = await dispatch_choices(request, dispatcher, choice_requests)
 
-    # Record metrics
-    ctx.record_complete(
-        prompt_tokens=result.response.usage.prompt_tokens,
-        completion_tokens=result.response.usage.completion_tokens,
-    )
-    metrics.record_request(
-        provider=result.provider_used,
-        model=result.response.model,
-        task="completion",
-        status="success",
-        latency_ms=ctx.total_latency_ms or 0,
-        prompt_tokens=result.response.usage.prompt_tokens,
-        completion_tokens=result.response.usage.completion_tokens,
-        tokens_per_second=ctx.tokens_per_second,
-    )
+    prompt_tokens, completion_tokens = _summed_usage(results)
+    ctx.record_complete(prompt_tokens=prompt_tokens, completion_tokens=completion_tokens)
+    _record_choice_metrics(results, ctx, "completion")
 
     # Record token usage for daily budget tracking
-    total_tokens = (result.response.usage.prompt_tokens or 0) + (
-        result.response.usage.completion_tokens or 0
-    )
-    if total_tokens > 0:
-        enforcer.record_token_usage(client_id, result.response.model, total_tokens)
+    if prompt_tokens + completion_tokens > 0:
+        enforcer.record_token_usage(
+            client_id, results[0].response.model, prompt_tokens + completion_tokens
+        )
 
-    # Audit log the request
+    # Audit log the request (one row, however many choices)
     if audit_logger:
         await audit_logger.log_request(
             request_id=ctx.request_id,
             client_id=client_id,
             task="completion",
-            model=result.response.model,
-            endpoint=result.provider_used,
+            model=results[0].response.model,
+            endpoint=_endpoints_used(results),
             status="success",
             user_id=body.user,
             stream=False,
@@ -513,13 +540,13 @@ async def completions(
             temperature=body.temperature,
             latency_ms=ctx.total_latency_ms,
             tokens_per_second=ctx.tokens_per_second,
-            prompt_tokens=result.response.usage.prompt_tokens,
-            completion_tokens=result.response.usage.completion_tokens,
-            request_body={"prompt": internal_request.prompt},
-            response_body=_audit_response_body(result.response),
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            request_body={"prompt": prompts if len(prompts) > 1 else prompts[0], "n": body.n},
+            response_body=_audit_choices_body(results),
         )
 
-    return OpenAICompletionResponse.from_internal(result.response)
+    return OpenAICompletionResponse.from_internal_many([r.response for r in results])
 
 
 # =============================================================================

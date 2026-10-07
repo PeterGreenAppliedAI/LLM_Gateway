@@ -20,6 +20,7 @@ from gateway.models.common import (
     ModelCapability,
     ModelInfo,
     ProviderType,
+    TaskType,
     UsageStats,
 )
 from gateway.models.internal import (
@@ -159,6 +160,52 @@ class VLLMAdapter(ProviderAdapter):
     # =========================================================================
     # Optional Methods
     # =========================================================================
+
+    async def embeddings(self, request: InternalRequest) -> InternalResponse:
+        """Generate embeddings via vLLM /v1/embeddings (OpenAI-compatible).
+
+        The whole input list goes in one request; vLLM batches it.
+        """
+        start_time = time.perf_counter()
+
+        try:
+            client = await self._get_client()
+            input_texts = request.input_data or [request.get_input_text()]
+            response = await client.post(
+                "/v1/embeddings", json={"model": request.model, "input": input_texts}
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            # Order by index so output i always belongs to input i
+            items = sorted(data.get("data", []), key=lambda item: item.get("index", 0))
+            usage_data = data.get("usage") or {}
+            return InternalResponse(
+                request_id=request.request_id,
+                task=TaskType.EMBEDDINGS,
+                provider=self.name,
+                model=data.get("model", request.model or "unknown"),
+                embeddings=[item["embedding"] for item in items],
+                finish_reason=FinishReason.STOP,
+                usage=UsageStats(
+                    prompt_tokens=usage_data.get("prompt_tokens", 0),
+                    total_tokens=usage_data.get("total_tokens", 0),
+                ),
+                latency_ms=(time.perf_counter() - start_time) * 1000,
+            )
+
+        except httpx.TimeoutException as e:
+            return self._error_response(request, f"Timeout: {e}", "timeout")
+        except httpx.HTTPStatusError as e:
+            return self._error_response(
+                request,
+                f"HTTP {e.response.status_code}: {e.response.text}",
+                f"http_{e.response.status_code}",
+            )
+        except httpx.ConnectError as e:
+            return self._error_response(request, f"Connection failed: {e}", "connection_error")
+        except Exception as e:
+            return self._error_response(request, str(e), "unknown_error")
 
     async def generate(self, request: InternalRequest) -> InternalResponse:
         """Execute text generation via vLLM /v1/completions endpoint."""

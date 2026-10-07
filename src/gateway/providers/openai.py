@@ -274,8 +274,9 @@ class OpenAIAdapter(ProviderAdapter):
 
             latency_ms = (time.perf_counter() - start_time) * 1000
 
-            # Extract embeddings from response
-            embeddings = [item["embedding"] for item in data.get("data", [])]
+            # Order by index so output i always belongs to input i
+            items = sorted(data.get("data", []), key=lambda item: item.get("index", 0))
+            embeddings = [item["embedding"] for item in items]
 
             usage_data = data.get("usage", {})
 
