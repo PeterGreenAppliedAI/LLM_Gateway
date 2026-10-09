@@ -52,6 +52,41 @@ class PIIShadowStore:
             "avg_finder_ms": round(finder_ms, 1) if finder_ms is not None else None,
         }
 
+    async def category_summary(self, hours: int = 24, max_rows: int = 50_000) -> dict[str, dict]:
+        """Per category: how often the gate flagged it, the extractor found it,
+        and stored copies were scrubbed for it. Counted in Python so it works
+        the same on SQLite and PostgreSQL JSON."""
+        from gateway.security.pii_taxonomy import LABELS
+
+        cutoff = datetime.now(UTC) - timedelta(hours=hours)
+        c = pii_gate_shadow.c
+        counts = {
+            label: {"gate_flagged": 0, "found": 0, "found_in_sampled": 0, "scrubbed": 0}
+            for label in LABELS
+        }
+        async with self._engine.connect() as conn:
+            rows = await conn.execute(
+                select(
+                    c.gate_categories, c.finder_categories, c.finder_reason, c.scrubbed_categories
+                )
+                .where(c.timestamp >= cutoff)
+                .order_by(c.timestamp.desc())
+                .limit(max_rows)
+            )
+            for gate_cats, found, reason, scrubbed in rows:
+                for label in gate_cats or []:
+                    if label in counts:
+                        counts[label]["gate_flagged"] += 1
+                for label in found or {}:
+                    if label in counts:
+                        counts[label]["found"] += 1
+                        if reason == "sampled":
+                            counts[label]["found_in_sampled"] += 1
+                for label in scrubbed or []:
+                    if label in counts:
+                        counts[label]["scrubbed"] += 1
+        return counts
+
     async def cleanup(self, retention_days: int) -> int:
         cutoff = datetime.now(UTC) - timedelta(days=retention_days)
         async with self._engine.begin() as conn:

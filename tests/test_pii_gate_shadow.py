@@ -476,3 +476,56 @@ class TestBacklogFilters:
         assert shape_id("restart counter is at 1962.") == shape_id("restart counter is at 1963.")
         assert shape_id("task 3555 slot ab12cd34ef") == shape_id("task 9 slot 0099aabbcc")
         assert shape_id("hello") != shape_id("goodbye")
+
+
+class TestRefilter:
+    """Real-backlog labels included dates as FINANCIAL, ticket ids as CREDENTIAL,
+    businesses as PERSON_NAME (D-052); refilter drops them from labelled files."""
+
+    @pytest.mark.parametrize(
+        "category,value",
+        [
+            ("FINANCIAL", "2027-01-15"),
+            ("GOV_ID", "2026-04-24)"),
+            ("FINANCIAL", "e3922068"),
+            ("CREDENTIAL", "TXN-1043"),
+            ("CREDENTIAL", "LASER-WL"),
+            ("SPECIAL", "**HIGH**"),
+            ("SPECIAL", "No space left on device"),
+            ("PERSON_NAME", "Long Island Auto Glass"),
+            ("PERSON_NAME", "Unknown"),
+        ],
+    )
+    def test_backlog_false_positives_rejected(self, category, value):
+        from gateway.security.pii_finder import plausible
+
+        assert not plausible(category, value)
+
+    @pytest.mark.parametrize(
+        "category,value",
+        [
+            ("PERSON_NAME", "Steven B. Davis"),
+            ("CREDENTIAL", "Zx9kQ2mP4vL8wR"),
+            ("CREDENTIAL", "postgres://svc:pw@db.internal/prod"),
+            ("FINANCIAL", "5121 4688 1973 6994"),
+        ],
+    )
+    def test_real_values_kept(self, category, value):
+        from gateway.security.pii_finder import plausible
+
+        assert plausible(category, value)
+
+    def test_refilter_drops_only_implausible_spans(self, tmp_path):
+        from gateway.security.pii_dataset import make_record, refilter
+
+        text = "Due 2027-01-15, card 5121 4688 1973 6994"
+        spans = [
+            {"category": "FINANCIAL", "value": "2027-01-15", "start": 4, "end": 14},
+            {"category": "FINANCIAL", "value": "5121 4688 1973 6994", "start": 21, "end": 40},
+        ]
+        src = tmp_path / "in.jsonl"
+        src.write_text(json.dumps(make_record(text, spans, "backlog", "phi4-mini")) + "\n")
+        n, dropped = refilter(src, tmp_path / "out.jsonl")
+        out = json.loads((tmp_path / "out.jsonl").read_text())
+        assert (n, dropped) == (1, 1)
+        assert [s["value"] for s in out["spans"]] == ["5121 4688 1973 6994"]

@@ -543,6 +543,25 @@ async def label_backlog(
     return written
 
 
+def refilter(src: Path, out: Path) -> tuple[int, int]:
+    """Re-apply the current shape checks to labelled records, so tightening
+    `plausible` never needs a relabelling pass. Returns (records, spans dropped)."""
+    from gateway.security.pii_finder import plausible
+
+    records = dropped = 0
+    with src.open(encoding="utf-8") as f, _open_private(out, mode="w") as w:
+        for line in f:
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            kept = [sp for sp in record["spans"] if plausible(sp["category"], sp["value"])]
+            dropped += len(record["spans"]) - len(kept)
+            record["spans"] = kept
+            w.write(json.dumps(record, ensure_ascii=False) + "\n")
+            records += 1
+    return records, dropped
+
+
 def write_synthetic(out: Path, count: int, seed: int, negative_share: float) -> int:
     n = 0
     with _open_private(out, mode="w") as f:
@@ -573,7 +592,15 @@ def main(argv: list[str] | None = None) -> int:
     lab.add_argument("--finder-model", default="phi4-mini")
     lab.add_argument("--out", type=Path, default=DEFAULT_DIR / "backlog.jsonl")
 
+    ref = sub.add_parser("refilter", help="re-apply current value checks to a labelled file")
+    ref.add_argument("src", type=Path)
+    ref.add_argument("out", type=Path)
+
     args = parser.parse_args(argv)
+    if args.command == "refilter":
+        n, dropped = refilter(args.src, args.out)
+        print(f"{n} records, {dropped} spans dropped -> {args.out}")
+        return 0
     if args.command == "synthetic":
         n = write_synthetic(args.out, args.count, args.seed, args.negative_share)
         print(f"{n} synthetic records -> {args.out}")

@@ -215,6 +215,48 @@ export interface PIIConfig {
   persisted: boolean
 }
 
+export type PIIMLAction = 'detect' | 'scrub_stored'
+
+export interface PIIMLCategory {
+  label: string
+  name: string
+  includes: string
+  action: PIIMLAction
+  gate_flagged?: number
+  found?: number
+  found_in_sampled?: number
+  scrubbed?: number
+}
+
+export interface PIIMLSummary {
+  period_hours: number
+  requests: number
+  finder_runs: number
+  skipped_finder_pct: number | null
+  sampled: number
+  gate_missed: number
+  gate_miss_rate_pct: number | null
+  gate_errors: number
+  avg_gate_ms: number | null
+  avg_finder_ms: number | null
+}
+
+export interface PIIMLView {
+  enabled: boolean
+  gate_url: string | null
+  finder_model: string | null
+  threshold: number
+  sample_rate: number
+  live: Record<string, number> | null
+  summary: PIIMLSummary | null
+  actions: PIIMLAction[]
+  categories: PIIMLCategory[]
+  source: 'default' | 'dashboard'
+  updated_at: string | null
+  updated_by: string | null
+  persisted: boolean
+}
+
 export interface PIIEvent {
   id: number
   request_id: string

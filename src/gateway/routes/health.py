@@ -102,7 +102,13 @@ async def health_check(request: Request) -> HealthResponse:
         if (shared := getattr(request.app.state, "shared_state", None))
         else None,
         access=_access_status(config),
-        pii_gate={"mode": "shadow", **shadow.stats}
+        pii_gate={
+            "mode": "scrub_stored"
+            if getattr(request.app.state, "pii_ml_policy", None)
+            and request.app.state.pii_ml_policy.scrub_labels()
+            else "shadow",
+            **shadow.stats,
+        }
         if (shadow := getattr(request.app.state, "pii_shadow", None))
         else None,
         audit=intent_log.status()

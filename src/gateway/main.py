@@ -55,6 +55,25 @@ async def _load_saved_pii_scrub(app: FastAPI) -> None:
         logger.exception("Saved PII scrubbing policy unreadable; using environment default")
 
 
+async def _load_saved_pii_ml_policy(app: FastAPI) -> None:
+    """Apply a dashboard-saved per-category ML PII policy (D-052), if one exists."""
+    from gateway.security.pii_policy import SETTING_KEY, PIIMLPolicy
+
+    try:
+        saved = await app.state.runtime_settings.get(SETTING_KEY)
+        if saved is None:
+            return
+        app.state.pii_ml_policy = PIIMLPolicy.from_saved(saved)
+        logger.info(
+            "ML PII policy loaded from dashboard setting",
+            scrub_stored=sorted(app.state.pii_ml_policy.scrub_labels()),
+            updated_by=app.state.pii_ml_policy.updated_by,
+        )
+    except Exception:
+        # Fall back to detect-only rather than failing startup
+        logger.exception("Saved ML PII policy unreadable; every category detect-only")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan manager."""
@@ -206,6 +225,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         from gateway.storage import RuntimeSettingsStore
 
         app.state.runtime_settings = RuntimeSettingsStore(app.state.db_engine)
+        await _load_saved_pii_ml_policy(app)
         if pii_scrubber is not None:
             await _load_saved_pii_scrub(app)
 
@@ -314,11 +334,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # ML PII detection in shadow mode (D-052): measures, never changes requests
     pii_shadow = None
+    from gateway.security.pii_policy import PIIMLPolicy
+
+    if getattr(app.state, "pii_ml_policy", None) is None:
+        app.state.pii_ml_policy = PIIMLPolicy()
     if settings.pii_gate.enabled:
         from gateway.security.pii_finder import PIIFinder
         from gateway.security.pii_gate import PIIGateClient
         from gateway.security.pii_shadow import PIIShadowAnalyzer
         from gateway.storage.pii_shadow_store import PIIShadowStore
+        from gateway.storage.stored_copy_scrubber import StoredCopyScrubber
 
         gate_cfg = settings.pii_gate
         pii_shadow = PIIShadowAnalyzer(
@@ -332,6 +357,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             threshold=gate_cfg.threshold,
             sample_rate=gate_cfg.sample_rate,
             queue_size=gate_cfg.queue_size,
+            policy=lambda: getattr(app.state, "pii_ml_policy", None),
+            scrubber=StoredCopyScrubber(app.state.db_engine)
+            if getattr(app.state, "db_engine", None)
+            else None,
         )
         await pii_shadow.start()
         app.state.pii_shadow = pii_shadow

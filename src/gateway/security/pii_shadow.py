@@ -8,20 +8,23 @@ For each request (after it has been answered, off the request path):
    sample of texts the gate called clean (that sample measures the gate's
    miss rate).
 3. Both are compared with the regex scanner, and the outcome is recorded.
+4. Categories the operator set to ``scrub_stored`` (pii_policy) have their
+   found values replaced in the request's stored copies.
 
-Shadow mode changes nothing about the request: it only measures. Recorded
-rows hold categories, probabilities, counts and timings, never the text or
-the values. Enforcement is a later, separate decision.
+Nothing here changes what the model receives. Recorded rows hold
+categories, probabilities, counts and timings, never the text or the values.
 """
 
 import asyncio
 import random
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from gateway.observability import get_logger
 from gateway.security.pii import PIIScrubber
 from gateway.security.pii_finder import PIIFinder
 from gateway.security.pii_gate import PIIGateClient, PIIGateError
+from gateway.security.pii_policy import PIIMLPolicy
 
 logger = get_logger(__name__)
 
@@ -67,6 +70,8 @@ class PIIShadowAnalyzer:
         sample_rate: float = 0.05,
         queue_size: int = 500,
         rng: random.Random | None = None,
+        policy: Callable[[], PIIMLPolicy | None] | None = None,
+        scrubber=None,
     ):
         self._gate = gate
         self._finder = finder
@@ -77,6 +82,8 @@ class PIIShadowAnalyzer:
         self._regex = PIIScrubber()
         self._rng = rng or random.Random()
         self._task: asyncio.Task | None = None
+        self._policy = policy
+        self._scrubber = scrubber
         self.stats = {
             "queued": 0,
             "dropped": 0,
@@ -88,6 +95,7 @@ class PIIShadowAnalyzer:
             "gate_missed": 0,
             "hallucinated_values": 0,
             "rejected_values": 0,
+            "stored_scrubbed": 0,
         }
 
     def submit(
@@ -121,6 +129,8 @@ class PIIShadowAnalyzer:
             except asyncio.CancelledError:
                 pass
             self._task = None
+        if self._scrubber is not None:
+            await self._scrubber.stop()
 
     async def _loop(self) -> None:
         while True:
@@ -129,6 +139,19 @@ class PIIShadowAnalyzer:
                 await self.analyze(job)
             except Exception:
                 logger.exception("PII shadow analysis failed", request_id=job.request_id)
+
+    def _enforce(self, job: ShadowJob, spans, row: dict) -> None:
+        """Scrub stored copies for categories the operator set to scrub_stored."""
+        policy = self._policy() if self._policy else None
+        if policy is None or self._scrubber is None:
+            return
+        labels = policy.scrub_labels()
+        replacements = {s.value: f"[{s.category}]" for s in spans if s.category in labels}
+        if not replacements:
+            return
+        self._scrubber.schedule(job.request_id, replacements)
+        row["scrubbed_categories"] = sorted({s.category for s in spans if s.category in labels})
+        self.stats["stored_scrubbed"] += 1
 
     async def analyze(self, job: ShadowJob) -> dict:
         """Run one job through gate -> extractor -> comparison; returns the recorded row."""
@@ -182,6 +205,7 @@ class PIIShadowAnalyzer:
                     row["gate_missed"] = bool(result.spans)
                     if result.spans:
                         self.stats["gate_missed"] += 1
+                self._enforce(job, result.spans, row)
 
         regex = self._regex.scan(job.text)
         row["regex_types"] = sorted({d.pii_type for d in regex.detections})

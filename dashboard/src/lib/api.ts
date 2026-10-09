@@ -1,5 +1,5 @@
 import { gatewayErrorMessage } from './forms'
-import type { Stats, Request, RequestDetail, Catalog, HealthResponse, SecurityAlert, SecurityStats, SecurityResult, ApiKeyInfo, BudgetConfig, BudgetUsage, SecurityScan, LabelStats, PIIStats, PIIEvent, PIIConfig, MediaEndpoint } from '../types'
+import type { Stats, Request, RequestDetail, Catalog, HealthResponse, SecurityAlert, SecurityStats, SecurityResult, ApiKeyInfo, BudgetConfig, BudgetUsage, SecurityScan, LabelStats, PIIStats, PIIEvent, PIIConfig, PIIMLView, PIIMLAction, MediaEndpoint } from '../types'
 
 // API base URL - gateway server
 // Unset: the dev server talks to a local gateway. Empty string: same origin
@@ -265,6 +265,26 @@ export async function updatePIIConfig(body: { scrub_enabled: boolean; scrub_rout
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
+  })
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) {
+    throw new Error(data?.error?.message || data?.detail?.[0]?.msg || `Request failed (${res.status})`)
+  }
+  return data
+}
+
+export async function fetchPIIML(hours = 24): Promise<PIIMLView | null> {
+  const res = await apiFetch(`${API_BASE}/api/pii/ml?hours=${hours}`)
+  if (!res.ok) return null
+  return res.json()
+}
+
+// Only the categories sent change. Rejects with the gateway's error message.
+export async function updatePIIML(categories: Record<string, PIIMLAction>): Promise<PIIMLView> {
+  const res = await apiFetch(`${API_BASE}/api/pii/ml`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ categories }),
   })
   const data = await res.json().catch(() => ({}))
   if (!res.ok) {

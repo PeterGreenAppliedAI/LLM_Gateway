@@ -26,6 +26,7 @@ from gateway.routes.dependencies import (
 )
 from gateway.routing_config import RoutingUpdate
 from gateway.security.pii_config import PIIScrubUpdate
+from gateway.security.pii_policy import PIIMLPolicyUpdate
 from gateway.storage import AuditLogger
 
 router = APIRouter(tags=["dashboard"])
@@ -733,6 +734,94 @@ async def update_pii_config(
         persisted=store is not None,
     )
     return _pii_config_view(request)
+
+
+async def _pii_ml_view(request: Request, hours: int) -> dict:
+    """ML PII detection (D-052): gate health, measured numbers, per-category policy."""
+    from gateway.security.pii_policy import ACTIONS, PIIMLPolicy
+    from gateway.security.pii_taxonomy import CATEGORIES
+
+    settings = request.app.state.settings
+    shadow = getattr(request.app.state, "pii_shadow", None)
+    policy = getattr(request.app.state, "pii_ml_policy", None) or PIIMLPolicy()
+    engine = getattr(request.app.state, "db_engine", None)
+    summary = per_category = None
+    if engine is not None:
+        from gateway.storage.pii_shadow_store import PIIShadowStore
+
+        store = PIIShadowStore(engine)
+        summary = await store.summary(hours=hours)
+        per_category = await store.category_summary(hours=hours)
+    return {
+        "enabled": shadow is not None,
+        "gate_url": settings.pii_gate.url if shadow is not None else None,
+        "finder_model": settings.pii_gate.finder_model if shadow is not None else None,
+        "threshold": settings.pii_gate.threshold,
+        "sample_rate": settings.pii_gate.sample_rate,
+        "live": shadow.stats if shadow is not None else None,
+        "summary": summary,
+        "actions": list(ACTIONS),
+        "categories": [
+            {
+                "label": c.label,
+                "name": c.name,
+                "includes": c.includes,
+                "action": policy.categories.get(c.label, "detect"),
+                **((per_category or {}).get(c.label) or {}),
+            }
+            for c in CATEGORIES
+        ],
+        "source": policy.source,
+        "updated_at": policy.updated_at.isoformat()
+        if getattr(policy.updated_at, "isoformat", None)
+        else policy.updated_at,
+        "updated_by": policy.updated_by,
+        "persisted": getattr(request.app.state, "runtime_settings", None) is not None,
+    }
+
+
+@router.get("/api/pii/ml")
+async def get_pii_ml(
+    request: Request,
+    _client_id: Annotated[str, Depends(require_admin)],
+    hours: int = 24,
+) -> dict:
+    """ML PII detection status, measured miss rate and per-category policy."""
+    return await _pii_ml_view(request, hours)
+
+
+@router.put("/api/pii/ml")
+async def update_pii_ml(
+    request: Request,
+    body: PIIMLPolicyUpdate,
+    admin_id: Annotated[str, Depends(require_admin)],
+) -> dict:
+    """Set categories to detect or scrub_stored (admin only).
+
+    Takes effect on the next analysed request and is saved. Only the
+    categories sent change. Never changes what models receive.
+    """
+    from gateway.security.pii_policy import SETTING_KEY, PIIMLPolicy
+
+    previous = getattr(request.app.state, "pii_ml_policy", None) or PIIMLPolicy()
+    merged = previous.merged(body)
+    store = getattr(request.app.state, "runtime_settings", None)
+    updated_at = None
+    if store is not None:
+        # Save first: if this fails, the running policy stays unchanged
+        updated_at = await store.set(SETTING_KEY, {"categories": merged}, updated_by=admin_id)
+    request.app.state.pii_ml_policy = PIIMLPolicy(
+        categories=merged, source="dashboard", updated_at=updated_at, updated_by=admin_id
+    )
+    logger.warning(
+        "ML PII policy changed",
+        changed_by=admin_id,
+        scrub_stored_before=sorted(previous.scrub_labels()),
+        scrub_stored=sorted(request.app.state.pii_ml_policy.scrub_labels()),
+        gate_enabled=getattr(request.app.state, "pii_shadow", None) is not None,
+        persisted=store is not None,
+    )
+    return await _pii_ml_view(request, 24)
 
 
 def _routing_config_view(request: Request) -> dict:

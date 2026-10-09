@@ -362,6 +362,8 @@ pii_gate_shadow = Table(
     # The extractor found PII in a text the gate called clean (measured on
     # sampled texts): the gate's miss rate is built from these
     Column("gate_missed", Boolean, nullable=True),
+    # Categories whose values were replaced in stored copies (policy scrub_stored)
+    Column("scrubbed_categories", JSON, nullable=True),
     Index("ix_pii_gate_shadow_timestamp", "timestamp"),
     Index("ix_pii_gate_shadow_request_id", "request_id"),
 )

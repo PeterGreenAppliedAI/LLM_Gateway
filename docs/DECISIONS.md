@@ -2000,6 +2000,43 @@ labelled by phi4-mini, plus synthetic examples.
   14/36, special 0/8. phi4-mini is weak on names, health and special-category text: the
   synthetic set, with exact labels, carries those categories in training.
 - **Tests:** `TestExtractorPrecision`, `TestBacklogFilters` in `tests/test_pii_gate_shadow.py`.
+- **Second pass, from the first 700 labels of the 20k run:** dates labelled FINANCIAL/GOV_ID,
+  short hex ids as FINANCIAL, ticket ids ("TXN-1043") and words as CREDENTIAL, status markers
+  ("\*\*HIGH\*\*") and OS errors as SPECIAL, businesses as PERSON_NAME. Checks added: dates
+  are never IDs; FINANCIAL needs 8+ digits; unprefixed credentials need 12+ characters with
+  letters and digits (known prefixes, PEM and credentialed connection strings always pass);
+  business words and placeholder names ("Unknown") aren't people; short all-caps words aren't
+  special-category data (HEALTH keeps acronyms such as HIV). `pii_dataset refilter` re-applies
+  the current checks to an already-labelled file, so tightening a check never needs a relabel.
+  Open: phone numbers and emails on scraped *business* web pages are labelled CONTACT; the
+  taxonomy calls public business switchboards clean. Left for human review in the dashboard.
+  Tests: `TestRefilter`.
+
+### D-052 enforcement: per-category policy, scrub stored copies (2026-10-09)
+
+- **Decision:** the project lead asked for per-category enforcement switches on the dashboard.
+  Each category is `detect` (default for all) or `scrub_stored`. Runtime setting
+  `pii.ml_policy`, edited at `GET/PUT /api/pii/ml` (admin only) and the "ML PII Detection"
+  section of the Security tab, which shows the measured gate miss rate and per-category
+  flagged/found/missed/scrubbed counts beside the switches. Unknown categories or actions are
+  a 422, and a PUT changes only the categories it sends.
+- **What `scrub_stored` does:** when the extractor finds a value in that category, the value is
+  replaced with `[CATEGORY]` in the request's audit request/response bodies and stored
+  security-scan messages (`storage/stored_copy_scrubber.py`). It runs off the request path,
+  retried at 0/30/120/600 s because those rows can be written after detection (a long stream
+  is audited when it ends). The shadow row records `scrubbed_categories` (migration
+  `d5a1c3e7f209`), never values.
+- **What it does not do (stated in the UI):** it never changes what the model receives; the
+  regex `pii.scrub` switch still governs that, because putting the gate and extractor inline
+  would add their latency to every request. Values the gate misses and the sample doesn't
+  catch are not scrubbed. Logs already emitted and the audit fallback journal are not
+  rewritten. Pending retries are dropped on shutdown, and values are held in memory for up
+  to 10 minutes while retries remain.
+- **Why not inline:** the extractor takes ~0.2–2 s per text on the 3060. Inline enforcement on
+  the request path is a separate decision, to make once the tuned gate's miss rate is known.
+- **Tests:** `tests/test_pii_ml_policy.py` (scrub of all three stored copies, retry catches a
+  late row, detect-only default, only scrub categories scrubbed, admin-only routes, 422s,
+  policy survives restart); dashboard `src/lib/piiml.test.ts`.
 
 ## D-053: Review fixes: overflow honors the catalog, budgets strip pins, media endpoints don't crash discovery
 

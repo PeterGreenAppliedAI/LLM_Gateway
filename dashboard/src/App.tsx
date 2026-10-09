@@ -18,6 +18,7 @@ import { SecuritySection } from './components/SecurityPanel'
 import { ApiKeysSection } from './components/KeysPanel'
 import { TokenBudgetSection } from './components/BudgetPanel'
 import { PIISection } from './components/PIIPanel'
+import { PIIMLSection } from './components/PIIMLPanel'
 import { VoiceSection } from './components/VoicePanel'
 import { RoutingSection } from './components/RoutingPanel'
 import { SecurityScansSection } from './components/ScansPanel'
@@ -300,6 +301,9 @@ function App() {
           </ErrorBoundary>
           <ErrorBoundary label="PII">
             <PIISection />
+          </ErrorBoundary>
+          <ErrorBoundary label="ML PII Detection">
+            <PIIMLSection />
           </ErrorBoundary>
           <ErrorBoundary label="Security Scan Labeling">
             <SecurityScansSection onRefresh={refresh} />

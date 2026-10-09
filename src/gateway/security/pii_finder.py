@@ -26,6 +26,19 @@ _IPV4 = re.compile(r"\d{1,3}(?:\.\d{1,3}){3}")
 _MAC = re.compile(r"[0-9A-Fa-f]{2}(?:[:-][0-9A-Fa-f]{2}){5}")
 _URL = re.compile(r"https?://|www\.")
 _ORG_SUFFIX = re.compile(r"\b(?:LLC|Inc|Ltd|Corp|GmbH|Co|Company|Services|Group)\b\.?$")
+# Words that make a "name" a business, not a person
+_ORG_WORD = re.compile(
+    r"\b(?:Electric(?:al)?|Auto|Glass|Body|Storage|Quarters|Plumbing|Roofing|Foundation|"
+    r"Cent(?:er|re)|Council|Associates|Partners|Solutions|Systems|Technologies|Industries|"
+    r"Enterprises|Restaurant|Cafe|Shop|Store|Market|Clinic|Hospital|School|University|"
+    r"Office|Bank|Agency|Studio|Labs?|Construction|Contracting|Repair|Removal|Towing)\b",
+    re.I,
+)
+_PLACEHOLDER_NAME = {"unknown", "user", "admin", "anonymous", "n/a", "none", "null", "customer"}
+_DATE = re.compile(r"\(?\d{4}-\d{2}-\d{2}\)?|\(?\d{1,2}/\d{1,2}/\d{2,4}\)?")
+_KNOWN_KEY_PREFIX = re.compile(
+    r"^(?:sk-|sk_live_|rk_live_|AKIA|ASIA|ghp_|gho_|ghs_|github_pat_|xox[abpr]-|AIza|gw-|admin-|eyJ)"
+)
 
 
 _DIGIT_RUN = re.compile(r"\+?\(?[A-Za-z]{0,4}\d[\w().:/-]*(?:[ ]\(?\d[\w().:/-]*)*")
@@ -44,7 +57,9 @@ _DOC_EMAIL = re.compile(
 )
 _FICTIONAL_PHONE = re.compile(r"555[\s.-]?01\d\d\b")
 _LOG_TEXT = re.compile(
-    r"\b(?:error|failed|failure|exception|timeout|traceback|warn(?:ing)?)\b", re.I
+    r"\b(?:error|failed|failure|exception|timeout|traceback|warn(?:ing)?|denied|refused|"
+    r"not found|no space|device|disk)\b",
+    re.I,
 )
 _TOKEN_CATEGORIES = ("CREDENTIAL", "GOV_ID", "FINANCIAL", "NETWORK")
 
@@ -78,7 +93,14 @@ def plausible(category: str, value: str) -> bool:
     if len(v) < 3 or _PLACEHOLDER.search(v):
         return False
     if category == "CREDENTIAL":
-        return len(v) >= 8 and (v.startswith("-----BEGIN") or not any(c.isspace() for c in v))
+        if v.startswith("-----BEGIN") or "://" in v and "@" in v:
+            return True  # PEM block, connection string with credentials
+        if any(c.isspace() for c in v) or len(v) < 8:
+            return False
+        if _KNOWN_KEY_PREFIX.match(v):
+            return True
+        # Unprefixed secret: long, letters and digits (rules out "TXN-1043", "LASER-WL")
+        return len(v) >= 12 and any(c.isalpha() for c in v) and _digits(v) >= 2
     if category == "NETWORK":
         if _IPV4.fullmatch(v):
             try:
@@ -100,11 +122,13 @@ def plausible(category: str, value: str) -> bool:
             or (_digits(v) >= 1 and len(v.split()) >= 3)
         )  # postal address
     if category in ("GOV_ID", "FINANCIAL"):
-        if "".join(c for c in v if c.isdigit()) in _TEST_CARDS:
+        if "".join(c for c in v if c.isdigit()) in _TEST_CARDS or _DATE.fullmatch(v):
             return False
+        if category == "FINANCIAL":
+            return _digits(v) >= 8  # cards, account numbers, IBANs; not short hex ids
         return _digits(v) >= 5
     if category == "PERSON_NAME":
-        if _ORG_SUFFIX.search(v):
+        if _ORG_SUFFIX.search(v) or _ORG_WORD.search(v) or v.lower() in _PLACEHOLDER_NAME:
             return False
         return (
             _digits(v) == 0
@@ -113,6 +137,10 @@ def plausible(category: str, value: str) -> bool:
             and not _URL.search(v)
         )
     # HEALTH, QUASI_ID, SPECIAL are free text; rule out what is clearly not
+    if v.startswith("*") or (
+        category != "HEALTH" and v.isupper() and len(v) <= 12 and not _digits(v)
+    ):
+        return False  # markdown emphasis, status words ("**HIGH**", "OTR/L")
     return len(v) <= 200 and not _URL.search(v) and not _LOG_TEXT.search(v)
 
 

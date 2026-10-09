@@ -125,7 +125,7 @@ class TestScanLabelIndex:
         engine = sa.create_engine(f"sqlite:///{tmp_path}/mig.db")
         with engine.begin() as conn:
             upgrade(conn)
-            assert head_revision() == "c2f8a4d6e913"
+            assert head_revision() == "d5a1c3e7f209"
             names = {ix["name"] for ix in sa.inspect(conn).get_indexes("security_scans")}
             plan = " ".join(
                 str(row[3])
