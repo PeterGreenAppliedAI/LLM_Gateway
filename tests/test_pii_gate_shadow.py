@@ -2,6 +2,7 @@
 
 import json
 import random
+import sys
 
 import httpx
 import pytest
@@ -340,6 +341,7 @@ class TestSyntheticDataset:
             )
             assert total % 10 == 0
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="Windows has no POSIX file modes")
     def test_files_are_owner_only(self, tmp_path):
         import stat
 
