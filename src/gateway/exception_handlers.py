@@ -120,13 +120,18 @@ async def gateway_error_handler(request: Request, exc: GatewayError) -> JSONResp
             ErrorCategory.RATE_LIMIT,
             ErrorCategory.AUTHENTICATION,
         )
-        if audit_logger and ctx:
+        # Auth denials fire before the route sets up a request context, so
+        # a missing ctx must not skip the row — an unattributed denial is
+        # still evidence
+        if audit_logger:
+            from uuid import uuid4
+
             try:
                 await audit_logger.log_request(
-                    request_id=ctx.request_id,
-                    client_id=ctx.client_id or "unknown",
-                    task=ctx.task or "unknown",
-                    model=ctx.model or "unknown",
+                    request_id=ctx.request_id if ctx else str(uuid4()),
+                    client_id=(ctx.client_id if ctx else None) or "unknown",
+                    task=(ctx.task if ctx else None) or "unknown",
+                    model=(ctx.model if ctx else None) or "unknown",
                     endpoint=exc.details.get("provider", "unknown"),
                     status="denied" if denial else "error",
                     error_code=exc.code.value,

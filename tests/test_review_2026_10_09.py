@@ -321,3 +321,31 @@ class TestContentPartValidation:
 
         with pytest.raises(ValidationError):
             check_content_parts([{"type": "text", "text": {"nested": "thing"}}])
+
+
+class TestAuthDenialWithoutContext:
+    @pytest.mark.asyncio
+    async def test_auth_denial_audited_before_context_exists(self):
+        """401s fire in the auth dependency, before any request context —
+        the denial row must be written anyway (unattributed is still
+        evidence)."""
+        from starlette.requests import Request as StarletteRequest
+
+        from gateway.errors import InvalidApiKeyError
+        from gateway.exception_handlers import gateway_error_handler
+        from gateway.observability.logging import clear_request_context
+
+        clear_request_context()
+        app = FastAPI()
+        audit = AsyncMock()
+        audit._redact_text = lambda t: t
+        app.state.audit_logger = audit
+
+        scope = {"type": "http", "app": app, "method": "POST", "path": "/api/chat", "headers": []}
+        response = await gateway_error_handler(StarletteRequest(scope), InvalidApiKeyError())
+
+        assert response.status_code == 401
+        audit.log_request.assert_awaited_once()
+        kwargs = audit.log_request.await_args.kwargs
+        assert kwargs["status"] == "denied"
+        assert kwargs["client_id"] == "unknown"
