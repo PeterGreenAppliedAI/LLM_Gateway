@@ -22,16 +22,20 @@ from gateway.models.internal import InternalRequest, Message, MessageRole
 from gateway.observability import get_logger
 from gateway.routes.dependencies import (
     AuthResult,
-    authenticate,
     get_auth,
     get_config,
     get_dispatcher,
     get_registry,
+    require_admin,
 )
 
 logger = get_logger(__name__)
 
 router = APIRouter(tags=["catalog"])
+
+# /v1/models is client discovery (key/environment scoped). Everything under
+# /v1/devmesh/* is operational: endpoint URLs, health controls, routing
+# internals, unfiltered inventory. Control plane, so admin only (D-056).
 
 
 # =============================================================================
@@ -126,7 +130,7 @@ class RouteResponse(BaseModel):
 async def debug_route(
     request: Request,
     body: RouteRequest,
-    client_id: Annotated[str, Depends(authenticate)],
+    client_id: Annotated[str, Depends(require_admin)],
     dispatcher: Annotated[Dispatcher, Depends(get_dispatcher)],
     registry: Annotated[ProviderRegistry, Depends(get_registry)],
 ) -> RouteResponse:
@@ -193,7 +197,7 @@ class ProvidersResponse(BaseModel):
 @router.get("/v1/devmesh/providers", response_model=ProvidersResponse)
 async def list_providers(
     request: Request,
-    client_id: Annotated[str, Depends(authenticate)],
+    client_id: Annotated[str, Depends(require_admin)],
     config: Annotated[GatewayConfig, Depends(get_config)],
     registry: Annotated[ProviderRegistry, Depends(get_registry)],
 ) -> ProvidersResponse:
@@ -239,7 +243,7 @@ async def list_providers(
 @router.post("/v1/devmesh/providers/{provider_name}/health")
 async def check_provider_health(
     provider_name: str,
-    client_id: Annotated[str, Depends(authenticate)],
+    client_id: Annotated[str, Depends(require_admin)],
     registry: Annotated[ProviderRegistry, Depends(get_registry)],
 ) -> dict[str, Any]:
     """Force a health check on a specific provider."""
@@ -300,7 +304,7 @@ class CatalogResponse(BaseModel):
 @router.get("/v1/devmesh/catalog", response_model=CatalogResponse)
 async def get_catalog(
     request: Request,
-    client_id: Annotated[str, Depends(authenticate)],
+    client_id: Annotated[str, Depends(require_admin)],
     registry: Annotated[ProviderRegistry, Depends(get_registry)],
     config: Annotated[GatewayConfig, Depends(get_config)],
 ) -> CatalogResponse:
@@ -358,7 +362,7 @@ async def get_catalog(
 @router.post("/v1/devmesh/catalog/refresh")
 async def refresh_catalog(
     request: Request,
-    client_id: Annotated[str, Depends(authenticate)],
+    client_id: Annotated[str, Depends(require_admin)],
 ) -> dict[str, Any]:
     """Trigger immediate model discovery."""
     discovery = getattr(request.app.state, "discovery_service", None)

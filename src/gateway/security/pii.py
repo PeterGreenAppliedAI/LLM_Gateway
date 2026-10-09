@@ -11,6 +11,7 @@ Detection always runs to flag PII in security alerts.
 Scrubbing (replacement with placeholders) is per-route configurable.
 """
 
+import json
 import re
 import time
 from dataclasses import dataclass, field
@@ -250,7 +251,7 @@ class PIIScrubber:
                     if not isinstance(arguments, (dict, list, str)):
                         new_calls.append(call)
                         continue
-                    scrubbed_args, found = self._scan_structure(
+                    scrubbed_args, found = self._scan_arguments(
                         arguments, msg_index, role, results, scrub
                     )
                     if scrub and found:
@@ -267,8 +268,45 @@ class PIIScrubber:
 
         return output_messages, results
 
+    def _scan_arguments(self, arguments, msg_index, role, results, scrub):
+        """Scan tool-call arguments in either form (D-056).
+
+        OpenAI sends arguments as a JSON *string*. Scanning that text
+        directly missed escaped values ("jane.doe\\u0040example.com"
+        decodes to an email the regex never saw) and corrupted valid JSON
+        when a bare numeric token was replaced with an unquoted
+        placeholder. Decode first, scan the decoded structure, and
+        re-serialize only if something was scrubbed. Text that isn't
+        valid JSON is scanned as plain text.
+        """
+        if isinstance(arguments, str):
+            try:
+                decoded = json.loads(arguments)
+            except (ValueError, TypeError):
+                return self._scan_structure(arguments, msg_index, role, results, scrub)
+            scrubbed, found = self._scan_structure(decoded, msg_index, role, results, scrub)
+            if scrub and found:
+                return json.dumps(scrubbed, ensure_ascii=False), True
+            return arguments, found
+        return self._scan_structure(arguments, msg_index, role, results, scrub)
+
     def _scan_structure(self, value, msg_index, role, results, scrub):
-        """Scan every string in a JSON-like structure; return (maybe-scrubbed copy, found)."""
+        """Scan every string in a JSON-like structure; return (maybe-scrubbed copy, found).
+
+        Integers are scanned as their digit string (a phone number or SSN
+        sent as a JSON number is still PII); a hit becomes a string
+        placeholder, so the result stays valid JSON. Booleans are not
+        numbers here.
+        """
+        if isinstance(value, int) and not isinstance(value, bool):
+            text = str(value)
+            result = self.scan(text, scrub=scrub)
+            if result.has_pii:
+                results.append(PIIFinding(msg_index, role, text, result))
+                if scrub and result.scrubbed_text is not None:
+                    return result.scrubbed_text, True
+                return value, True
+            return value, False
         if isinstance(value, str):
             if not value:
                 return value, False

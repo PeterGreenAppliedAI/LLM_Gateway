@@ -1992,3 +1992,44 @@ accuracy) is the order below.
 - **Lesson for the next feature:** test the structured and partially-failed paths
   first; that's where three consecutive reviews found what the happy-path suite
   missed.
+
+## D-056: Follow-up review: decode before scanning, redact logs at the formatter, admin-only operational catalog
+
+- **Status:** Implemented, 2026-10-09. Amends D-055 (fixes 1, 4 and 6 were incomplete).
+- **Problem:** a follow-up review of `5b1fe30` confirmed the D-055 repro cases passed but
+  found three gaps, all reproduced here before fixing:
+  1. **Tool arguments were scanned as serialized JSON text.** OpenAI sends arguments as a
+     JSON string; scanning the raw text missed escaped values
+     (`{"email":"jane.doe@example.com"}` reached the engine as a plain email), and
+     replacing a bare numeric token (`{"phone":2025550123}`) with an unquoted placeholder
+     produced invalid JSON — a valid request became a 500. The D-055 fix introduced that
+     regression.
+  2. **Operational logs still carried raw upstream error text.** D-055 redacted the
+     central exception handler, but the dispatcher, adapters and stream paths log provider
+     errors earlier (`"error": "HTTP 500: Failed for jane.doe@example.com"`). Fixing call
+     sites one by one was the mistake: there are many, and new ones get written.
+  3. **`/v1/devmesh/catalog` bypassed listing restrictions.** D-055 scoped `/api/tags` and
+     `/v1/models`, but the operational catalog returned every model — including ones a key
+     can't route to — plus internal endpoint URLs, to any client key or keyless caller.
+     `/v1/devmesh/providers`, `/providers/{name}/health`, `/catalog/refresh` and `/route`
+     sat on the same boundary.
+- **Fix:**
+  1. `PIIScrubber._scan_arguments`: decode JSON-string arguments, scan the decoded
+     structure, re-serialize only if something was scrubbed (clean arguments pass through
+     byte-for-byte). Integers are scanned as digit strings; a hit becomes a string
+     placeholder, so output is always valid JSON (the value's type changes, which is
+     inherent to scrubbing). Booleans aren't numbers. Non-JSON argument text is scanned as
+     plain text.
+  2. Redaction moved into the log formatters (`observability/logging.py`): message, every
+     structured field, and exception text, for every record through our handler. Always on
+     — operational logs are never meant to carry PII — and fails closed to
+     `[LOG REDACTION FAILED]`. Uvicorn's own access log carries no bodies.
+  3. Everything under `/v1/devmesh/*` is admin-only. `/v1/models` remains the client-facing,
+     key- and environment-scoped listing. The dashboard (the only caller found in the
+     access log) already sends the admin key.
+- **What works now:** `tests/test_review_followup_2026_10_09.py` — the escaped-email
+  bypass, the numeric-JSON regression, byte-for-byte passthrough of clean arguments, log
+  redaction on the dispatcher's structured-field path plus message and exception text in
+  both formatters, and client/keyless refusal on all five operational routes (13 tests).
+- **Lesson:** a redaction boundary belongs where the data leaves, not where a bug was last
+  seen. D-055 fixed the reported path each time; D-056 moves both fixes to the choke point.

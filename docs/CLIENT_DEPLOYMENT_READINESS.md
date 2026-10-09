@@ -97,6 +97,7 @@ exactly how far:
 | Budgets and dashboard tier changes reset on restart | D-037 `b6a9bb3` | Default (database) | `test_budget_persistence.py` | All, SQLite + PG |
 | No per-key concurrency limit or batch class | D-034 `22ca369` | `max_concurrent`, `priority` on a key | `test_key_limits.py` | All, SQLite + PG |
 | No way to try a config without minting keys | D-042 `b8e0228` | `GATEWAY_DEV_MODE=true` or `./start-gateway.sh --dev`; `GATEWAY_PROFILE=production` refuses it | `test_access_modes.py::TestTestMode`, `::TestProductionProfile` | All |
+| Operational catalog (`/v1/devmesh/*`) exposed restricted models and endpoint URLs to any client | D-056 | Default (admin key) | `test_review_followup_2026_10_09.py::TestOperationalCatalogIsAdminOnly` | All |
 
 ### Still open
 
@@ -160,6 +161,8 @@ exactly how far:
 | Retention: first cleanup 24 h after boot; one error stopped it for good | D-041 `df17d9b` | Default | — (loop runs at startup and logs errors) | — |
 | Retention: `GATEWAY_DB_RETENTION_DAYS=0` ("keep") was rejected | D-045 `973edcf` | Default | `test_settings.py` | All |
 | Compose lost all state on `down`/`up` | D-044 `e065815` | `GATEWAY_ADMIN_API_KEY` (Compose refuses to start without it) | Manual: image build plus `down`/`up` (D-044). Not in CI. | Docker on Linux |
+| PII in tool-call arguments bypassed scrubbing (plain, JSON-escaped, numeric) | D-055, D-056 | PII scrubbing on | `test_review_2026_10_09.py`, `test_review_followup_2026_10_09.py::TestToolArgumentDecoding` | All |
+| Raw upstream error text (echoed PII) in audit rows and operational logs | D-055, D-056 | Default | `test_review_2026_10_09.py`, `test_review_followup_2026_10_09.py::TestLogRedaction` | All |
 
 ### Still open
 

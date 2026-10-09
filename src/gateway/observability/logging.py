@@ -171,6 +171,41 @@ def clear_request_context() -> None:
     _request_context.set(None)
 
 
+# Log redaction (D-056). Upstream errors echo submitted values, and the
+# dispatcher, adapters and handlers all log them at different points.
+# Redacting each call site missed paths (the D-055 fix covered only the
+# central handler), so redaction happens here, in the formatter: message,
+# every structured field, and exception text, for every log line. Always
+# on — operational logs are never meant to carry PII — and fails closed.
+_LOG_REDACTION_FAILED = "[LOG REDACTION FAILED]"
+_log_scrubber: Any = None
+
+
+def _redact_log_value(value: Any) -> Any:
+    global _log_scrubber
+    if _log_scrubber is None:
+        from gateway.security.pii import PIIScrubber  # lazy: avoids an import cycle
+
+        _log_scrubber = PIIScrubber()
+    if isinstance(value, str):
+        return _log_scrubber.redact(value) if value else value
+    if isinstance(value, dict):
+        return {k: _redact_log_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_redact_log_value(v) for v in value]
+    if isinstance(value, BaseException):
+        return _redact_log_value(str(value))
+    return value
+
+
+def redact_for_log(value: Any) -> Any:
+    """Redact PII from a value bound for a log line. Never raises."""
+    try:
+        return _redact_log_value(value)
+    except Exception:
+        return _LOG_REDACTION_FAILED
+
+
 class StructuredJsonFormatter(logging.Formatter):
     """JSON formatter that includes request context."""
 
@@ -186,7 +221,7 @@ class StructuredJsonFormatter(logging.Formatter):
         log_data: dict[str, Any] = {
             "level": record.levelname,
             "logger": record.name,
-            "message": record.getMessage(),
+            "message": redact_for_log(record.getMessage()),
         }
 
         if self._config.include_timestamp:
@@ -208,13 +243,17 @@ class StructuredJsonFormatter(logging.Formatter):
             if ctx.task:
                 log_data["task"] = sanitize_log_value(ctx.task)
 
-        # Add extra fields from record
+        # Add extra fields from record (redacted: error bodies live here)
         if hasattr(record, "extra_fields"):
-            log_data.update(record.extra_fields)
+            redacted = redact_for_log(record.extra_fields)
+            if isinstance(redacted, dict):
+                log_data.update(redacted)
+            else:
+                log_data["fields"] = redacted
 
-        # Add exception info if present
+        # Add exception info if present (exception text can echo inputs)
         if record.exc_info:
-            log_data["exception"] = self.formatException(record.exc_info)
+            log_data["exception"] = redact_for_log(self.formatException(record.exc_info))
 
         return json.dumps(log_data, default=str)
 
@@ -241,12 +280,17 @@ class StructuredTextFormatter(logging.Formatter):
         if ctx and self._config.include_request_id:
             parts.append(f"[{ctx.request_id[:8]}]")
 
-        parts.append(record.getMessage())
+        parts.append(redact_for_log(record.getMessage()))
 
-        result = " ".join(parts)
+        if hasattr(record, "extra_fields") and record.extra_fields:
+            fields = redact_for_log(record.extra_fields)
+            if isinstance(fields, dict):
+                parts.append(" ".join(f"{k}={v}" for k, v in fields.items()))
+
+        result = " ".join(str(p) for p in parts)
 
         if record.exc_info:
-            result += "\n" + self.formatException(record.exc_info)
+            result += "\n" + redact_for_log(self.formatException(record.exc_info))
 
         return result
 
