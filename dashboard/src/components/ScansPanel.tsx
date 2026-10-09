@@ -15,21 +15,23 @@ export function SecurityScansSection({ onRefresh }: { onRefresh: () => void }) {
   const [exportFormat, setExportFormat] = useState<'llama_guard' | 'raw'>('llama_guard')
   const [exportResult, setExportResult] = useState<{ count: number } | null>(null)
 
+  const [loadError, setLoadError] = useState<string | null>(null)
+
+  // Counts and the list load independently: the counts are cheap, and they
+  // used to wait on the list query (D-057)
   const loadScans = useCallback(async () => {
     setLoading(true)
+    setLoadError(null)
+    fetchLabelStats().then(setLabelStats).catch(() => {})
     try {
-      const [scansData, statsData] = await Promise.all([
-        fetchSecurityScans({
-          limit: 50,
-          unlabeled_only: filter === 'unlabeled',
-          disagreements_only: filter === 'disagreements',
-        }),
-        fetchLabelStats(),
-      ])
+      const scansData = await fetchSecurityScans({
+        limit: 50,
+        unlabeled_only: filter === 'unlabeled',
+        disagreements_only: filter === 'disagreements',
+      })
       setScans(scansData.scans)
-      setLabelStats(statsData)
     } catch (e) {
-      console.error('Failed to load scans:', e)
+      setLoadError(e instanceof Error ? e.message : String(e))
     } finally {
       setLoading(false)
     }
@@ -175,7 +177,9 @@ export function SecurityScansSection({ onRefresh }: { onRefresh: () => void }) {
 
       {/* Scans Table */}
       <div className="bg-gray-900 rounded-lg border border-gray-700 overflow-hidden">
-        {loading ? (
+        {loadError ? (
+          <div className="p-4 text-sm text-red-300" role="alert">Couldn't load scans: {loadError}</div>
+        ) : loading ? (
           <div className="p-8 text-center text-gray-500">Loading scans...</div>
         ) : scans.length === 0 ? (
           <div className="p-8 text-center text-gray-500">

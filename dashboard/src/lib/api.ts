@@ -84,8 +84,11 @@ export async function fetchSecurityAlerts(limit = 50): Promise<{ alerts: Securit
   return res.json()
 }
 
-export async function fetchSecurityStats(): Promise<SecurityStats> {
+// null when unavailable (e.g. key rejected): the error envelope used to be
+// returned as if it were stats, and rendering it crashed the page (D-057)
+export async function fetchSecurityStats(): Promise<SecurityStats | null> {
   const res = await apiFetch(`${API_BASE}/api/security/stats`)
+  if (!res.ok) return null
   return res.json()
 }
 
@@ -208,10 +211,26 @@ export async function bulkLabelScans(requestIds: string[], label: string, labelC
   return res.json()
 }
 
+// The server names the count `total_scans`; the dashboard always read
+// `total`, so the Total Scans tile was blank and `.toLocaleString()` on it
+// crashed the page (D-057). Map the wire shape here, once.
+export function toLabelStats(body: Record<string, unknown> | null): LabelStats {
+  const n = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : 0)
+  const b = body ?? {}
+  return {
+    total: n(b.total_scans ?? b.total),
+    labeled: n(b.labeled),
+    unlabeled: n(b.unlabeled),
+    safe: n(b.safe),
+    unsafe: n(b.unsafe),
+    disagreements: n(b.disagreements),
+  }
+}
+
 export async function fetchLabelStats(): Promise<LabelStats> {
   const res = await apiFetch(`${API_BASE}/api/security/scans/stats`)
-  if (!res.ok) return { total: 0, labeled: 0, unlabeled: 0, safe: 0, unsafe: 0, disagreements: 0 }
-  return res.json()
+  if (!res.ok) return toLabelStats(null)
+  return toLabelStats(await res.json().catch(() => null))
 }
 
 export async function exportTrainingData(format: string = 'llama_guard'): Promise<{ count: number; examples: unknown[] }> {

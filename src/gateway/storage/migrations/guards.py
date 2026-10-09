@@ -17,3 +17,7 @@ def has_table(name: str) -> bool:
 
 def has_column(table: str, column: str) -> bool:
     return any(c["name"] == column for c in sa.inspect(op.get_bind()).get_columns(table))
+
+
+def has_index(table: str, name: str) -> bool:
+    return any(ix["name"] == name for ix in sa.inspect(op.get_bind()).get_indexes(table))

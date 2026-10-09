@@ -2113,9 +2113,27 @@ accuracy) is the order below.
   shared `CollapsibleSection` (`components/shared.tsx`): one card, one header, one chevron
   position, `aria-expanded` on a real button (both were mouse-only). The PII section also
   stays in place showing "data unavailable" instead of vanishing when its stats can't load.
+- **Follow-up 2 — the Security tab crashed the whole dashboard.** The section-style fix
+  added a header summary calling `labelStats.total.toLocaleString()`. The server has
+  always sent `total_scans`, not `total` (so the Total Scans tile was always blank);
+  `undefined.toLocaleString()` threw during render and React unmounted the entire app —
+  the page disappeared whenever the tab opened. The same shape waited in the empty
+  Security state, which rendered the error envelope returned for a rejected key as stats.
+  Fixes: `toLabelStats()` maps the wire shape once, in the fetcher; `fetchSecurityStats`
+  returns null when unavailable; and an `ErrorBoundary` wraps each tab (keyed by tab) and
+  each Security section, so one bad field shows an error card in that section instead of
+  blanking the page. Verified in a headless Chromium against the live dashboard, with the
+  admin key and with a rejected key: no page errors either way.
+- **Follow-up 3 — the labeling list took 7 s.** "Newest unlabeled" used the `label` index,
+  which matched every unlabeled row (~714k), then sorted them all to return 50. Migration
+  `b7d3e9f14c62` adds `ix_security_scans_label_timestamp (label, timestamp)`: 7.04 s →
+  0.03 s on the reference database. The panel also loads its counts independently of the
+  list and shows load errors instead of a permanent "Loading scans…".
 - **What works now:** `tests/test_dashboard_ux_2026_10_09.py` (denials excluded from
   stats with the review's 36-denial scenario; SQL paging with no overlap; time filter;
   `has_more` and status filtering through the route) and
+  `TestScanLabelIndex` (migration creates the index; the query no longer sorts every match),
+  `dashboard/src/lib/api.test.ts` (wire-shape mapping never yields undefined), and
   `dashboard/src/lib/forms.test.ts` (zero preserved; -1 rpm rejected with a message;
   validation lists and envelopes surfaced; scope parsing and summary). Keyboard, dialog
   and narrow-viewport behavior are not covered by automated tests; they need a browser

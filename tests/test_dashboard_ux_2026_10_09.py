@@ -112,3 +112,28 @@ class TestRequestListing:
         assert len(page1["requests"]) == 2 and page1["has_more"] is True
         assert len(page2["requests"]) == 2 and page2["has_more"] is False
         assert [r["request_id"] for r in denied["requests"]] == ["deny1"]
+
+
+class TestScanLabelIndex:
+    def test_migration_creates_label_timestamp_index(self, tmp_path):
+        """The labeling view's 'newest unlabeled' query sorted every
+        unlabeled row (7 s on 714k rows) without this index."""
+        import sqlalchemy as sa
+
+        from gateway.storage.migrate import head_revision, upgrade
+
+        engine = sa.create_engine(f"sqlite:///{tmp_path}/mig.db")
+        with engine.begin() as conn:
+            upgrade(conn)
+            assert head_revision() == "b7d3e9f14c62"
+            names = {ix["name"] for ix in sa.inspect(conn).get_indexes("security_scans")}
+            plan = " ".join(
+                str(row[3])
+                for row in conn.exec_driver_sql(
+                    "EXPLAIN QUERY PLAN SELECT * FROM security_scans "
+                    "WHERE label IS NULL ORDER BY timestamp DESC LIMIT 50"
+                )
+            )
+        engine.dispose()
+        assert "ix_security_scans_label_timestamp" in names
+        assert "TEMP B-TREE" not in plan  # no full sort of matching rows

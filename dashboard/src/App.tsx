@@ -21,6 +21,7 @@ import { PIISection } from './components/PIIPanel'
 import { VoiceSection } from './components/VoicePanel'
 import { RoutingSection } from './components/RoutingPanel'
 import { SecurityScansSection } from './components/ScansPanel'
+import { ErrorBoundary } from './components/ErrorBoundary'
 
 function App() {
   const [stats, setStats] = useState<Stats | null>(null)
@@ -210,6 +211,7 @@ function App() {
         ))}
       </div>
 
+      <ErrorBoundary key={activeTab} label={activeTab}>
       {/* === Dashboard Tab === */}
       {activeTab === 'dashboard' && (
         <>
@@ -288,14 +290,20 @@ function App() {
       {/* === Security Tab === */}
       {activeTab === 'security' && (
         <>
-          <SecuritySection
-            alerts={securityAlerts}
-            stats={securityStats}
-            guardResults={guardResults}
-            onFilterChange={(d) => { guardDisagreementsRef.current = d; refresh() }}
-          />
-          <PIISection />
-          <SecurityScansSection onRefresh={refresh} />
+          <ErrorBoundary label="Security Monitor">
+            <SecuritySection
+              alerts={securityAlerts}
+              stats={securityStats}
+              guardResults={guardResults}
+              onFilterChange={(d) => { guardDisagreementsRef.current = d; refresh() }}
+            />
+          </ErrorBoundary>
+          <ErrorBoundary label="PII">
+            <PIISection />
+          </ErrorBoundary>
+          <ErrorBoundary label="Security Scan Labeling">
+            <SecurityScansSection onRefresh={refresh} />
+          </ErrorBoundary>
         </>
       )}
 
@@ -318,6 +326,7 @@ function App() {
 
       {/* === Requests Tab === */}
       {activeTab === 'requests' && <RequestsSection refreshTick={refreshTick} />}
+      </ErrorBoundary>
     </div>
   )
 }

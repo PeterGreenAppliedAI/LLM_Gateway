@@ -249,6 +249,8 @@ security_scans = Table(
     # Indexes
     Index("ix_security_scans_timestamp", "timestamp"),
     Index("ix_security_scans_label", "label"),
+    # Newest-first listing filtered by label (labeling view, D-057)
+    Index("ix_security_scans_label_timestamp", "label", "timestamp"),
     Index("ix_security_scans_disagreement", "is_disagreement"),
     Index("ix_security_scans_client_id", "client_id"),
     Index("ix_security_scans_regex_threat", "regex_threat_level"),
