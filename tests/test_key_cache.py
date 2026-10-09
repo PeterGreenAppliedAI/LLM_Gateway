@@ -62,18 +62,34 @@ class TestCaching:
         assert len(lookups) == 2
 
     @pytest.mark.asyncio
-    async def test_key_expiring_while_cached_is_refused(self, engine):
+    async def test_key_expiring_while_cached_is_refused(self, engine, monkeypatch):
+        # Controls the clock instead of racing it: a 100 ms expiry flaked on
+        # slow Windows runners, where the DB write took longer than the
+        # window and the key was expired before the first check
+        import gateway.storage.key_cache as key_cache_module
+
         km = KeyManager(engine)
         key = await km.create_key(name="app", client_id="app")
-        soon = datetime.now(UTC) + timedelta(milliseconds=100)
+        expires = datetime.now(UTC) + timedelta(seconds=5)
         async with engine.begin() as conn:
             await conn.execute(
-                update(api_keys).where(api_keys.c.id == key["key_id"]).values(expires_at=soon)
+                update(api_keys).where(api_keys.c.id == key["key_id"]).values(expires_at=expires)
             )
         cache = KeyCache(engine, ttl=60)
         assert await cache.validate(key["key"]) is not None
-        await asyncio.sleep(0.15)
-        assert await cache.validate(key["key"]) is None
+
+        class _Later(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return expires + timedelta(seconds=1)
+
+        import gateway.storage.keys as keys_module
+
+        # Both layers: the cache drops the expired entry, then re-checks the
+        # database, which must agree the key has expired
+        monkeypatch.setattr(key_cache_module, "datetime", _Later)
+        monkeypatch.setattr(keys_module, "datetime", _Later)
+        assert await cache.validate(key["key"]) is None  # cached, but expired
 
     @pytest.mark.asyncio
     async def test_size_bounded(self, engine):
