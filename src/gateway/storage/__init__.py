@@ -17,6 +17,7 @@ from gateway.storage.schema import (
     api_keys,
     audit_log,
     metadata,
+    pii_gate_shadow,
     runtime_settings,
     security_scans,
     usage_daily,
@@ -29,6 +30,7 @@ __all__ = [
     "audit_log",
     "usage_daily",
     "api_keys",
+    "pii_gate_shadow",
     "security_scans",
     "runtime_settings",
     # Engine

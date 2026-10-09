@@ -312,11 +312,43 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             retention_days=settings.security.retention_days,
         )
 
+    # ML PII detection in shadow mode (D-052): measures, never changes requests
+    pii_shadow = None
+    if settings.pii_gate.enabled:
+        from gateway.security.pii_finder import PIIFinder
+        from gateway.security.pii_gate import PIIGateClient
+        from gateway.security.pii_shadow import PIIShadowAnalyzer
+        from gateway.storage.pii_shadow_store import PIIShadowStore
+
+        gate_cfg = settings.pii_gate
+        pii_shadow = PIIShadowAnalyzer(
+            gate=PIIGateClient(gate_cfg.url, timeout=gate_cfg.timeout),
+            finder=PIIFinder(
+                gate_cfg.finder_url, model=gate_cfg.finder_model, timeout=gate_cfg.finder_timeout
+            ),
+            store=PIIShadowStore(app.state.db_engine)
+            if getattr(app.state, "db_engine", None)
+            else None,
+            threshold=gate_cfg.threshold,
+            sample_rate=gate_cfg.sample_rate,
+            queue_size=gate_cfg.queue_size,
+        )
+        await pii_shadow.start()
+        app.state.pii_shadow = pii_shadow
+        logger.info(
+            "ML PII detection running in shadow mode",
+            gate=gate_cfg.url,
+            finder=f"{gate_cfg.finder_model} @ {gate_cfg.finder_url}",
+            threshold=gate_cfg.threshold,
+            sample_rate=gate_cfg.sample_rate,
+        )
+
     scan_allowlist_ips = settings.security.scan_allowlist_ips
     security_analyzer = AsyncSecurityAnalyzer(
         guard_client=guard_client,
         scan_store=scan_store,
         scan_allowlist_ips=scan_allowlist_ips,
+        pii_shadow=pii_shadow,
     )
     await security_analyzer.start()
     app.state.security_analyzer = security_analyzer
@@ -336,6 +368,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 if retention_days > 0:
                     await app.state.audit_logger.cleanup_old_records(retention_days)
                     await BudgetStore(app.state.db_engine).prune(retention_days)
+                    # Shadow rows hold no PII: they follow audit retention
+                    from gateway.storage.pii_shadow_store import PIIShadowStore
+
+                    await PIIShadowStore(app.state.db_engine).cleanup(retention_days)
                 if security_retention > 0:
                     await app.state.audit_logger.cleanup_old_pii_events(security_retention)
                     if scan_store is not None:
@@ -379,6 +415,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     if hasattr(app.state, "security_analyzer"):
         await app.state.security_analyzer.stop()
         logger.info("Security analyzer stopped")
+
+    if getattr(app.state, "pii_shadow", None):
+        await app.state.pii_shadow.stop()
 
     if hasattr(app.state, "discovery_service"):
         await app.state.discovery_service.stop()

@@ -52,6 +52,8 @@ class HealthResponse(BaseModel):
     audit: dict | None = None
     # Access mode (D-042): keys | solo | dev, and who may skip keys
     access: dict | None = None
+    # ML PII detection shadow mode (D-052): live counters since start
+    pii_gate: dict | None = None
 
 
 def _access_status(config: GatewayConfig | None) -> dict | None:
@@ -100,6 +102,9 @@ async def health_check(request: Request) -> HealthResponse:
         if (shared := getattr(request.app.state, "shared_state", None))
         else None,
         access=_access_status(config),
+        pii_gate={"mode": "shadow", **shadow.stats}
+        if (shadow := getattr(request.app.state, "pii_shadow", None))
+        else None,
         audit=intent_log.status()
         if (intent_log := getattr(request.app.state, "intent_log", None))
         else ({"mode": "sync"} if getattr(request.app.state, "audit_logger", None) else None),

@@ -1863,7 +1863,8 @@ accuracy) is the order below.
 
 ## D-052: Two-stage ML PII detection (Laya gate + extractor model)
 
-- **Status:** Proposed, 2026-10-08. Design review done; not yet built. Claimed by the
+- **Status:** Shadow mode built 2026-10-09 (see "D-052 build" below); enforcement not built.
+  Originally proposed 2026-10-08. Claimed by the
   harness-side session that proposed it; kept here so the number doesn't collide.
 - **Problem:** PII detection is pattern-based (readiness §3): five regex types, no names,
   no addresses, no non-US phones. The proposed next step from the readiness report — a
@@ -1929,9 +1930,48 @@ detected and audited only until there are miss-rate numbers; `NETWORK` audited o
 reference deployment is an internal network). None of this changes what local inference
 receives unless an operator enables scrubbing for that route and category.
 
-**Laya question shape:** one multi-label typed question over these categories (Laya
-supports typed choice questions), not a single yes/no — so routing can differ per category
-and each category is learned separately.
+**Laya question shape:** one probability question (`noul`) per category, all answered in
+the same forward pass, not a single yes/no — so routing can differ per category and each
+category is learned and calibrated separately. (Considered: one multi-label typed choice
+question. Per-category probabilities give a threshold per category, which the enforcement
+policy above needs.)
+
+### D-052 build: shadow pipeline and dataset (built 2026-10-09)
+
+**Decisions (project lead, 2026-10-09):** the gateway's Laya sidecar runs on the Mac
+(192.168.1.187, port 8011, separate from the harness's routing Laya on 8010): "it's a
+400M parameter model, the Mac is perfect." The training set is the security-scan backlog
+labelled by phi4-mini, plus synthetic examples.
+
+- **Resolves the D-041 conflict above:** training text never comes from live redacted
+  audit bodies. It comes from (a) the pre-redaction scan backlog held by
+  `GATEWAY_SECURITY_RETENTION_DAYS=0`, with rows containing redaction placeholders
+  skipped, and (b) synthetic PII, whose spans are exact by construction.
+- **Sidecar:** `tools/laya_pii_sidecar/` — `POST /classify {texts, questions}` →
+  one probability per category per text; refuses to start if a startup self-test
+  (email sentence must outscore a clean one) fails.
+- **Gate client** (`security/pii_gate.py`): chunks long text with overlap; a category's
+  probability is its maximum over chunks. Any failure raises `PIIGateError`.
+- **Extractor** (`security/pii_finder.py`): Ollama `/api/chat` directly (never gateway
+  routes), JSON schema generated from the taxonomy, temperature 0. Every value is located
+  verbatim (all occurrences); values not in the text are discarded and counted as
+  hallucinations.
+- **Shadow analyzer** (`security/pii_shadow.py`): fed from the security analyzer's queue
+  after the request is answered; bounded queue, drops counted. Gate → extractor when the
+  gate is positive, unavailable, or on a sampled negative (`sample_rate`, default 5%);
+  sampled negatives with findings are the gate's miss rate. Regex detections recorded
+  alongside for comparison.
+- **Storage:** `pii_gate_shadow` table (migration `c2f8a4d6e913`): probabilities,
+  categories, counts, timings, reasons. **Never text or values.** Same retention as audit.
+  Live counters on `/health` under `pii_gate`.
+- **Config:** `GATEWAY_PII_GATE_ENABLED` (default off), `_URL`, `_THRESHOLD` (0.3),
+  `_SAMPLE_RATE`, `_FINDER_URL`, `_FINDER_MODEL` (phi4-mini), timeouts, queue size.
+  Shadow mode changes nothing about requests; enforcement is a later decision.
+- **Dataset** (`security/pii_dataset.py`): `synthetic` (seeded; all nine categories plus
+  hard negatives; Luhn-valid cards) and `label-backlog` (deduped by text hash, resumable,
+  random sample). JSONL under `data/pii-dataset/` (gitignored), files created `0600`
+  because they hold raw text. Never commit or export them.
+- **Tests:** `tests/test_pii_gate_shadow.py`.
 
 ## D-053: Review fixes: overflow honors the catalog, budgets strip pins, media endpoints don't crash discovery
 

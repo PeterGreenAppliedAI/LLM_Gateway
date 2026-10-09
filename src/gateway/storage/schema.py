@@ -332,3 +332,36 @@ audit_journal = Table(
     Column("segment", String(32), nullable=False),
     Column("byte_offset", BigInteger, nullable=False),
 )
+
+
+# PII gate shadow results (D-052): what the gate and extractor saw, compared
+# with the regex scanner. Categories, probabilities, counts and timings only:
+# never the text and never the values, so the shadow pipeline can't become a
+# new store of the PII it measures.
+pii_gate_shadow = Table(
+    "pii_gate_shadow",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("request_id", String(64), nullable=False),
+    Column("timestamp", DateTime, default=lambda: datetime.now(UTC), nullable=False),
+    Column("client_id", String(128), nullable=False),
+    Column("task", String(32), nullable=True),
+    Column("model", String(128), nullable=True),
+    Column("text_chars", Integer, nullable=False, default=0),
+    Column("gate_probs", JSON, nullable=True),  # {label: probability}
+    Column("gate_categories", JSON, nullable=True),  # labels at or over the threshold
+    Column("gate_error", String(300), nullable=True),
+    Column("gate_ms", Float, nullable=True),
+    # Why the extractor ran: gate_positive | gate_unavailable | sampled | (null: didn't)
+    Column("finder_reason", String(32), nullable=True),
+    Column("finder_categories", JSON, nullable=True),  # {label: count}
+    Column("finder_hallucinated", Integer, nullable=True),
+    Column("finder_error", String(300), nullable=True),
+    Column("finder_ms", Float, nullable=True),
+    Column("regex_types", JSON, nullable=True),  # what the pattern scanner found
+    # The extractor found PII in a text the gate called clean (measured on
+    # sampled texts): the gate's miss rate is built from these
+    Column("gate_missed", Boolean, nullable=True),
+    Index("ix_pii_gate_shadow_timestamp", "timestamp"),
+    Index("ix_pii_gate_shadow_request_id", "request_id"),
+)

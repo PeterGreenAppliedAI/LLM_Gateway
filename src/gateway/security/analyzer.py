@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from enum import Enum
 
 # Import conditionally to avoid circular imports
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from gateway.observability import get_logger
 from gateway.security.guard import GraniteGuardianClient, GuardResult, LlamaGuardClient
@@ -122,6 +122,7 @@ class AsyncSecurityAnalyzer:
         max_queue_size: int = 1000,
         max_alerts: int = 1000,
         alert_callback: Callable[[SecurityAlert], Awaitable[None]] | None = None,
+        pii_shadow: Any = None,
     ):
         """Initialize the analyzer.
 
@@ -138,6 +139,7 @@ class AsyncSecurityAnalyzer:
         self.detector = detector or InjectionDetector()
         self.guard_client = guard_client
         self.scan_store = scan_store
+        self.pii_shadow = pii_shadow  # PIIShadowAnalyzer (D-052), optional
         self._scan_allowlist_ips: set[str] = set(scan_allowlist_ips or [])
         # Detector for embeddings: skip delimiter attacks to avoid false positives
         # from model vocabulary tokens like [SYSTEM], [INST] etc.
@@ -229,6 +231,11 @@ class AsyncSecurityAnalyzer:
             response_content=response_content,
             source_ip=source_ip,
         )
+
+        # ML PII detection in shadow mode (D-052): its own queue, so a slow
+        # extractor never backs up the regex/guard analysis
+        if self.pii_shadow is not None:
+            self.pii_shadow.submit(request_id, client_id, messages, task=task, model=model)
 
         try:
             self._queue.put_nowait(request)

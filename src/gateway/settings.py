@@ -148,6 +148,41 @@ class PIISettings(BaseSettings):
     )
 
 
+class PIIGateSettings(BaseSettings):
+    """ML PII detection, shadow mode (D-052). Off by default.
+
+    The gate is a Laya sidecar (POST /classify); the extractor is an Ollama
+    model called directly. Shadow mode measures and records; it never
+    changes a request.
+    """
+
+    model_config = SettingsConfigDict(
+        env_prefix="GATEWAY_PII_GATE_",
+        extra="ignore",
+    )
+
+    enabled: bool = Field(default=False, description="Run the ML PII pipeline in shadow mode")
+    url: str = Field(
+        default="http://localhost:8011", description="Laya PII sidecar base URL (POST /classify)"
+    )
+    timeout: float = Field(default=5.0, gt=0, le=60.0)
+    threshold: float = Field(
+        default=0.3, ge=0.0, le=1.0, description="Gate probability that counts as present"
+    )
+    sample_rate: float = Field(
+        default=0.05,
+        ge=0.0,
+        le=1.0,
+        description="Share of gate-negative texts also sent to the extractor (measures misses)",
+    )
+    finder_url: str = Field(
+        default="http://localhost:11434", description="Ollama endpoint serving the extractor"
+    )
+    finder_model: str = Field(default="phi4-mini", description="Extractor model")
+    finder_timeout: float = Field(default=60.0, gt=0, le=600.0)
+    queue_size: int = Field(default=500, ge=1, le=100_000)
+
+
 class SecuritySettings(BaseSettings):
     """Security scanning configuration.
 
@@ -286,6 +321,9 @@ class Settings(BaseSettings):
 
     # Security scanning
     security: SecuritySettings = Field(default_factory=SecuritySettings)
+
+    # ML PII detection, shadow mode (D-052)
+    pii_gate: PIIGateSettings = Field(default_factory=PIIGateSettings)
 
     def __repr__(self) -> str:
         """Safe repr that doesn't expose secrets."""
