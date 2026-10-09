@@ -1860,3 +1860,92 @@ accuracy) is the order below.
   - an allowed list applies per task;
   - a denied pin is refused;
   - an unknown endpoint name is a config error.
+
+## D-052: Two-stage ML PII detection (Laya gate + extractor model)
+
+- **Status:** Proposed, 2026-10-08. Design review done; not yet built. Claimed by the
+  harness-side session that proposed it; kept here so the number doesn't collide.
+- **Problem:** PII detection is pattern-based (readiness §3): five regex types, no names,
+  no addresses, no non-US phones. The proposed next step from the readiness report — a
+  small classifier in front of the patterns — now has a concrete design.
+- **Design (agreed in review):**
+  - **Gate:** Laya (ModernBERT-large decision model, Apache-2.0) in a sidecar answering
+    "contains PII: yes/no" with a calibrated probability. Verified against the model card:
+    `pip install laya`, `Router().predict(state, questions)`, `noul` questions return
+    probabilities. The 512-token English checkpoint needs chunking; `laya-multilingual`
+    reads 8,192 tokens and is smaller and slightly faster — test both in shadow.
+  - **Finder:** phi4-mini over Ollama on "yes", JSON `[{type, value}]` at temperature 0.
+    Values are matched verbatim in the original text; anything that doesn't appear is
+    discarded and counted. Hashed audit trail and per-message provenance (D-048) unchanged.
+  - **Fallbacks:** Laya down → run the finder anyway (fail toward checking). Finder down
+    or emitting bad JSON → regex, recorded in audit and metrics.
+  - **Rollout:** shadow first (sampled "no" prompts also go to the finder, measuring the
+    gate's miss rate), then enforce by config.
+- **Constraints found in review:**
+  - **Base Laya is weak off the shelf** (vendor's own benchmark: 0.362 base vs 0.766
+    fine-tuned) and the card has no PII examples. The shadow phase and a fine-tune are
+    prerequisites, not polish. Calibration temperatures must be refit on our data.
+  - **The D-041 redaction invariant conflicts with the training loop.** Stored messages
+    are always PII-redacted; a gate trained on redacted text learns to detect placeholders.
+    The sampled training slice needs either a separately-scoped raw store (a deliberate,
+    logged exception) or synthetic-PII augmentation. Unresolved; decide before building.
+  - **Finder calls must bypass audit body storage**: audit redaction is the regex scrubber,
+    which by definition misses exactly the PII this pipeline exists to catch.
+  - **The Laya already running at 192.168.1.187:8010 is the harness's routing shadow**
+    (`/v1/systemone`), not a PII model. The gateway needs its own instance and checkpoint;
+    the `laya-serve` wrapper is reusable.
+  - CPU inference is 193–464 ms; the sidecar needs a GPU slice for the ~35 ms figure.
+
+## D-053: Review fixes: overflow honors the catalog, budgets strip pins, media endpoints don't crash discovery
+
+- **Status:** Implemented, 2026-10-09, `fe2863a` and `dbc2dec`. Amends D-031/D-032 and
+  D-043/D-051.
+- **Problem (external review of the capacity work, plus first real media config):**
+  - **Streaming overflow → 404 under load.** Admission overflow reached fallback endpoints
+    whenever the primary was busy, and the streaming candidate list appended the whole
+    fallback chain with no has-model filter. A busy primary sent streams to an idle endpoint
+    without the model; the upstream 404 is non-retryable and went to the client. Under
+    `least_loaded` an idle, uncapped endpoint sorted ahead even without saturation.
+  - **Budget reservations used the pinned model string.** `gpu-node/model` missed the tier
+    globs: admission weighted it at the default (expensive) multiplier and skipped the
+    per-tier global cap, while settlement stripped the pin — the two sides disagreed.
+  - **The first configured media endpoint crashed startup.** `discover_all` skipped
+    media-only endpoints when building its task list but indexed results against a list
+    that only skipped disabled ones: IndexError, gateway down.
+- **Fix:**
+  - The streaming order applies the same catalog filter as non-streaming dispatch: fall
+    back only to endpoints that have the model; an unknown model (discovery lag) keeps the
+    full chain so availability wins.
+  - The enforcer strips an `endpoint/` prefix before reserving, but only when the prefix
+    names an enabled endpoint — mirroring `parse_provider_from_model`, so Hugging Face
+    org names stay model names.
+  - Discovery zips results against the same filtered list it built tasks from.
+- **What works now:** `test_overflow_and_pin_fixes.py` — fallbacks without the model are
+  excluded (streaming), unknown models keep the chain, pinned requests reserve at their
+  real tier, unknown models still get the default multiplier, media endpoints coexist
+  with discovery. All three fixes fail on the old code.
+
+## D-054: Routing policy is a dashboard knob
+
+- **Status:** Implemented, 2026-10-09, `552ed65`.
+- **Problem:** pinning a task to an endpoint ("all embeddings go to the Mini"), giving a
+  model pattern a home, or changing the load-balancing strategy took a gateway.yaml edit
+  and a restart. The operator's standing preference is runtime configuration from the
+  dashboard (same as PII scrubbing and budget tiers).
+- **Decision:**
+  - `GET`/`PUT /api/routing/config` (admin only) manage three things: **task pins**
+    (D-049 `task_endpoints`, enforced on every routing path, fallback included), **model
+    homes** (`model_defaults`, a preference not a pin), and **strategy**
+    (`priority`/`least_loaded`).
+  - Saved via `runtime_settings` (the D-042/PII pattern): in effect on the next request,
+    survives restarts, overrides gateway.yaml. Task pins swap atomically on the live
+    enforcer. `endpoint_priority` and `ambiguous_behavior` stay yaml-only.
+  - PUT validates endpoint names against enabled endpoints and rejects duplicate task
+    policies. Changes are logged with who made them.
+- **Operational state set with it (2026-10-09):** embeddings are pinned to `the-mini` —
+  exclusively, by operator decision: if the Mini is down, embeddings fail loudly rather
+  than spilling onto the GPU boxes. Strategy is `priority`; `least_loaded` stays available
+  as the dashboard switch, with per-endpoint `max_concurrent` already configured.
+- **What works now:** `test_routing_config.py` — defaults shown, PUT applies to the live
+  enforcer and resolution, strategy switches, unknown endpoints and duplicate tasks are
+  rejected, and a saved policy survives a simulated restart.

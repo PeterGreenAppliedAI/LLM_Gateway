@@ -187,6 +187,10 @@ Z-Image), LocalAI diffusers and sd.cpp.
 - **speaches:** models must be downloaded (`POST /v1/models/{id}`) or preloaded
   (`PRELOAD_MODELS`) before use.
 - **vLLM-Omni:** `vllm serve <model> --omni`, one model per server.
+- **mlx-audio (Apple Silicon):** serves TTS and STT from one OpenAI-compatible server —
+  verified through the gateway 2026-10-09 as a single endpoint with
+  `capabilities: [tts, stt]` (Kokoro-82M-bf16 + whisper-large-v3-turbo-asr-fp16;
+  speech→transcription roundtrip exact). Voices and models appear on `/v1/models`.
 
 ## Differences the gateway smooths over
 - **Discovery shapes differ.** Voice lists come back as objects, strings, config maps or
@@ -195,8 +199,9 @@ Z-Image), LocalAI diffusers and sd.cpp.
   registry.
 - **Streaming signals differ:**
   - Kokoro uses `stream` and defaults to on; OpenAI and vLLM-Omni use `stream_format`.
-  - STT SSE event names: `transcription.chunk` (vLLM) vs `transcript.text.*` (OpenAI,
-    speaches).
+  - STT SSE event names differ (`transcription.chunk` on vLLM vs `transcript.text.*` on
+    OpenAI and speaches) — **the gateway does NOT normalize these**: STT stream bytes are
+    relayed raw, so clients must handle whichever dialect the serving engine speaks.
 - **Format coverage:** several engines are WAV-only.
 - **Ranges differ** (Kokoro speed 0.25–4.0, speaches-Kokoro 0.5–2.0), and so do language code
   styles (ISO-639-1 vs BCP-47 on NIM).

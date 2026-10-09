@@ -1,6 +1,7 @@
 # Client Deployment Readiness Assessment
 
-_Last reviewed: 2026-10-07, after a second external review of `main` at `1e74243`._
+_Last reviewed: 2026-10-09, after the second review's follow-up fixes landed (D-053, D-054)
+and the controlled pilot described in the verdict went live on a reference deployment._
 _Decisions behind each fix: [DECISIONS.md](DECISIONS.md)._
 
 This report checks the code against what a production gateway needs to handle real-time
@@ -42,7 +43,9 @@ for Windows.
 ## Verdict
 
 **Treat the gateway as ready for a controlled pilot:** one organization, a known set of
-clients, an operator watching it. It is not yet ready for broad deployment. What holds, and
+clients, an operator watching it. It is not yet ready for broad deployment. A pilot of
+exactly this shape has been running since 2026-10-09: one organization, six endpoints,
+keyed and network-scoped keyless clients, migrated 3.3 GB production database. What holds, and
 exactly how far:
 
 - **Authentication and attribution:** every request is authenticated, or comes from a
@@ -85,6 +88,7 @@ exactly how far:
 | Budget check passed with `max_tokens` omitted, at exactly the limit, and under concurrency | D-043 `68f5968` | `token_budget.enabled` | `test_budget_reservations.py` | All |
 | Budget reserved one generation for `n` choices or prompt lists (n=8 charged 648 tokens against a 100-token budget) | D-051 `9c811b0` | `token_budget.enabled` | `test_budget_reservations.py` | All |
 | Media admission checked an empty request (400-character speech passed a 10-token budget) | D-051 `9c811b0` | `token_budget.enabled` | `test_audio_routes.py::TestMediaBudgetAdmission` | All |
+| Pinned model names (`endpoint/model`) missed budget tiers: default multiplier at admission, per-tier cap unchecked, settlement disagreed | D-053 `fe2863a` | `token_budget.enabled` | `test_overflow_and_pin_fixes.py::TestBudgetPinStripping` | All |
 | Task/endpoint policy was never applied, and couldn't be configured | D-049 `6c269bf` | `task_endpoints` in gateway.yaml | `test_task_endpoints.py` | All |
 | Budgets and dashboard tier changes reset on restart | D-037 `b6a9bb3` | Default (database) | `test_budget_persistence.py` | All, SQLite + PG |
 | No per-key concurrency limit or batch class | D-034 `22ca369` | `max_concurrent`, `priority` on a key | `test_key_limits.py` | All, SQLite + PG |
@@ -94,6 +98,7 @@ exactly how far:
 
 | Pri | Gap | Where | Detail |
 |-----|-----|-------|--------|
+| P2 | The admin key is also valid for inference and bypasses every per-key limit (models, endpoints, RPM, concurrency, budgets); the dashboard keeps it in browser localStorage | `routes/dependencies.py` (D-054 dashboard playground path) | Use it for operating, not for traffic. Mint client keys for anything that sends load. |
 | P1 | Config-file keys can't carry model, endpoint or RPM limits | `config.py` `ApiKeyConfig` | YAML keys support `max_concurrent` and `priority` (D-034) but not `allowed_models`, `allowed_endpoints` or `rate_limit_rpm`. DB-created keys support all of them. |
 | P1 | No per-key token budget override | `policy/enforcer.py` (`daily_limit_override=None # TODO`) | Every key shares its tier's limit. |
 | P1 | Budget reservations are per process | `policy/token_budget.py` | With several gateway processes sharing a budget, each can admit up to the remaining budget once (D-043, Scope). Needs shared reservations (the optional Redis, D-035) before multi-worker budgets are hard limits. |
@@ -108,6 +113,8 @@ exactly how far:
 |---|---|---|---|---|
 | Health checks ran inside requests to unhealthy endpoints | D-031 `bed2e42` | Default | `test_circuit.py` | All |
 | No concurrency limit, queue or overflow across endpoints | D-032 `21a6cb9` | `max_concurrent` per endpoint; `resolution.strategy: least_loaded` optional | `test_admission.py`, `test_capacity_limits.py` | All |
+| Overflow sent streams to endpoints without the model (404 under load); key `target_endpoint` traffic too | D-053 `fe2863a` | Default | `test_overflow_and_pin_fixes.py::TestStreamOrderCatalogFilter` | All |
+| The first configured media endpoint crashed startup (discovery IndexError) | D-053 `dbc2dec` | Default | `test_overflow_and_pin_fixes.py::TestDiscoveryWithMediaEndpoints` | All |
 | httpx pool not sized; pool waits counted as engine failures | D-033 `25413f0` | `max_concurrent` per endpoint | `test_capacity_limits.py` | All |
 | Rate limits and slots per process only | D-035 `e251745` | `GATEWAY_REDIS_URL` and the `redis` extra; in-memory without it | `test_shared_state_redis.py` | Redis |
 | Two DB writes before each authenticated request completed; `database is locked` 500s at 50 concurrent | D-038 `0c7148a`, D-040 `4390209` | Default (`GATEWAY_DB_AUDIT_DURABILITY=auto`, key cache 30 s) | `test_intent_log.py`, `test_key_cache.py` | All, SQLite + PG |
@@ -155,7 +162,7 @@ exactly how far:
 | Pri | Gap | Where | Detail |
 |-----|-----|-------|--------|
 | P1 | Security scans dropped silently under load | `security/analyzer.py` `queue_request` | A full queue drops the scan and increments an internal counter only. Expose it as a metric and alert on it. |
-| P1 | PII detection is pattern-based | `security/pii.py` | Email, US phone, SSN, card numbers and IPv4 only. Names, postal addresses, non-US phone formats and free-text identifiers aren't detected. A small classifier model (does this text contain PII: yes/no) in front of the patterns is the proposed next step. |
+| P1 | PII detection is pattern-based | `security/pii.py` | Email, US phone, SSN, card numbers and IPv4 only. Names, postal addresses, non-US phone formats and free-text identifiers aren't detected. A small classifier model (does this text contain PII: yes/no) in front of the patterns is the proposed next step — now designed as D-052 (Laya gate + extractor), awaiting the training-data decision. |
 | P1 | `usage_daily` never filled automatically | `storage/audit.py` `aggregate_daily_usage` | No scheduler calls it. |
 | P2 | Fallback and routing reason not stored | `storage/schema.py` `audit_log` | `was_fallback` and `attempted_providers` exist on `DispatchResult` but aren't persisted. The operator view needs them (section 5). |
 
@@ -166,7 +173,7 @@ exactly how far:
 | P1 | `/health` never fails | `routes/health.py` | It always returns 200, "degraded" when every endpoint is down. It reports the database, audit backlog, circuits and access mode, but never as a failing status. Split it into `/livez` and `/readyz`, with 503 when not ready. |
 | P1 | No graceful drain for streams | `docker/Dockerfile`, `start-gateway.sh` | No `--timeout-graceful-shutdown`, so deploys cut active streams. The audit intent log and budget sync do flush on a clean shutdown. |
 | P1 | No trusted-proxy support | `security/access.py` | A request with proxy headers never counts as local (D-042), which is safe. But behind a proxy, `source_ip`, `allowed_networks` and `scan_allowlist_ips` all see the proxy's address. Compose relies on the admin key for this reason (D-044). |
-| P1 | No config hot-reload | — | YAML endpoints, keys and limits need a restart. Budgets survive it (D-037). In-memory rate-limit windows reset unless Redis is configured (D-035). |
+| P1 | Config hot-reload is partial | — | Routing policy (task pins, model homes, strategy) is runtime-configurable from the dashboard and survives restarts (D-054), as are budgets (D-037) and PII scrubbing (D-041). YAML endpoints, keys and rate limits still need a restart. In-memory rate-limit windows reset unless Redis is configured (D-035). |
 | P2 | `/metrics` unauthenticated | `routes/health.py` | It exposes client IDs and model names. Fine on a private network; otherwise put it on a separate port. |
 | P2 | Not yet in place | — | Helm chart, HA guide, backup and restore runbook, upgrade guide, secret rotation, Vault/KMS, egress allowlist for hybrid mode. |
 
