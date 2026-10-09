@@ -749,6 +749,40 @@ async def resolve_access_scope(request: Request, auth: AuthResult, model: str | 
     return updates
 
 
+async def listing_visibility(request: Request, auth: AuthResult):
+    """Predicate for model listings: what this caller may see.
+
+    Listings previously enumerated every discovered model to any caller.
+    Visibility now matches routability: the key's model globs and endpoint
+    allowlist, intersected with the environment's endpoints and approved
+    models. (Enforcement at dispatch is unchanged; this closes the
+    information-disclosure gap.)
+    """
+    import fnmatch
+
+    from gateway.catalog.models import model_approved_in_environment
+
+    environment = resolve_environment(request, auth)
+    scope = await resolve_access_scope(request, auth, None)
+    allowed_endpoints = set(scope["allowed_endpoints"]) if "allowed_endpoints" in scope else None
+    key_models = auth.allowed_models or None
+
+    def visible(model_name: str, endpoint_name: str | None) -> bool:
+        if (
+            allowed_endpoints is not None
+            and endpoint_name is not None
+            and endpoint_name not in allowed_endpoints
+        ):
+            return False
+        if environment is not None and not model_approved_in_environment(model_name, environment):
+            return False
+        if key_models and not any(fnmatch.fnmatch(model_name, p) for p in key_models):
+            return False
+        return True
+
+    return visible
+
+
 def setup_request_context(
     request_id: str | None = None,
     client_id: str = "default",

@@ -12,6 +12,7 @@ engine without adapter changes.
 """
 
 import asyncio
+from collections.abc import Callable
 
 from fastapi import Request
 
@@ -50,6 +51,7 @@ async def dispatch_choices(
     request: Request,
     dispatcher: Dispatcher,
     internal_requests: list[InternalRequest],
+    on_partial_usage: Callable[[list[DispatchResult]], None] | None = None,
 ) -> list[DispatchResult]:
     """Dispatch requests concurrently; results are in input order.
 
@@ -69,6 +71,26 @@ async def dispatch_choices(
     tasks = [asyncio.ensure_future(one(r)) for r in internal_requests]
     try:
         return await run_unless_disconnected(request, asyncio.gather(*tasks))
+    except BaseException:
+        # All-or-nothing for the RESPONSE, but completed generations did
+        # real upstream work: report them so the route charges their usage
+        # (the hold would otherwise be released with the work unaccounted)
+        if on_partial_usage is not None:
+            completed = [
+                t.result()
+                for t in tasks
+                if t.done() and not t.cancelled() and t.exception() is None
+            ]
+            if completed:
+                try:
+                    on_partial_usage(completed)
+                except Exception:
+                    import logging
+
+                    logging.getLogger(__name__).exception(
+                        "Failed to charge partially completed generations"
+                    )
+        raise
     finally:
         for task in tasks:
             if not task.done():

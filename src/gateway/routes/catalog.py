@@ -21,7 +21,9 @@ from gateway.models.common import HealthStatus, TaskType
 from gateway.models.internal import InternalRequest, Message, MessageRole
 from gateway.observability import get_logger
 from gateway.routes.dependencies import (
+    AuthResult,
     authenticate,
+    get_auth,
     get_config,
     get_dispatcher,
     get_registry,
@@ -57,10 +59,13 @@ class ModelsResponse(BaseModel):
 @router.get("/v1/models", response_model=ModelsResponse)
 async def list_models(
     request: Request,
-    client_id: Annotated[str, Depends(authenticate)],
+    auth: Annotated[AuthResult, Depends(get_auth)],
     registry: Annotated[ProviderRegistry, Depends(get_registry)],
 ) -> ModelsResponse:
-    """List available models across all providers."""
+    """List models the caller can actually use (key and environment scoped)."""
+    from gateway.routes.dependencies import listing_visibility
+
+    visible = await listing_visibility(request, auth)
     models = []
 
     for provider_name in registry.list_providers():
@@ -75,6 +80,8 @@ async def list_models(
             provider_models = await adapter.list_models()
 
             for model in provider_models:
+                if not visible(model.name, provider_name):
+                    continue
                 models.append(
                     ModelInfo(
                         id=f"{provider_name}/{model.name}",

@@ -207,9 +207,16 @@ async def chat_completions(
     sanitized_messages = []
     for msg in body.messages:
         check_content_parts(msg.content)
-        sanitized_messages.append(
-            {"role": msg.role, "content": sanitize_content(sanitizer, msg.content)}
-        )
+        entry: dict = {"role": msg.role, "content": sanitize_content(sanitizer, msg.content)}
+        if msg.tool_calls:
+            # Replayed tool calls carry user-derived values in arguments
+            # (OpenAI keeps them as a JSON string); include them so PII
+            # scanning and scrubbing cover them too
+            entry["tool_calls"] = [
+                {"function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                for tc in msg.tool_calls
+            ]
+        sanitized_messages.append(entry)
 
     # PII detection (always flags) + optional scrubbing (per-route)
     if pii_scrubber:
@@ -250,6 +257,12 @@ async def chat_completions(
     for i, msg in enumerate(body.messages):
         if i < len(sanitized_messages):
             msg.content = sanitized_messages[i]["content"]
+            scanned_calls = sanitized_messages[i].get("tool_calls")
+            if scanned_calls and msg.tool_calls:
+                for tc, scanned in zip(msg.tool_calls, scanned_calls):
+                    args = scanned.get("function", {}).get("arguments")
+                    if isinstance(args, str):
+                        tc.function.arguments = args
 
     # Convert to internal format
     internal_request = body.to_internal(client_id=client_id, task=TaskType.CHAT)
@@ -301,7 +314,19 @@ async def chat_completions(
     # Non-streaming: one upstream generation per requested choice (n),
     # run concurrently. DispatchError propagates to exception handler.
     with metrics.track_request("dispatch"):
-        results = await dispatch_choices(request, dispatcher, [internal_request] * body.n)
+        results = await dispatch_choices(
+            request,
+            dispatcher,
+            [internal_request] * body.n,
+            on_partial_usage=lambda completed: enforcer.record_token_usage(
+                client_id,
+                completed[0].response.model,
+                sum(
+                    r.response.usage.prompt_tokens + r.response.usage.completion_tokens
+                    for r in completed
+                ),
+            ),
+        )
 
     prompt_tokens, completion_tokens = _summed_usage(results)
     ctx.record_complete(prompt_tokens=prompt_tokens, completion_tokens=completion_tokens)
@@ -553,7 +578,19 @@ async def completions(
 
     # Run concurrently, returned in OpenAI order (before, extra prompts were dropped)
     with metrics.track_request("dispatch"):
-        results = await dispatch_choices(request, dispatcher, choice_requests)
+        results = await dispatch_choices(
+            request,
+            dispatcher,
+            choice_requests,
+            on_partial_usage=lambda completed: enforcer.record_token_usage(
+                client_id,
+                completed[0].response.model,
+                sum(
+                    r.response.usage.prompt_tokens + r.response.usage.completion_tokens
+                    for r in completed
+                ),
+            ),
+        )
 
     prompt_tokens, completion_tokens = _summed_usage(results)
     ctx.record_complete(prompt_tokens=prompt_tokens, completion_tokens=completion_tokens)

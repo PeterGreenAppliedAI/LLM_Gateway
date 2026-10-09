@@ -88,19 +88,38 @@ async def gateway_error_handler(request: Request, exc: GatewayError) -> JSONResp
         error_type=exc.code.value,
     )
 
+    # Upstream errors can echo submitted values into their message: redact
+    # before this text reaches logs or the audit trail
+    audit_logger = getattr(request.app.state, "audit_logger", None)
+    safe_message = exc.message
+    if audit_logger is not None:
+        safe_message = audit_logger._redact_text(exc.message)
+
     # Log based on severity
     if exc.category == ErrorCategory.INTERNAL:
-        logger.exception(f"Internal error: {exc.message}")
+        logger.exception(f"Internal error: {safe_message}")
     elif exc.category in (ErrorCategory.DISPATCH, ErrorCategory.PROVIDER):
-        logger.warning(f"{exc.category.value} error: {exc.message}")
+        logger.warning(f"{exc.category.value} error: {safe_message}")
     else:
-        logger.info(f"{exc.category.value} error: {exc.message}")
+        logger.info(f"{exc.category.value} error: {safe_message}")
 
-    # Audit dispatch/provider failures — without this, 503s and upstream
-    # errors never appear in the audit log at all, so failed requests are
-    # invisible to the dashboard and post-hoc forensics.
-    if exc.category in (ErrorCategory.DISPATCH, ErrorCategory.PROVIDER):
-        audit_logger = getattr(request.app.state, "audit_logger", None)
+    # Audit failures AND denials. Dispatch/provider errors were invisible
+    # to the dashboard without this; policy, rate-limit and auth denials
+    # matter when investigating misuse or proving enforcement. Credentials
+    # never appear in these messages (auth errors are generic).
+    audited_categories = (
+        ErrorCategory.DISPATCH,
+        ErrorCategory.PROVIDER,
+        ErrorCategory.POLICY,
+        ErrorCategory.RATE_LIMIT,
+        ErrorCategory.AUTHENTICATION,
+    )
+    if exc.category in audited_categories:
+        denial = exc.category in (
+            ErrorCategory.POLICY,
+            ErrorCategory.RATE_LIMIT,
+            ErrorCategory.AUTHENTICATION,
+        )
         if audit_logger and ctx:
             try:
                 await audit_logger.log_request(
@@ -109,12 +128,12 @@ async def gateway_error_handler(request: Request, exc: GatewayError) -> JSONResp
                     task=ctx.task or "unknown",
                     model=ctx.model or "unknown",
                     endpoint=exc.details.get("provider", "unknown"),
-                    status="error",
+                    status="denied" if denial else "error",
                     error_code=exc.code.value,
                     error_message=exc.message[:500],
                 )
             except Exception:
-                logger.exception("Failed to audit-log dispatch error")
+                logger.exception("Failed to audit-log error/denial")
 
     # Build response headers
     headers = {}

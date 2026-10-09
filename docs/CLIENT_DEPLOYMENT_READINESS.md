@@ -50,9 +50,13 @@ exactly how far:
 
 - **Authentication and attribution:** every request is authenticated, or comes from a
   network you allowed, and is attributed to a client.
-- **Budgets are hard limits within one gateway process.** That covers every generation a
-  request asks for (`n`, prompt lists) and media (D-043, D-051). Across several processes,
-  each can admit up to the remaining budget once, because reservations aren't shared yet
+- **Budgets are enforced bounds within one gateway process.** Text generation requires an
+  explicit output limit when budgets are on (capless requests get a 4xx, D-055), every
+  generation is reserved (`n`, prompt lists, media; D-043, D-051), and completed work in a
+  partially failed batch is charged (D-055). Input-side estimates are approximate
+  (~4 chars/token), so totals can exceed the limit by the estimation error — treat budgets
+  as tight admission control, not to-the-token accounting. Across several processes, each
+  can admit up to the remaining budget once, because reservations aren't shared yet
   (section 1).
 - **The audit trail survives crashes** (D-038), and its PII events point at the input they
   came from (D-048).

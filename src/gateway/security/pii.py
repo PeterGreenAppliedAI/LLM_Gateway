@@ -234,9 +234,67 @@ class PIIScrubber:
                 if scrub:
                     new_msg["content"] = new_parts
 
+            # Tool-call arguments carry user-derived values too (an agent
+            # replaying history sends them back verbatim). Scan every string
+            # inside arguments; scrub in place, preserving the JSON shape.
+            tool_calls = msg.get("tool_calls")
+            if isinstance(tool_calls, list) and tool_calls:
+                new_calls = []
+                changed = False
+                for call in tool_calls:
+                    if not isinstance(call, dict):
+                        new_calls.append(call)
+                        continue
+                    function = call.get("function")
+                    arguments = function.get("arguments") if isinstance(function, dict) else None
+                    if not isinstance(arguments, (dict, list, str)):
+                        new_calls.append(call)
+                        continue
+                    scrubbed_args, found = self._scan_structure(
+                        arguments, msg_index, role, results, scrub
+                    )
+                    if scrub and found:
+                        new_call = dict(call)
+                        new_call["function"] = {**function, "arguments": scrubbed_args}
+                        new_calls.append(new_call)
+                        changed = True
+                    else:
+                        new_calls.append(call)
+                if scrub and changed:
+                    new_msg["tool_calls"] = new_calls
+
             output_messages.append(new_msg)
 
         return output_messages, results
+
+    def _scan_structure(self, value, msg_index, role, results, scrub):
+        """Scan every string in a JSON-like structure; return (maybe-scrubbed copy, found)."""
+        if isinstance(value, str):
+            if not value:
+                return value, False
+            result = self.scan(value, scrub=scrub)
+            if result.has_pii:
+                results.append(PIIFinding(msg_index, role, value, result))
+                if scrub and result.scrubbed_text is not None:
+                    return result.scrubbed_text, True
+                return value, True
+            return value, False
+        if isinstance(value, dict):
+            out = {}
+            found = False
+            for k, v in value.items():
+                out[k], f = self._scan_structure(v, msg_index, role, results, scrub)
+                found = found or f
+            return out, found
+        if isinstance(value, list):
+            out_list = []
+            found = False
+            for v in value:
+                item, f = self._scan_structure(v, msg_index, role, results, scrub)
+                out_list.append(item)
+                found = found or f
+            return out_list, found
+        return value, False
 
     def redact(self, value):
         """Return a copy of a JSON-like value with PII replaced in every string.

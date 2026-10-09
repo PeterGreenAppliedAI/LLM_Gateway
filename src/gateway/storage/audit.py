@@ -130,7 +130,8 @@ class AuditLogger:
             "temperature": temperature,
             "status": status,
             "error_code": error_code,
-            "error_message": error_message[:1000] if error_message else None,
+            # Upstream errors echo submitted values; redact like a body
+            "error_message": self._redact_text(error_message[:1000]) if error_message else None,
             "latency_ms": latency_ms,
             "time_to_first_token_ms": time_to_first_token_ms,
             "tokens_per_second": tokens_per_second,
@@ -290,6 +291,17 @@ class AuditLogger:
             records_remaining=len(failed_lines),
         )
         return written
+
+    def _redact_text(self, text: str) -> str:
+        """Redact a free-text field (error messages). Fails closed."""
+        if self.body_redactor is None:
+            return text
+        try:
+            redacted = self.body_redactor(text)
+            return redacted if isinstance(redacted, str) else "[REDACTION FAILED]"
+        except Exception:
+            logger.exception("Error-message redaction failed; text not stored")
+            return "[REDACTION FAILED]"
 
     def _redact(self, body: Any) -> Any:
         if self.body_redactor is None:

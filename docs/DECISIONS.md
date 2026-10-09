@@ -1949,3 +1949,9 @@ accuracy) is the order below.
 - **What works now:** `test_routing_config.py` — defaults shown, PUT applies to the live
   enforcer and resolution, strategy switches, unknown endpoints and duplicate tasks are
   rejected, and a saved policy survives a simulated restart.
+
+## D-055: Third external review (2026-10-09)
+
+- **Status:** Implemented, 2026-10-09. Seven findings, all confirmed and fixed; see the
+  implementing commit message and `tests/test_review_2026_10_09.py` (one regression test
+  per finding) for the details of each.

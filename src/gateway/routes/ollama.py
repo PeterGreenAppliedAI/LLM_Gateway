@@ -42,6 +42,7 @@ from gateway.policy import PolicyEnforcer, PolicyViolation
 from gateway.routes.dependencies import (
     AuthResult,
     get_audit_logger,
+    get_auth,
     get_dispatcher,
     get_enforcer,
     get_inference_auth,
@@ -714,19 +715,27 @@ async def _stream_ollama_generate(
 
 
 @router.get("/tags")
-async def ollama_tags(request: Request):
+async def ollama_tags(request: Request, auth: Annotated[AuthResult, Depends(get_auth)]):
     """Ollama-compatible list models endpoint.
 
-    Returns all discovered models from all endpoints.
+    Keyless callers follow the same anonymous-network policy as inference
+    (stock-Ollama clients on permitted networks keep keyless discovery).
+    Listings show what the caller can actually route to: key model globs,
+    endpoint allowlists and environment approval applied.
     """
+    from gateway.routes.dependencies import listing_visibility
+
     registry = getattr(request.app.state, "registry", None)
     if not registry:
         return OllamaTagsResponse(models=[])
 
+    visible = await listing_visibility(request, auth)
     catalog = registry.catalog
     models = []
 
     for discovered in catalog.discovered:
+        if not visible(discovered.name, discovered.endpoint):
+            continue
         models.append(
             OllamaModelInfo(
                 name=discovered.name,

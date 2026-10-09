@@ -29,12 +29,30 @@ def check_content_parts(content: Any) -> None:
     if not isinstance(content, list):
         return
     for part in content:
-        kind = part.get("type") if isinstance(part, dict) else None
+        if not isinstance(part, dict):
+            raise ValidationError(
+                message="Content parts must be objects like "
+                '{"type": "text", "text": ...}; got a bare value'
+            )
+        kind = part.get("type")
         if kind == "text":
+            if not isinstance(part.get("text", ""), str):
+                raise ValidationError(message='A text part\'s "text" must be a string')
             continue
         if kind == "image_url":
-            url = (part.get("image_url") or {}).get("url", "")
-            if _DATA_IMAGE.match(url):
+            image_url = part.get("image_url")
+            # Accept both OpenAI shapes: {"url": ...} and the bare string
+            # some clients send. Anything else is a 4xx, never a 500.
+            if isinstance(image_url, str):
+                url = image_url
+            elif isinstance(image_url, dict):
+                url = image_url.get("url", "")
+            else:
+                raise ValidationError(
+                    message='An image_url part needs "image_url" as an object '
+                    '{"url": "data:image/..."} or a data-URL string'
+                )
+            if isinstance(url, str) and _DATA_IMAGE.match(url):
                 continue
             raise ValidationError(
                 message="Image URLs aren't fetched by the gateway; send the image inline "
@@ -51,12 +69,20 @@ def sanitize_content(sanitizer: Sanitizer, content: Any) -> Any:
     if isinstance(content, str):
         return sanitizer.sanitize(content).sanitized
     if isinstance(content, list):
-        return [
-            {**part, "text": sanitizer.sanitize(part.get("text") or "").sanitized}
-            if part.get("type") == "text"
-            else part
-            for part in content
-        ]
+        normalized = []
+        for part in content:
+            if not isinstance(part, dict):
+                normalized.append(part)  # check_content_parts rejects these
+            elif part.get("type") == "text":
+                normalized.append(
+                    {**part, "text": sanitizer.sanitize(part.get("text") or "").sanitized}
+                )
+            elif part.get("type") == "image_url" and isinstance(part.get("image_url"), str):
+                # Normalize the bare-string shape so adapters see one shape
+                normalized.append({**part, "image_url": {"url": part["image_url"]}})
+            else:
+                normalized.append(part)
+        return normalized
     return content if content is not None else ""
 
 

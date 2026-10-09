@@ -264,6 +264,27 @@ class PolicyEnforcer:
         # 5. Token budget (daily quotas): reserve the estimated cost now, so
         # concurrent requests can't all pass against the same remaining budget
         # (D-043). Settled with actual usage, or released if the request fails.
+        #
+        # Budgets need a bound to reserve against. A capless text-generation
+        # request would be reserved at the default estimate while the engine
+        # generates without limit — the demonstrated overrun. Reject loudly
+        # instead of inventing an upstream cap (house rule: no silent
+        # defaults). Embeddings estimate from input; media passes an explicit
+        # estimate; both are exempt.
+        text_tasks = (TaskType.CHAT, TaskType.COMPLETION, TaskType.GENERATE)
+        if (
+            self._token_budget.enabled
+            and estimated_tokens is None
+            and request.task in text_tasks
+            and request.max_tokens is None
+            and not any(g.max_tokens is not None for g in (generations or []))
+        ):
+            raise PolicyViolation(
+                message="Budget enforcement requires an output limit: set max_tokens "
+                "(OpenAI) or options.num_predict (Ollama) on the request",
+                policy_type="token_budget",
+                code="budget_requires_output_bound",
+            )
         if self._token_budget.enabled:
             try:
                 self._token_budget.reserve(
