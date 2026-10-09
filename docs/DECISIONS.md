@@ -1896,6 +1896,43 @@ accuracy) is the order below.
     the `laya-serve` wrapper is reusable.
   - CPU inference is 193–464 ms; the sidecar needs a GPU slice for the ~35 ms figure.
 
+### D-052 taxonomy: what the dataset labels (decided 2026-10-09)
+
+**Principle:** label every category once; decide enforcement per category later.
+Re-labelling a corpus to add a category costs a full pass, so the dataset is labelled
+against the whole taxonomy now, and *policy* (detect / audit / scrub per destination /
+block) is separate configuration on top. Labels are span-level — category plus the exact
+value and offsets — so one dataset trains both Laya (does this text contain category X?)
+and the extractor (which values?).
+
+Threat model, for the record: on local inference the model doesn't retain prompts and
+often needs the values to do the task. "PII we don't want a model to have" therefore means
+PII that must not reach a less-trusted *destination*: logs, audit bodies, training data,
+exports, and any future cloud fallback.
+
+| Label | Category | Includes | Hard negatives (label as clean) |
+|---|---|---|---|
+| `CREDENTIAL` | Credentials and secrets | API keys (`sk-…`, `sk-ant-…`, `AKIA…`, `ghp_…`, `xox[bp]-…`, `AIza…`, `sk_live_…`, this gateway's `gw-…` / `admin-…` keys), bearer tokens, JWTs, passwords given as values, private keys (PEM blocks), connection strings carrying credentials, webhook URLs with embedded secrets | Placeholders (`sk-xxxx`, `your-api-key-here`, `<TOKEN>`), redacted values, UUIDs/request IDs, commit hashes, `sk_test_` keys in docs examples |
+| `GOV_ID` | Government identifiers | SSN, ITIN/EIN, passport, driver's licence, national IDs (non-US) | Area codes, ZIPs, order numbers that merely share a digit shape |
+| `FINANCIAL` | Financial accounts | Card numbers (Luhn-valid), bank account and routing numbers, IBAN/SWIFT tied to an account | Well-known test cards (`4111 1111 1111 1111`), amounts, invoice numbers |
+| `HEALTH` | Health information (PHI) | Medical record numbers, insurance member/group IDs, diagnoses or treatments tied to an identifiable person | General medical discussion with no identifiable subject |
+| `CONTACT` | Direct contact | Email addresses, phone numbers (any country), postal addresses | `example.com` / `.test` / `.invalid` addresses, documented fictional numbers (`555-01xx`), business switchboards in public docs |
+| `PERSON_NAME` | Names in context | A real person's name tied to other facts about them | Public figures in public context, fictional characters, product/company names, the user signing their own message |
+| `QUASI_ID` | Quasi-identifiers | Date of birth, precise location, employer + role, ZIP + age/sex combinations | Dates/places not tied to a person |
+| `SPECIAL` | Special-category data | Ethnicity, religion, sexual orientation, political opinion, union membership, criminal record, biometrics — about an identifiable person | Abstract or statistical discussion of these topics |
+| `NETWORK` | Network/device identifiers | Public IP addresses, MAC addresses, device/advertising IDs | Private/internal ranges (RFC 1918, loopback), version numbers that look like IPs |
+
+**Enforcement (initial, configurable later):** `CREDENTIAL`, `GOV_ID`, `FINANCIAL`, `HEALTH`
+are never persisted raw and are scrubbed before any less-trusted destination; `CONTACT`
+the same once the gate's miss rate is measured; `PERSON_NAME`, `QUASI_ID`, `SPECIAL` are
+detected and audited only until there are miss-rate numbers; `NETWORK` audited only (the
+reference deployment is an internal network). None of this changes what local inference
+receives unless an operator enables scrubbing for that route and category.
+
+**Laya question shape:** one multi-label typed question over these categories (Laya
+supports typed choice questions), not a single yes/no — so routing can differ per category
+and each category is learned separately.
+
 ## D-053: Review fixes: overflow honors the catalog, budgets strip pins, media endpoints don't crash discovery
 
 - **Status:** Implemented, 2026-10-09, `fe2863a` and `dbc2dec`. Amends D-031/D-032 and
