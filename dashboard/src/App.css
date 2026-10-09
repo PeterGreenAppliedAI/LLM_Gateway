@@ -1,8 +1,9 @@
+/* The Vite starter's centered text and 2rem padding were still here:
+   they centered every table cell under left-aligned headers and pushed
+   narrow screens wider (D-057). The app sets its own responsive padding. */
 #root {
   max-width: 1280px;
   margin: 0 auto;
-  padding: 2rem;
-  text-align: center;
 }
 
 .logo {

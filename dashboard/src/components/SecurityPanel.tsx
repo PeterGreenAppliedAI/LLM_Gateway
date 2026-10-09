@@ -201,10 +201,30 @@ export function SecuritySection({ alerts, stats, guardResults, onFilterChange }:
               </div>
             </div>
           ) : (
-            <div className="bg-gray-800 rounded-lg p-8 border border-gray-700 text-center text-gray-500">
-              <div className="text-4xl mb-2">&#10003;</div>
-              <div>No security alerts</div>
-              <div className="text-sm">All requests clean</div>
+            <div className="bg-gray-800 rounded-lg p-8 border border-gray-700 text-center text-gray-500" role="status">
+              {/* Distinguish "nothing analyzed" and "data unavailable" from a
+                  genuinely clean result (D-057): zero analyzed used to read
+                  as "All requests clean" */}
+              {stats === null ? (
+                <>
+                  <div>Security data unavailable</div>
+                  <div className="text-sm">The analyzer didn't respond, or the admin key was rejected.</div>
+                </>
+              ) : stats.requests_analyzed === 0 ? (
+                <>
+                  <div>No requests analyzed yet</div>
+                  <div className="text-sm">Alerts appear here once traffic has been scanned.</div>
+                </>
+              ) : (
+                <>
+                  <div className="text-4xl mb-2">&#10003;</div>
+                  <div>No security alerts</div>
+                  <div className="text-sm">
+                    {stats.requests_analyzed.toLocaleString()} requests analyzed, none flagged
+                    {stats.requests_dropped > 0 ? ` (${stats.requests_dropped.toLocaleString()} dropped unscanned under load)` : ''}
+                  </div>
+                </>
+              )}
             </div>
           )}
         </>

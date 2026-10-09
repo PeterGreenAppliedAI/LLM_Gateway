@@ -187,6 +187,11 @@ exactly how far:
 
 ## 5. Operator legibility (dashboard)
 
+_Updated 2026-10-09 (D-057): the dashboard no longer floods the audit log with its own
+denials, inference figures exclude denials, failed mutations show the server's reason,
+request history is filterable and paged, key scopes are editable, and the request detail
+is keyboard-accessible. The triage items below remain open._
+
 Outside feedback (screenshots only, Oct 2026) raised two issues, and both hold up against the
 code:
 

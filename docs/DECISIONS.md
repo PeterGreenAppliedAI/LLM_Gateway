@@ -2046,3 +2046,70 @@ accuracy) is the order below.
   (16 tests).
 - **Lesson:** a redaction boundary belongs where the data leaves, not where a bug was last
   seen. D-055 fixed the reported path each time; D-056 moves both fixes to the choke point.
+
+## D-057: Operator-experience review: honest dashboard figures, visible failures, reachable history
+
+- **Status:** Implemented, 2026-10-09. Review of `4d00515` (hands-on dashboard walkthrough,
+  local Chromium, synthetic provider). Amends D-055 (denial auditing) on the dashboard side.
+- **Problem:** the backend findings were closed, but operating the gateway from the
+  dashboard had gaps, all confirmed in the code:
+  - **U3 — a forgotten tab floods the audit log.** D-055 made every denied request an audit
+    row. The dashboard polls about ten admin endpoints every 5 s and kept polling after the
+    key was rejected: roughly 120 denial rows a minute, indefinitely. The headline stats
+    counted those rows, so the dashboard read "36 requests, 0% success" before any
+    inference, and the 50-row Requests view filled with the dashboard's own denials.
+  - **U2 — a zero cost multiplier saved as 1x.** `parseFloat(x) || 1.0`: zero is falsy.
+    Policy-corrupting, and silent.
+  - **U1 — failed mutations were invisible.** Key creation logged a 422 to the console and
+    left the form unchanged; every budget mutation returned `res.json()` without checking
+    `res.ok`.
+  - **U4 — history stopped at the latest 50 rows.** The client never sent the offset or
+    filters the server supported; the server paged by fetching `limit + offset` rows and
+    slicing in Python, and reported page size as `total`.
+  - **U5 — no key-scope controls.** The API and table data had `allowed_models` /
+    `allowed_endpoints`; the form didn't.
+  - **U6/U7 — keyboard and narrow screens.** Request rows had no keyboard path; the detail
+    overlay had no dialog semantics or Escape; labels weren't associated with inputs.
+    The header and tab bar didn't wrap, and the Vite starter's `#root` CSS (2rem padding,
+    centered text) was still in place — the cause of the centered table cells.
+  - Smaller: "Gateway API key" didn't say it must be the admin key; "All requests clean"
+    showed with zero requests analyzed; the README's Compose line omitted the Grafana
+    password; the dashboard had no CI at all.
+- **Fix:**
+  - **Polling stops when the gateway rejects the key** and resumes on Refresh or a new key;
+    the header shows when data was last updated, or "Paused · showing data from …".
+    `get_stats` excludes `denied` rows from every inference figure and returns
+    `denied_count` separately; the dashboard labels the population ("Inference Requests",
+    "Of inference requests") and shows "—" with no traffic instead of a false 0%.
+  - **`lib/forms.ts`:** `parseNumberField` (no truthiness fallbacks; empty = unset; bounds
+    and integer checks with operator-readable errors) and `gatewayErrorMessage` (reads the
+    gateway envelope, FastAPI validation lists, and `{status: "error"}` bodies). Every
+    mutation goes through a `checked()` helper that rejects with that message; key and
+    budget panels show it inline (`role="alert"`), keep the draft, and focus the invalid
+    field.
+  - **Requests tab** is its own component: status / client / time-range filters, Newer /
+    Older paging with "more available / end of results", request-ID lookup, and a
+    `#request=<id>` link that reopens a request. It follows the dashboard poll only on page
+    one, so older pages don't shift while being read. The server pages in SQL (`offset`,
+    stable `timestamp, id` order), filters by `hours`, and reports `has_more` by fetching
+    one extra row rather than a COUNT over the audit log.
+  - **Key form:** allowed-model globs and allowed-endpoint checkboxes, a Scope column
+    ("all models · all endpoints" when unrestricted), and a copyable integration example
+    after creation.
+  - **Accessibility:** named Details button per row; the detail view is a titled modal
+    dialog with focus moved to a named Close button, Escape to close, and focus returned
+    to the opener; labels associated across the key, budget and request forms; tabs carry
+    `role="tab"` / `aria-selected`; denied rows render amber, not red.
+  - **Narrow screens:** header wraps, the key input flexes, the tab bar scrolls
+    horizontally, root padding shrinks below `sm`; the starter CSS is gone.
+  - Admin-key wording and an explanatory rejection banner; the Security empty state
+    distinguishes unavailable / nothing analyzed / analyzed-and-clean (with dropped-scan
+    count); the Voice docs path is a link; the README names both Compose credentials;
+    Vitest added, and a CI job lints, tests, type-checks and builds the dashboard.
+- **What works now:** `tests/test_dashboard_ux_2026_10_09.py` (denials excluded from
+  stats with the review's 36-denial scenario; SQL paging with no overlap; time filter;
+  `has_more` and status filtering through the route) and
+  `dashboard/src/lib/forms.test.ts` (zero preserved; -1 rpm rejected with a message;
+  validation lists and envelopes surfaced; scope parsing and summary). Keyboard, dialog
+  and narrow-viewport behavior are not covered by automated tests; they need a browser
+  pass.

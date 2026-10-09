@@ -319,9 +319,20 @@ class AuditLogger:
         client_id: str | None = None,
         environment: str | None = None,
         status: str | None = None,
+        offset: int = 0,
+        since: datetime | None = None,
     ) -> list[dict]:
-        """Get recent requests from the audit log."""
-        stmt = select(audit_log).order_by(audit_log.c.timestamp.desc()).limit(limit)
+        """Get recent requests from the audit log (newest first).
+
+        Paged in SQL (D-057): the route used to fetch limit+offset rows and
+        slice in Python, so each page further back cost more.
+        """
+        stmt = (
+            select(audit_log)
+            .order_by(audit_log.c.timestamp.desc(), audit_log.c.id.desc())
+            .limit(limit)
+            .offset(offset)
+        )
 
         conditions = []
         if client_id:
@@ -330,6 +341,8 @@ class AuditLogger:
             conditions.append(audit_log.c.environment == environment)
         if status:
             conditions.append(audit_log.c.status == status)
+        if since is not None:
+            conditions.append(audit_log.c.timestamp >= since)
 
         if conditions:
             stmt = stmt.where(and_(*conditions))
@@ -351,9 +364,20 @@ class AuditLogger:
             if client_id:
                 conditions.append(audit_log.c.client_id == client_id)
 
-            base_filter = and_(*conditions)
+            # Denials (auth, policy, rate limit) are audited (D-055) but are not
+            # inference outcomes: counting them made a dashboard polling with
+            # a bad key read as "0% success" (D-057). Reported separately.
+            window_filter = and_(*conditions)
+            denied_stmt = (
+                select(func.count())
+                .select_from(audit_log)
+                .where(and_(window_filter, audit_log.c.status == "denied"))
+            )
+            denied_count = (await conn.execute(denied_stmt)).scalar() or 0
 
-            # Total requests
+            base_filter = and_(*conditions, audit_log.c.status != "denied")
+
+            # Total inference requests
             total_stmt = select(func.count()).select_from(audit_log).where(base_filter)
             total_requests = (await conn.execute(total_stmt)).scalar() or 0
 
@@ -415,6 +439,7 @@ class AuditLogger:
                 "total_requests": total_requests,
                 "success_count": success_count,
                 "error_count": error_count,
+                "denied_count": denied_count,
                 "success_rate": (
                     round(success_count / total_requests * 100, 2) if total_requests > 0 else 0
                 ),

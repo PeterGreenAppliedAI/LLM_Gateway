@@ -44,6 +44,9 @@ class StatsResponse(BaseModel):
     total_requests: int
     success_count: int
     error_count: int
+    # Auth/policy/rate-limit denials: audited, but excluded from the
+    # inference figures above (D-057)
+    denied_count: int = 0
     success_rate: float
     prompt_tokens: int
     completion_tokens: int
@@ -110,9 +113,10 @@ class RequestsListResponse(BaseModel):
     """Response for listing requests."""
 
     requests: list[AuditRequestSummary]
-    total: int
+    total: int  # rows in this page
     limit: int
     offset: int
+    has_more: bool = False  # another page exists past this one (D-057)
 
 
 @router.get("/api/requests", response_model=RequestsListResponse)
@@ -125,21 +129,34 @@ async def list_requests(
     filter_client: str | None = None,
     filter_status: str | None = None,
     filter_environment: str | None = None,
+    hours: float | None = None,
 ) -> RequestsListResponse:
-    """Get recent requests from the audit log."""
+    """Get recent requests from the audit log, newest first.
+
+    Paged with offset/limit; `has_more` says whether another page exists.
+    `hours` limits to the last N hours.
+    """
+    from datetime import UTC, datetime, timedelta
+
     if audit_logger is None:
         return RequestsListResponse(requests=[], total=0, limit=limit, offset=offset)
 
-    limit = min(limit, 500)
+    limit = max(1, min(limit, 500))
+    offset = max(0, offset)
+    since = datetime.now(UTC) - timedelta(hours=hours) if hours and hours > 0 else None
 
+    # One extra row tells us whether another page exists, without a COUNT
+    # over the whole audit log
     requests = await audit_logger.get_recent_requests(
-        limit=limit + offset,
-        client_id=filter_client,
-        environment=filter_environment,
-        status=filter_status,
+        limit=limit + 1,
+        offset=offset,
+        client_id=filter_client or None,
+        environment=filter_environment or None,
+        status=filter_status or None,
+        since=since,
     )
-
-    requests = requests[offset : offset + limit]
+    has_more = len(requests) > limit
+    requests = requests[:limit]
 
     summaries = []
     for req in requests:
@@ -168,6 +185,7 @@ async def list_requests(
         total=len(requests),
         limit=limit,
         offset=offset,
+        has_more=has_more,
     )
 
 

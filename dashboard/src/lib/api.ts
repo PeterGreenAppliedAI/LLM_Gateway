@@ -1,3 +1,4 @@
+import { gatewayErrorMessage } from './forms'
 import type { Stats, Request, RequestDetail, Catalog, HealthResponse, SecurityAlert, SecurityStats, SecurityResult, ApiKeyInfo, BudgetConfig, BudgetUsage, SecurityScan, LabelStats, PIIStats, PIIEvent, PIIConfig, MediaEndpoint } from '../types'
 
 // API base URL - gateway server
@@ -39,10 +40,27 @@ export async function fetchStats(hours = 24): Promise<Stats> {
   return res.json()
 }
 
-export async function fetchRequests(limit = 50): Promise<{ requests: Request[] }> {
-  const res = await apiFetch(`${API_BASE}/api/requests?limit=${limit}`)
-  if (!res.ok) return { requests: [] }
-  return res.json()
+export interface RequestFilters {
+  status: string
+  client: string
+  hours: string
+}
+
+// Paged, filtered audit listing (D-057). Rejects with the gateway's message.
+export async function fetchRequests(
+  params: Partial<RequestFilters> & { limit?: number; offset?: number } = {},
+): Promise<{ requests: Request[]; has_more: boolean }> {
+  const q = new URLSearchParams({
+    limit: String(params.limit ?? 50),
+    offset: String(params.offset ?? 0),
+  })
+  if (params.status) q.set('filter_status', params.status)
+  if (params.client) q.set('filter_client', params.client)
+  if (params.hours) q.set('hours', params.hours)
+  const res = await apiFetch(`${API_BASE}/api/requests?${q}`)
+  const body = await res.json().catch(() => null)
+  if (!res.ok) throw new Error(gatewayErrorMessage(res.status, body))
+  return { requests: body.requests ?? [], has_more: Boolean(body.has_more) }
 }
 
 export async function fetchRequestDetail(requestId: string): Promise<RequestDetail> {
@@ -86,6 +104,17 @@ export async function fetchApiKeys(): Promise<{ keys: ApiKeyInfo[]; total: numbe
   return res.json()
 }
 
+// Mutations reject with the gateway's own message (validation detail,
+// policy reason, {status:"error"} bodies) so panels can show it inline.
+// Before D-057 several returned res.json() unchecked and failed silently.
+async function checked<T>(res: Response): Promise<T> {
+  const body = await res.json().catch(() => null)
+  const softError =
+    body && typeof body === 'object' && (body as { status?: string }).status === 'error'
+  if (!res.ok || softError) throw new Error(gatewayErrorMessage(res.status, body))
+  return body as T
+}
+
 export async function createApiKey(body: {
   name: string
   client_id: string
@@ -93,19 +122,20 @@ export async function createApiKey(body: {
   rate_limit_rpm?: number
   max_concurrent?: number
   priority?: 'interactive' | 'batch'
-}): Promise<{ key: string; key_id: number; prefix: string }> {
+  allowed_models?: string[]
+  allowed_endpoints?: string[]
+}): Promise<{ key: string; key_id: number; prefix: string; client_id: string }> {
   const res = await apiFetch(`${API_BASE}/api/keys`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   })
-  if (!res.ok) throw new Error(`Failed to create key: ${res.statusText}`)
-  return res.json()
+  return checked(res)
 }
 
 export async function revokeApiKey(keyId: number): Promise<void> {
   const res = await apiFetch(`${API_BASE}/api/keys/${keyId}`, { method: 'DELETE' })
-  if (!res.ok) throw new Error(`Failed to revoke key: ${res.statusText}`)
+  await checked(res)
 }
 
 export async function fetchBudgetConfig(): Promise<BudgetConfig> {
@@ -126,12 +156,12 @@ export async function createTier(name: string, costMultiplier: number, dailyLimi
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name, cost_multiplier: costMultiplier, daily_limit: dailyLimit }),
   })
-  return res.json()
+  return checked(res)
 }
 
 export async function deleteTier(name: string): Promise<{ status: string; message?: string }> {
   const res = await apiFetch(`${API_BASE}/api/budget/tiers/${encodeURIComponent(name)}`, { method: 'DELETE' })
-  return res.json()
+  return checked(res)
 }
 
 export async function assignModelTier(model: string, tier: string): Promise<{ status: string; message?: string }> {
@@ -140,12 +170,12 @@ export async function assignModelTier(model: string, tier: string): Promise<{ st
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ model, tier }),
   })
-  return res.json()
+  return checked(res)
 }
 
 export async function unassignModelTier(model: string): Promise<{ status: string }> {
   const res = await apiFetch(`${API_BASE}/api/budget/assignments/${encodeURIComponent(model)}`, { method: 'DELETE' })
-  return res.json()
+  return checked(res)
 }
 
 export async function fetchSecurityScans(params: { limit?: number; offset?: number; unlabeled_only?: boolean; disagreements_only?: boolean; min_threat_level?: string } = {}): Promise<{ scans: SecurityScan[]; total: number }> {

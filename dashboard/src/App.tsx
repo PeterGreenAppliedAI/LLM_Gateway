@@ -1,19 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import './App.css'
 import type {
-  Stats, Request, RequestDetail, Catalog, HealthResponse,
+  Stats, Catalog, HealthResponse,
   SecurityAlert, SecurityStats, SecurityResult, ApiKeyInfo,
   BudgetConfig, BudgetUsage,
 } from './types'
 import {
   AUTH_ERROR_EVENT,
-  fetchStats, fetchRequests, fetchRequestDetail, fetchCatalog, fetchHealth,
+  fetchStats, fetchCatalog, fetchHealth,
   fetchSecurityAlerts, fetchSecurityStats, fetchSecurityResults,
   fetchApiKeys, fetchBudgetConfig, fetchBudgetUsage,
   getStoredApiKey, setStoredApiKey,
 } from './lib/api'
 import { StatCard, EndpointCard } from './components/shared'
-import { RequestDetailPanel, RequestRow } from './components/RequestsPanel'
+import { RequestsSection } from './components/RequestsPanel'
 import { SecuritySection } from './components/SecurityPanel'
 import { ApiKeysSection } from './components/KeysPanel'
 import { TokenBudgetSection } from './components/BudgetPanel'
@@ -24,7 +24,6 @@ import { SecurityScansSection } from './components/ScansPanel'
 
 function App() {
   const [stats, setStats] = useState<Stats | null>(null)
-  const [requests, setRequests] = useState<Request[]>([])
   const [catalog, setCatalog] = useState<Catalog | null>(null)
   const [health, setHealth] = useState<HealthResponse | null>(null)
   const [securityAlerts, setSecurityAlerts] = useState<SecurityAlert[]>([])
@@ -37,22 +36,31 @@ function App() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [authError, setAuthError] = useState(false)
-  const [selectedRequest, setSelectedRequest] = useState<RequestDetail | null>(null)
-  const [loadingDetail, setLoadingDetail] = useState(false)
   const [activeTab, setActiveTab] = useState<'dashboard' | 'security' | 'keys' | 'requests' | 'voice' | 'routing'>('dashboard')
 
+  // Polling stops once the gateway rejects the key: every rejected poll is a
+  // durable audit row (D-055), so a forgotten tab with a stale key would
+  // write ~120 denial rows a minute indefinitely (D-057). Manual refresh or
+  // entering a key resumes it.
+  const authRejectedRef = useRef(false)
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
+  const [refreshTick, setRefreshTick] = useState(0)
+
   useEffect(() => {
-    const onAuthError = () => setAuthError(true)
+    const onAuthError = () => {
+      authRejectedRef.current = true
+      setAuthError(true)
+    }
     window.addEventListener(AUTH_ERROR_EVENT, onAuthError)
     return () => window.removeEventListener(AUTH_ERROR_EVENT, onAuthError)
   }, [])
 
   const refresh = useCallback(async () => {
+    authRejectedRef.current = false
     setAuthError(false)
     try {
-      const [statsData, requestsData, catalogData, healthData, secAlertsData, secStatsData, guardData, apiKeysData, budgetConfigData, budgetUsageData] = await Promise.all([
+      const [statsData, catalogData, healthData, secAlertsData, secStatsData, guardData, apiKeysData, budgetConfigData, budgetUsageData] = await Promise.all([
         fetchStats(),
-        fetchRequests(),
         fetchCatalog(),
         fetchHealth(),
         fetchSecurityAlerts(),
@@ -63,7 +71,6 @@ function App() {
         fetchBudgetUsage(),
       ])
       setStats(statsData)
-      setRequests(requestsData.requests)
       setCatalog(catalogData)
       setHealth(healthData)
       setSecurityAlerts(secAlertsData.alerts)
@@ -73,6 +80,10 @@ function App() {
       setBudgetConfig(budgetConfigData)
       setBudgetUsage(budgetUsageData)
       setError(null)
+      if (!authRejectedRef.current) {
+        setLastUpdated(new Date())
+        setRefreshTick(t => t + 1)
+      }
     } catch (e) {
       setError(`Failed to fetch data: ${e}`)
     } finally {
@@ -80,21 +91,11 @@ function App() {
     }
   }, [])
 
-  const handleRequestClick = async (request: Request) => {
-    setLoadingDetail(true)
-    try {
-      const detail = await fetchRequestDetail(request.request_id)
-      setSelectedRequest(detail)
-    } catch (e) {
-      console.error('Failed to fetch request detail:', e)
-    } finally {
-      setLoadingDetail(false)
-    }
-  }
-
   useEffect(() => {
     refresh()
-    const interval = setInterval(refresh, 5000) // Refresh every 5s
+    const interval = setInterval(() => {
+      if (!authRejectedRef.current) refresh() // paused while the key is rejected
+    }, 5000)
     return () => clearInterval(interval)
   }, [refresh])
 
@@ -107,36 +108,28 @@ function App() {
   }
 
   return (
-    <div className="min-h-screen p-6">
-      {/* Request Detail Modal */}
-      {selectedRequest && (
-        <RequestDetailPanel detail={selectedRequest} onClose={() => setSelectedRequest(null)} />
-      )}
-
-      {/* Loading overlay for detail */}
-      {loadingDetail && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="text-xl">Loading...</div>
-        </div>
-      )}
-
+    <div className="min-h-screen p-3 sm:p-6">
       {/* Header */}
-      <div className="flex items-center justify-between mb-6">
-        <div>
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-6">
+        <div className="min-w-0">
           <h1 className="text-2xl font-bold">LLM Gateway Dashboard</h1>
           <p className="text-gray-400 text-sm">
             {health?.providers_healthy}/{health?.providers_configured} endpoints healthy
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+          <label htmlFor="admin-key" className="sr-only">
+            Admin API key
+          </label>
           <input
+            id="admin-key"
             type="password"
             defaultValue={getStoredApiKey()}
-            placeholder="Gateway API key"
+            placeholder="Admin API key"
             onChange={e => setStoredApiKey(e.target.value.trim())}
             onBlur={refresh}
-            className="bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm w-56 focus:outline-none focus:border-blue-600"
-            title="Sent as X-API-Key on every dashboard request; stored in this browser only"
+            className="bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm flex-1 min-w-0 sm:w-56 sm:flex-none focus:outline-none focus:border-blue-600"
+            title="The gateway's GATEWAY_ADMIN_API_KEY (operator key), not a client inference key. Stored in this browser only."
           />
           <button
             onClick={refresh}
@@ -144,6 +137,15 @@ function App() {
           >
             Refresh
           </button>
+          <span className="text-xs text-gray-400 w-full sm:w-auto" role="status" aria-live="polite">
+            {authError
+              ? lastUpdated
+                ? `Paused · showing data from ${lastUpdated.toLocaleTimeString()}`
+                : 'Paused · no data yet'
+              : lastUpdated
+                ? `Updated ${lastUpdated.toLocaleTimeString()}`
+                : ''}
+          </span>
         </div>
       </div>
 
@@ -167,9 +169,12 @@ function App() {
       )}
 
       {authError && (
-        <div className="bg-amber-900 border border-amber-700 rounded p-4 mb-6">
-          Gateway API key required or invalid — enter a valid key in the field above.
-          Data shown may be incomplete until then.
+        <div className="bg-amber-900 border border-amber-700 rounded p-4 mb-6 text-sm" role="alert">
+          <strong>The gateway rejected this key.</strong> The dashboard needs the operator key
+          (<code>GATEWAY_ADMIN_API_KEY</code>), not a client inference key. Auto-refresh is paused
+          so rejected requests don't fill the audit log; enter the admin key above and press
+          Refresh to resume. Figures below are{' '}
+          {lastUpdated ? `from ${lastUpdated.toLocaleTimeString()} and may be stale` : 'not loaded'}.
         </div>
       )}
 
@@ -180,7 +185,7 @@ function App() {
       )}
 
       {/* Tab Navigation */}
-      <div className="flex gap-1 mb-6 border-b border-gray-700">
+      <div className="flex gap-1 mb-6 border-b border-gray-700 overflow-x-auto" role="tablist">
         {([
           ['dashboard', 'Dashboard'],
           ['security', 'Security'],
@@ -191,8 +196,10 @@ function App() {
         ] as const).map(([tab, label]) => (
           <button
             key={tab}
+            role="tab"
+            aria-selected={activeTab === tab}
             onClick={() => setActiveTab(tab)}
-            className={`px-4 py-2 text-sm font-medium rounded-t transition-colors ${
+            className={`px-4 py-2 text-sm font-medium rounded-t transition-colors whitespace-nowrap shrink-0 ${
               activeTab === tab
                 ? 'bg-gray-800 text-white border border-gray-700 border-b-transparent -mb-px'
                 : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/50'
@@ -208,8 +215,16 @@ function App() {
         <>
           {/* Stats Grid */}
           <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4 mb-6">
-            <StatCard label="Total Requests" value={stats?.total_requests || 0} subtext="Last 24h" />
-            <StatCard label="Success Rate" value={`${(stats?.success_rate || 0).toFixed(1)}%`} />
+            <StatCard
+              label="Inference Requests"
+              value={stats ? stats.total_requests : '—'}
+              subtext={`Last 24h${stats?.denied_count ? ` · ${stats.denied_count} denied (auth/policy), not counted` : ''}`}
+            />
+            <StatCard
+              label="Success Rate"
+              value={stats && stats.total_requests > 0 ? `${stats.success_rate.toFixed(1)}%` : '—'}
+              subtext={stats && stats.total_requests === 0 ? 'No inference traffic yet' : 'Of inference requests'}
+            />
             <StatCard label="Avg Latency" value={`${(stats?.avg_latency_ms || 0).toFixed(0)}ms`} />
             <StatCard label="Total Tokens" value={(stats?.total_tokens || 0).toLocaleString()} />
             <StatCard label="Models" value={catalog?.total_models || 0} />
@@ -287,7 +302,11 @@ function App() {
       {/* === Keys & Budgets Tab === */}
       {activeTab === 'keys' && (
         <>
-          <ApiKeysSection keys={apiKeys} onRefresh={refresh} />
+          <ApiKeysSection
+            keys={apiKeys}
+            endpoints={catalog?.endpoints.map(e => e.name) ?? []}
+            onRefresh={refresh}
+          />
           <TokenBudgetSection budgetConfig={budgetConfig} budgetUsage={budgetUsage} catalog={catalog} onRefresh={refresh} />
         </>
       )}
@@ -298,38 +317,7 @@ function App() {
       {activeTab === 'routing' && <RoutingSection />}
 
       {/* === Requests Tab === */}
-      {activeTab === 'requests' && (
-        <div>
-          <h2 className="text-lg font-semibold mb-3">Recent Requests</h2>
-          <p className="text-gray-400 text-sm mb-2">Click a row to see details</p>
-          <div className="bg-gray-800 rounded-lg border border-gray-700 overflow-hidden">
-            <table className="w-full">
-              <thead className="bg-gray-750 border-b border-gray-700">
-                <tr className="text-left text-gray-400 text-sm">
-                  <th className="py-2 px-3">Time</th>
-                  <th className="py-2 px-3">Status</th>
-                  <th className="py-2 px-3">Model</th>
-                  <th className="py-2 px-3">Endpoint</th>
-                  <th className="py-2 px-3 text-right">Latency</th>
-                  <th className="py-2 px-3 text-right">Tokens</th>
-                </tr>
-              </thead>
-              <tbody>
-                {requests.map(req => (
-                  <RequestRow key={req.id} request={req} onClick={() => handleRequestClick(req)} />
-                ))}
-                {requests.length === 0 && (
-                  <tr>
-                    <td colSpan={6} className="py-8 text-center text-gray-500">
-                      No requests yet
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
+      {activeTab === 'requests' && <RequestsSection refreshTick={refreshTick} />}
     </div>
   )
 }

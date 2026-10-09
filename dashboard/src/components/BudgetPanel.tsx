@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import type { BudgetConfig, BudgetUsage, Catalog } from '../types'
 import { createTier, deleteTier, assignModelTier, unassignModelTier } from '../lib/api'
+import { parseNumberField } from '../lib/forms'
 
 export function TokenBudgetSection({ budgetConfig, budgetUsage, catalog, onRefresh }: {
   budgetConfig: BudgetConfig | null
@@ -17,6 +18,10 @@ export function TokenBudgetSection({ budgetConfig, budgetUsage, catalog, onRefre
   const [newTierLimit, setNewTierLimit] = useState('')
   const [creatingTier, setCreatingTier] = useState(false)
   const [showClassifications, setShowClassifications] = useState(false)
+  // One inline error line for every budget mutation (D-057): failures used
+  // to go to console.error or a bare alert()
+  const [budgetError, setBudgetError] = useState<string | null>(null)
+  const report = (e: unknown) => setBudgetError(e instanceof Error ? e.message : String(e))
 
   if (!budgetConfig) return null
 
@@ -45,26 +50,26 @@ export function TokenBudgetSection({ budgetConfig, budgetUsage, catalog, onRefre
   const handleAssign = async () => {
     if (!assignModel || !assignTier) return
     setAssigning(true)
+    setBudgetError(null)
     try {
-      const result = await assignModelTier(assignModel, assignTier)
-      if (result.status === 'success') {
-        setAssignModel('')
-        setAssignTier('')
-        onRefresh()
-      }
+      await assignModelTier(assignModel, assignTier)
+      setAssignModel('')
+      setAssignTier('')
+      onRefresh()
     } catch (e) {
-      console.error('Failed to assign:', e)
+      report(e)
     } finally {
       setAssigning(false)
     }
   }
 
   const handleUnassign = async (model: string) => {
+    setBudgetError(null)
     try {
       await unassignModelTier(model)
       onRefresh()
     } catch (e) {
-      console.error('Failed to unassign:', e)
+      report(e)
     }
   }
 
@@ -116,29 +121,41 @@ export function TokenBudgetSection({ budgetConfig, budgetUsage, catalog, onRefre
             {showCreateTier ? 'Cancel' : 'Add Tier'}
           </button>
         </div>
+        {budgetError && (
+          <div className="bg-red-900 border border-red-700 rounded p-2 mb-3 text-sm" role="alert">
+            {budgetError}
+          </div>
+        )}
         {showCreateTier && (
-          <div className="bg-gray-900 rounded p-3 mb-3 flex gap-2 items-end">
+          <div className="bg-gray-900 rounded p-3 mb-3 flex flex-wrap gap-2 items-end">
             <div>
-              <label className="text-gray-400 text-xs block mb-1">Name</label>
-              <input type="text" value={newTierName} onChange={e => setNewTierName(e.target.value)} placeholder="e.g. standard" className="bg-gray-800 border border-gray-600 rounded px-2 py-1.5 text-sm w-32" />
+              <label htmlFor="tier-name" className="text-gray-400 text-xs block mb-1">Name</label>
+              <input id="tier-name" type="text" value={newTierName} onChange={e => setNewTierName(e.target.value)} placeholder="e.g. standard" className="bg-gray-800 border border-gray-600 rounded px-2 py-1.5 text-sm w-32" />
             </div>
             <div>
-              <label className="text-gray-400 text-xs block mb-1">Multiplier</label>
-              <input type="number" value={newTierMultiplier} onChange={e => setNewTierMultiplier(e.target.value)} step="0.1" min="0" className="bg-gray-800 border border-gray-600 rounded px-2 py-1.5 text-sm w-24" />
+              <label htmlFor="tier-multiplier" className="text-gray-400 text-xs block mb-1">Multiplier</label>
+              <input id="tier-multiplier" type="number" value={newTierMultiplier} onChange={e => setNewTierMultiplier(e.target.value)} step="0.1" min="0" className="bg-gray-800 border border-gray-600 rounded px-2 py-1.5 text-sm w-24" />
             </div>
             <div>
-              <label className="text-gray-400 text-xs block mb-1">Daily Limit (optional)</label>
-              <input type="number" value={newTierLimit} onChange={e => setNewTierLimit(e.target.value)} placeholder="unlimited" min="0" className="bg-gray-800 border border-gray-600 rounded px-2 py-1.5 text-sm w-32" />
+              <label htmlFor="tier-limit" className="text-gray-400 text-xs block mb-1">Daily Limit (optional)</label>
+              <input id="tier-limit" type="number" value={newTierLimit} onChange={e => setNewTierLimit(e.target.value)} placeholder="unlimited" min="0" className="bg-gray-800 border border-gray-600 rounded px-2 py-1.5 text-sm w-32" />
             </div>
             <button
               disabled={creatingTier || !newTierName}
               onClick={async () => {
+                // Explicit parsing: 0 is a valid multiplier ("free"), not
+                // "unset" — the old `|| 1.0` saved it as 1x (D-057)
+                const multiplier = parseNumberField(newTierMultiplier, { min: 0, required: true, label: 'Multiplier' })
+                const limit = parseNumberField(newTierLimit, { min: 1, integer: true, label: 'Daily limit' })
+                const invalid = multiplier.error ?? limit.error
+                if (invalid) { setBudgetError(invalid); return }
                 setCreatingTier(true)
+                setBudgetError(null)
                 try {
-                  await createTier(newTierName, parseFloat(newTierMultiplier) || 1.0, newTierLimit ? parseInt(newTierLimit) : undefined)
+                  await createTier(newTierName, multiplier.value as number, limit.value)
                   setNewTierName(''); setNewTierMultiplier('1.0'); setNewTierLimit(''); setShowCreateTier(false)
                   onRefresh()
-                } catch (e) { console.error('Failed to create tier:', e) }
+                } catch (e) { report(e) }
                 finally { setCreatingTier(false) }
               }}
               className="bg-green-600 hover:bg-green-700 disabled:opacity-50 px-3 py-1.5 rounded text-xs whitespace-nowrap"
@@ -158,11 +175,14 @@ export function TokenBudgetSection({ budgetConfig, budgetUsage, catalog, onRefre
                 </div>
                 <button
                   onClick={async () => {
-                    const result = await deleteTier(tier.name)
-                    if (result.status === 'error') alert(result.message)
-                    else onRefresh()
+                    setBudgetError(null)
+                    try {
+                      await deleteTier(tier.name)
+                      onRefresh()
+                    } catch (e) { report(e) }
                   }}
                   className="text-red-400 hover:text-red-300 text-xs mt-0.5"
+                  aria-label={`Delete tier ${tier.name}`}
                   title="Delete tier"
                 >&times;</button>
               </div>
@@ -179,9 +199,12 @@ export function TokenBudgetSection({ budgetConfig, budgetUsage, catalog, onRefre
                   { name: 'standard', multiplier: 1.0 },
                   { name: 'embedding', multiplier: 0.1 },
                 ]
-                for (const d of defaults) {
-                  await createTier(d.name, d.multiplier)
-                }
+                setBudgetError(null)
+                try {
+                  for (const d of defaults) {
+                    await createTier(d.name, d.multiplier)
+                  }
+                } catch (e) { report(e) }
                 onRefresh()
               }}
               className="bg-blue-600 hover:bg-blue-700 px-3 py-1.5 rounded text-xs"

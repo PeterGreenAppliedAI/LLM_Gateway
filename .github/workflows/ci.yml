@@ -115,3 +115,32 @@ jobs:
 
       - name: Ruff format check
         run: ruff format --check src/ tests/
+
+  # The dashboard had no CI before D-057: a type error or a broken build
+  # could merge unnoticed
+  dashboard:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Tests
+        run: npm test
+
+      - name: Type-check and build
+        run: npm run build

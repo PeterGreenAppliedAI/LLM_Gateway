@@ -4,6 +4,7 @@ export interface Stats {
   total_requests: number
   success_count: number
   error_count: number
+  denied_count?: number  // auth/policy/rate-limit denials, excluded from the figures above
   success_rate: number
   prompt_tokens: number
   completion_tokens: number

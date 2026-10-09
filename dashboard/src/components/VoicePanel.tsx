@@ -53,7 +53,11 @@ function Engines({ endpoints, onRefresh, refreshing }: { endpoints: MediaEndpoin
       {endpoints.length === 0 ? (
         <div className="text-sm text-gray-400">
           No voice endpoints configured. Add one in <code>gateway.yaml</code> with <code>type: openai</code> and{' '}
-          <code>capabilities: [tts]</code> or <code>[stt]</code>. See <code>docs/MEDIA_ENGINES.md</code>.
+          <code>capabilities: [tts]</code> or <code>[stt]</code>. See{' '}
+          <a className="text-blue-400 hover:text-blue-300 underline" target="_blank" rel="noreferrer"
+            href="https://github.com/PeterGreenAppliedAI/LLM_Gateway/blob/main/docs/MEDIA_ENGINES.md">
+            docs/MEDIA_ENGINES.md
+          </a>.
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
