@@ -1950,8 +1950,45 @@ accuracy) is the order below.
   enforcer and resolution, strategy switches, unknown endpoints and duplicate tasks are
   rejected, and a saved policy survives a simulated restart.
 
-## D-055: Third external review (2026-10-09)
+## D-055: Third external review: structured inputs and partial operations
 
-- **Status:** Implemented, 2026-10-09. Seven findings, all confirmed and fixed; see the
-  implementing commit message and `tests/test_review_2026_10_09.py` (one regression test
-  per finding) for the details of each.
+- **Status:** Implemented, 2026-10-09, `276621d` and `50968f5`. Amends D-041, D-043,
+  D-050, D-051 and the denial-auditing behavior added with the 503-cause work.
+- **Problem:** an independent review of `7846d28` found seven defects, all confirmed
+  against the code. They clustered at two boundaries the straight-line tests never
+  crossed: structured inputs (tool-call arguments, content parts) and partially
+  successful operations (failed batches, pre-context denials).
+- **Fixes:**
+  1. `scan_messages` covers tool-call arguments — dict form (Ollama) and JSON-string
+     form (OpenAI) — scrubbing in place with the JSON shape preserved; the OpenAI chat
+     route writes scrubbed arguments back before conversion.
+  2. With budgets enabled, capless text-generation requests get a 4xx
+     (`budget_requires_output_bound`) naming `max_tokens` and `options.num_predict`,
+     instead of reserving a default estimate while the engine generates without limit.
+     Embeddings (estimate from input) and media (explicit estimate) are exempt. The
+     readiness report's budget claim was narrowed: enforced bounds with approximate
+     input estimates, not to-the-token accounting.
+  3. `dispatch_choices` reports completed generations when the batch fails
+     (`on_partial_usage`); routes charge them, so only the unused reservation is
+     released. Previously a failed batch erased the charges for finished work.
+  4. `error_message` is redacted like a body before it reaches the database, journal
+     or spill (upstream errors echo submitted values), and the operational error log
+     line is redacted too. Fails closed to `[REDACTION FAILED]`.
+  5. Policy, rate-limit and authentication denials are durable audit rows
+     (`status: "denied"`). The live check after deploying found 401s were still
+     skipped — they raise before any request context exists — so a missing context no
+     longer skips the row (generated request id, client `"unknown"`).
+  6. `/api/tags` follows the anonymous-network policy (keyless discovery preserved on
+     permitted networks), and model listings (`/api/tags`, `/v1/models`) show only
+     what the caller can route to: key model globs ∩ endpoint allowlists ∩ environment
+     approval. Visibility now matches routability; dispatch enforcement is unchanged.
+  7. Malformed content parts return a validation 4xx, never a 500; the bare-string
+     `image_url` shape some clients send is accepted and normalized to `{"url": ...}`.
+  - Compose: Grafana's admin password must come from `GRAFANA_ADMIN_PASSWORD` (no
+    default; compose refuses to start without it); Prometheus and Grafana ports bind
+    to loopback.
+- **What works now:** `tests/test_review_2026_10_09.py` — one regression test per
+  finding plus the contextless-401 case (19 tests); each fails on the old code.
+- **Lesson for the next feature:** test the structured and partially-failed paths
+  first; that's where three consecutive reviews found what the happy-path suite
+  missed.
