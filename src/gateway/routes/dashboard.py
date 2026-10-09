@@ -15,6 +15,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
+from gateway.models.common import TaskType
 from gateway.observability import get_logger
 from gateway.policy import PolicyEnforcer
 from gateway.routes.dependencies import (
@@ -23,6 +24,7 @@ from gateway.routes.dependencies import (
     get_enforcer,
     require_admin,
 )
+from gateway.routing_config import RoutingUpdate
 from gateway.security.pii_config import PIIScrubUpdate
 from gateway.storage import AuditLogger
 
@@ -713,6 +715,89 @@ async def update_pii_config(
         persisted=store is not None,
     )
     return _pii_config_view(request)
+
+
+def _routing_config_view(request: Request) -> dict:
+    """Routing policy in effect, plus what the dashboard can choose from."""
+    from gateway.routing_config import RoutingState, routing_from_config
+
+    config = request.app.state.config
+    state = getattr(request.app.state, "routing_state", None) or RoutingState()
+    effective = routing_from_config(request.app)
+    return {
+        "strategy": effective.strategy,
+        "task_endpoints": [p.model_dump() for p in effective.task_endpoints],
+        "model_defaults": [m.model_dump() for m in effective.model_defaults],
+        "available_endpoints": [e.name for e in config.endpoints if e.enabled]
+        or [p.name for p in config.get_enabled_providers()],
+        "available_tasks": [t.value for t in TaskType],
+        # yaml-only, shown for context
+        "endpoint_priority": list(config.resolution.endpoint_priority),
+        "source": state.source,
+        "updated_at": state.updated_at.isoformat()
+        if getattr(state.updated_at, "isoformat", None)
+        else state.updated_at,
+        "updated_by": state.updated_by,
+        "persisted": getattr(request.app.state, "runtime_settings", None) is not None,
+    }
+
+
+@router.get("/api/routing/config")
+async def get_routing_config(
+    request: Request,
+    _client_id: Annotated[str, Depends(require_admin)],
+) -> dict:
+    """Routing policy in effect: strategy, task pins, model homes."""
+    return _routing_config_view(request)
+
+
+@router.put("/api/routing/config")
+async def update_routing_config(
+    request: Request,
+    body: RoutingUpdate,
+    admin_id: Annotated[str, Depends(require_admin)],
+) -> dict:
+    """Change routing policy at runtime (admin only).
+
+    Takes effect on the next request and is saved, so it survives
+    restarts and overrides the gateway.yaml defaults. endpoint_priority
+    and ambiguous_behavior stay yaml-only.
+    """
+    from gateway.errors import ValidationError
+    from gateway.routing_config import SETTING_KEY, RoutingState, apply_routing
+
+    config = request.app.state.config
+    known = {e.name for e in config.endpoints if e.enabled} | {
+        p.name for p in config.get_enabled_providers()
+    }
+    unknown = body.referenced_endpoints() - known
+    if unknown:
+        raise ValidationError(
+            message=f"Unknown or disabled endpoints: {', '.join(sorted(unknown))}"
+        )
+
+    store = getattr(request.app.state, "runtime_settings", None)
+    updated_at = None
+    if store is not None:
+        # Save first: if this fails, the running policy stays unchanged
+        updated_at = await store.set(SETTING_KEY, body.model_dump(mode="json"), updated_by=admin_id)
+
+    apply_routing(
+        request.app,
+        body,
+        RoutingState(source="dashboard", updated_at=updated_at, updated_by=admin_id),
+    )
+    logger.warning(
+        "Routing policy changed",
+        changed_by=admin_id,
+        strategy=body.strategy,
+        task_pins={
+            p.task.value: p.allowed_endpoints or p.denied_endpoints for p in body.task_endpoints
+        },
+        model_defaults={m.model: m.endpoint for m in body.model_defaults},
+        persisted=store is not None,
+    )
+    return _routing_config_view(request)
 
 
 @router.get("/api/media/catalog")

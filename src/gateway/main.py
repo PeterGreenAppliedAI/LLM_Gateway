@@ -209,6 +209,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         if pii_scrubber is not None:
             await _load_saved_pii_scrub(app)
 
+            from gateway.routing_config import load_saved_routing
+
+            await load_saved_routing(app)
+
     # Shared state (D-035): in-memory unless GATEWAY_REDIS_URL is set
     from gateway.state import create_shared_state
 

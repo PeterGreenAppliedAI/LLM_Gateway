@@ -155,6 +155,14 @@ class PolicyEnforcer:
         """Check if policy enforcement is enabled."""
         return self._config.enabled
 
+    def set_task_policies(self, policies: Sequence["TaskProviderPolicy"]) -> None:
+        """Replace the task/endpoint policies at runtime (dashboard knob).
+
+        Atomic swap of the lookup dict; in-flight requests keep whichever
+        policy they already read.
+        """
+        self._task_policies = {policy.task: policy for policy in policies}
+
     def _bare_model(self, model: str) -> str:
         """Strip an "endpoint/" pin so budget tiers resolve on the real name.
 

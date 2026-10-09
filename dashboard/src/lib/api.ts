@@ -270,3 +270,48 @@ export async function transcribeAudio(
   return { text: await res.text(), contentType: res.headers.get('content-type') || '', ms: performance.now() - started }
 }
 
+export interface RoutingTaskPin {
+  task: string
+  allowed_endpoints: string[]
+  denied_endpoints: string[]
+}
+
+export interface RoutingModelHome {
+  model: string
+  endpoint: string
+}
+
+export interface RoutingConfig {
+  strategy: 'priority' | 'least_loaded'
+  task_endpoints: RoutingTaskPin[]
+  model_defaults: RoutingModelHome[]
+  available_endpoints: string[]
+  available_tasks: string[]
+  endpoint_priority: string[]
+  source: string
+  updated_at: string | null
+  updated_by: string | null
+  persisted: boolean
+}
+
+export async function fetchRoutingConfig(): Promise<RoutingConfig | null> {
+  const res = await apiFetch(`${API_BASE}/api/routing/config`)
+  if (!res.ok) return null
+  return res.json()
+}
+
+// Resolves with the new config, or rejects with the gateway's error message
+export async function updateRoutingConfig(body: {
+  strategy: string
+  task_endpoints: { task: string; allowed_endpoints: string[]; denied_endpoints: string[] }[]
+  model_defaults: { model: string; endpoint: string }[]
+}): Promise<RoutingConfig> {
+  const res = await apiFetch(`${API_BASE}/api/routing/config`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) throw new Error(data?.error?.message || `HTTP ${res.status}`)
+  return data
+}

@@ -19,6 +19,7 @@ import { ApiKeysSection } from './components/KeysPanel'
 import { TokenBudgetSection } from './components/BudgetPanel'
 import { PIISection } from './components/PIIPanel'
 import { VoiceSection } from './components/VoicePanel'
+import { RoutingSection } from './components/RoutingPanel'
 import { SecurityScansSection } from './components/ScansPanel'
 
 function App() {
@@ -38,7 +39,7 @@ function App() {
   const [authError, setAuthError] = useState(false)
   const [selectedRequest, setSelectedRequest] = useState<RequestDetail | null>(null)
   const [loadingDetail, setLoadingDetail] = useState(false)
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'security' | 'keys' | 'requests' | 'voice'>('dashboard')
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'security' | 'keys' | 'requests' | 'voice' | 'routing'>('dashboard')
 
   useEffect(() => {
     const onAuthError = () => setAuthError(true)
@@ -186,6 +187,7 @@ function App() {
           ['keys', 'Keys & Budgets'],
           ['requests', 'Requests'],
           ['voice', 'Voice'],
+          ['routing', 'Routing'],
         ] as const).map(([tab, label]) => (
           <button
             key={tab}
@@ -292,6 +294,8 @@ function App() {
 
       {/* === Voice Tab === */}
       {activeTab === 'voice' && <VoiceSection />}
+
+      {activeTab === 'routing' && <RoutingSection />}
 
       {/* === Requests Tab === */}
       {activeTab === 'requests' && (
