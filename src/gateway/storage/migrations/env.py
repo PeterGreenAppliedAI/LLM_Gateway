@@ -16,7 +16,6 @@ import os
 from logging.config import fileConfig
 
 from alembic import context
-
 from gateway.storage.schema import metadata as target_metadata
 
 config = context.config
