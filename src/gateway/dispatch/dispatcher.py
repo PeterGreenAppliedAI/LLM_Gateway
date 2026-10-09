@@ -705,7 +705,18 @@ class Dispatcher:
                     providers.append(ep)
                     seen.add(ep)
 
-        for fb in self._registry.get_fallback_chain(exclude=primary):
+        # Only fall back to endpoints that actually have the model — same
+        # rule as non-streaming dispatch. Admission-based overflow would
+        # otherwise send a stream to an idle endpoint without the model
+        # and surface its 404 to the client purely because the primary was
+        # busy. When the catalog doesn't know the model yet (discovery
+        # lag), the chain stays unfiltered so availability wins.
+        fallback_chain = self._registry.get_fallback_chain(exclude=primary)
+        if model_name:
+            with_model = set(self._registry.get_endpoints_with_model(model_name))
+            if with_model:
+                fallback_chain = [name for name in fallback_chain if name in with_model]
+        for fb in fallback_chain:
             if fb not in seen:
                 providers.append(fb)
                 seen.add(fb)

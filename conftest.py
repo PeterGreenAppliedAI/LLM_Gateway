@@ -2,6 +2,13 @@
 
 import pytest
 
+# Tests must not read the operator's local .env (admin keys, access modes,
+# retention overrides): pydantic-settings loads the FILE directly, so the
+# env-var scrub below doesn't cover it. CI has no .env; mirror that.
+from gateway.settings import Settings
+
+Settings.model_config["env_file"] = None
+
 
 @pytest.fixture(autouse=True)
 def reset_env(monkeypatch: pytest.MonkeyPatch) -> None:

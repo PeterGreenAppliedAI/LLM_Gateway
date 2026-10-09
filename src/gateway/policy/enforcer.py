@@ -12,7 +12,7 @@ Per PRD Section 10:
 - Block execution if provider unhealthy
 """
 
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass
 
@@ -125,7 +125,10 @@ class PolicyEnforcer:
     """
 
     def __init__(
-        self, config: PolicyConfig | None = None, rate_store: RateWindowStore | None = None
+        self,
+        config: PolicyConfig | None = None,
+        rate_store: RateWindowStore | None = None,
+        endpoint_names: Collection[str] | None = None,
     ):
         """Initialize policy enforcer.
 
@@ -133,8 +136,11 @@ class PolicyEnforcer:
             config: Policy configuration. Uses defaults if not provided.
             rate_store: Where rate-limit windows are counted (gateway.state);
                 defaults to this process's memory
+            endpoint_names: Enabled endpoint names, used to strip an
+                "endpoint/" pin off model names for budget tier resolution
         """
         self._config = config or PolicyConfig()
+        self._endpoint_names = frozenset(endpoint_names or ())
         self._rate_limiter = RateLimiter(self._config.rate_limit, rate_store)
         self._token_limiter = TokenLimiter(self._config.token_limit)
         self._token_budget = TokenBudgetTracker(self._config.token_budget)
@@ -148,6 +154,22 @@ class PolicyEnforcer:
     def enabled(self) -> bool:
         """Check if policy enforcement is enabled."""
         return self._config.enabled
+
+    def _bare_model(self, model: str) -> str:
+        """Strip an "endpoint/" pin so budget tiers resolve on the real name.
+
+        "gpu-node/premium-x" reserved under the pinned string misses the
+        tier globs: the reservation gets the default (expensive) multiplier
+        while the per-tier global cap goes unchecked — and settlement,
+        which strips the pin, then disagrees with admission. Mirrors
+        Dispatcher.parse_provider_from_model: only a configured endpoint
+        name makes a pin ("meta-llama/..." stays a model name).
+        """
+        if "/" in model:
+            prefix, rest = model.split("/", 1)
+            if rest and prefix in self._endpoint_names:
+                return rest
+        return model
 
     async def enforce(
         self,
@@ -239,7 +261,7 @@ class PolicyEnforcer:
                 self._token_budget.reserve(
                     reservation_id=request.request_id,
                     key=key,
-                    model=request.model or "",
+                    model=self._bare_model(request.model or ""),
                     estimated_tokens=estimated_tokens
                     if estimated_tokens is not None
                     else sum(

@@ -209,7 +209,9 @@ def build_enforcer(app) -> PolicyEnforcer:
         )
     shared = getattr(app.state, "shared_state", None)
     enforcer = PolicyEnforcer(
-        policy_config, rate_store=shared.rate_windows if shared is not None else None
+        policy_config,
+        rate_store=shared.rate_windows if shared is not None else None,
+        endpoint_names={p.name for p in config.get_enabled_providers()},
     )
     app.state.enforcer = enforcer
     return enforcer
