@@ -2106,6 +2106,13 @@ accuracy) is the order below.
     distinguishes unavailable / nothing analyzed / analyzed-and-clean (with dropped-scan
     count); the Voice docs path is a link; the README names both Compose credentials;
     Vitest added, and a CI job lints, tests, type-checks and builds the dashboard.
+- **Follow-up (operator report, same day):** the Security tab mixed three section shapes.
+  PII was a bordered card with an inner header and no bottom margin; Security Scan Labeling
+  was a bare full-width heading button with no card, so it sat flush under the PII card,
+  out of line with its padded edge, with the chevron in a different place. Both now use a
+  shared `CollapsibleSection` (`components/shared.tsx`): one card, one header, one chevron
+  position, `aria-expanded` on a real button (both were mouse-only). The PII section also
+  stays in place showing "data unavailable" instead of vanishing when its stats can't load.
 - **What works now:** `tests/test_dashboard_ux_2026_10_09.py` (denials excluded from
   stats with the review's 36-denial scenario; SQL paging with no overlap; time filter;
   `has_more` and status filtering through the route) and

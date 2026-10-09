@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { SecurityScan, LabelStats } from '../types'
 import { formatTime } from '../lib/format'
+import { CollapsibleSection } from './shared'
 import { fetchSecurityScans, labelScan, bulkLabelScans, fetchLabelStats, exportTrainingData } from '../lib/api'
 
 export function SecurityScansSection({ onRefresh }: { onRefresh: () => void }) {
@@ -90,43 +91,37 @@ export function SecurityScansSection({ onRefresh }: { onRefresh: () => void }) {
   const progressPct = labelStats && labelStats.total > 0 ? (labelStats.labeled / labelStats.total) * 100 : 0
 
   return (
-    <div className="mb-6">
-      <button
-        onClick={() => { setExpanded(!expanded); if (!expanded && scans.length === 0) loadScans() }}
-        className="w-full text-left flex items-center justify-between mb-3"
-      >
-        <h2 className="text-lg font-semibold flex items-center gap-2">
-          Security Scan Labeling
-          {labelStats && <span className="text-gray-400 text-sm font-normal">({labelStats.total} scans, {labelStats.unlabeled} unlabeled)</span>}
-        </h2>
-        <span className="text-gray-400">{expanded ? '▼' : '▶'}</span>
-      </button>
-
-      {!expanded ? null : <>
+    <CollapsibleSection
+      id="scan-labeling"
+      title="Security Scan Labeling"
+      summary={labelStats ? `${labelStats.total.toLocaleString()} scans, ${labelStats.unlabeled.toLocaleString()} unlabeled` : undefined}
+      open={expanded}
+      onToggle={() => { setExpanded(!expanded); if (!expanded && scans.length === 0) loadScans() }}
+    >
       {/* Label Stats */}
       {labelStats && (
         <div className="grid grid-cols-2 md:grid-cols-6 gap-3 mb-4">
-          <div className="bg-gray-800 rounded-lg p-3 border border-gray-700">
+          <div className="bg-gray-900 rounded-lg p-3 border border-gray-700">
             <div className="text-gray-400 text-xs">Total Scans</div>
             <div className="text-xl font-bold">{labelStats.total}</div>
           </div>
-          <div className="bg-gray-800 rounded-lg p-3 border border-green-800">
+          <div className="bg-gray-900 rounded-lg p-3 border border-green-800">
             <div className="text-green-400 text-xs">Labeled</div>
             <div className="text-xl font-bold text-green-400">{labelStats.labeled}</div>
           </div>
-          <div className="bg-gray-800 rounded-lg p-3 border border-gray-700">
+          <div className="bg-gray-900 rounded-lg p-3 border border-gray-700">
             <div className="text-gray-400 text-xs">Unlabeled</div>
             <div className="text-xl font-bold">{labelStats.unlabeled}</div>
           </div>
-          <div className="bg-gray-800 rounded-lg p-3 border border-gray-700">
+          <div className="bg-gray-900 rounded-lg p-3 border border-gray-700">
             <div className="text-gray-400 text-xs">Safe</div>
             <div className="text-xl font-bold text-green-400">{labelStats.safe}</div>
           </div>
-          <div className="bg-gray-800 rounded-lg p-3 border border-gray-700">
+          <div className="bg-gray-900 rounded-lg p-3 border border-gray-700">
             <div className="text-gray-400 text-xs">Unsafe</div>
             <div className="text-xl font-bold text-red-400">{labelStats.unsafe}</div>
           </div>
-          <div className="bg-gray-800 rounded-lg p-3 border border-yellow-800">
+          <div className="bg-gray-900 rounded-lg p-3 border border-yellow-800">
             <div className="text-yellow-400 text-xs">Disagreements</div>
             <div className="text-xl font-bold text-yellow-400">{labelStats.disagreements}</div>
           </div>
@@ -135,7 +130,7 @@ export function SecurityScansSection({ onRefresh }: { onRefresh: () => void }) {
 
       {/* Progress Bar */}
       {labelStats && labelStats.total > 0 && (
-        <div className="bg-gray-800 rounded-lg p-3 border border-gray-700 mb-4">
+        <div className="bg-gray-900 rounded-lg p-3 border border-gray-700 mb-4">
           <div className="flex justify-between text-sm mb-1">
             <span className="text-gray-400">Labeling Progress</span>
             <span className="text-gray-300">{progressPct.toFixed(1)}% ({labelStats.labeled}/{labelStats.total})</span>
@@ -179,7 +174,7 @@ export function SecurityScansSection({ onRefresh }: { onRefresh: () => void }) {
       </div>
 
       {/* Scans Table */}
-      <div className="bg-gray-800 rounded-lg border border-gray-700 overflow-hidden">
+      <div className="bg-gray-900 rounded-lg border border-gray-700 overflow-hidden">
         {loading ? (
           <div className="p-8 text-center text-gray-500">Loading scans...</div>
         ) : scans.length === 0 ? (
@@ -283,7 +278,6 @@ export function SecurityScansSection({ onRefresh }: { onRefresh: () => void }) {
           </>
         )}
       </div>
-      </>}
-    </div>
+    </CollapsibleSection>
   )
 }

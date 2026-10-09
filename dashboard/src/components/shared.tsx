@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react'
 import type { Endpoint } from '../types'
 
 export function StatCard({ label, value, subtext }: { label: string; value: string | number; subtext?: string }) {
@@ -59,5 +60,47 @@ export function MetricRow({ label, value, unit = '' }: { label: string; value: s
       <span className="text-gray-400">{label}</span>
       <span className="font-mono">{typeof value === 'number' ? value.toFixed(2) : value}{unit}</span>
     </div>
+  )
+}
+
+/** A collapsible dashboard section: one card, one header style, one chevron
+ *  position, keyboard-operable. Shared so sections on a tab can't drift
+ *  into different shapes and spacing again. */
+export function CollapsibleSection({
+  id,
+  title,
+  summary,
+  open,
+  onToggle,
+  children,
+}: {
+  id: string
+  title: string
+  summary?: string
+  open: boolean
+  onToggle: () => void
+  children: ReactNode
+}) {
+  return (
+    <section className="bg-gray-800 rounded-lg border border-gray-700 mb-6 text-left" aria-labelledby={`${id}-title`}>
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={open}
+        aria-controls={`${id}-body`}
+        className="w-full p-4 flex items-center justify-between gap-3 text-left hover:bg-gray-750 rounded-lg"
+      >
+        <h2 id={`${id}-title`} className="text-lg font-semibold">
+          {title}
+          {summary && <span className="text-sm font-normal text-gray-400 ml-2">({summary})</span>}
+        </h2>
+        <span className="text-gray-400 shrink-0" aria-hidden="true">{open ? '▼' : '▶'}</span>
+      </button>
+      {open && (
+        <div id={`${id}-body`} className="px-4 pb-4 space-y-4">
+          {children}
+        </div>
+      )}
+    </section>
   )
 }

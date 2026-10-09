@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { PIIStats, PIIEvent, PIIConfig } from '../types'
 import { formatTime, formatTimestamp } from '../lib/format'
-import { StatCard } from './shared'
+import { CollapsibleSection, StatCard } from './shared'
 import { fetchPIIStats, fetchPIIEvents, fetchPIIConfig, updatePIIConfig } from '../lib/api'
 
 /** Scrubbing policy editor. Detection itself is set by environment variable. */
@@ -160,27 +160,27 @@ export function PIISection() {
     return () => clearInterval(interval)
   }, [typeFilter])
 
-  if (!stats) return null
+  // Unavailable data keeps the section in place (it used to vanish) so the
+  // tab's layout doesn't change shape with the data
+  if (!stats) {
+    return (
+      <CollapsibleSection id="pii" title="PII Detection & Scrubbing" summary="data unavailable"
+        open={!collapsed} onToggle={() => setCollapsed(!collapsed)}>
+        <p className="text-gray-400 text-sm">PII statistics couldn't be loaded. Check the admin key, or whether PII detection is enabled on the gateway.</p>
+      </CollapsibleSection>
+    )
+  }
 
   const piiTypes = Object.keys(stats.by_type)
 
   return (
-    <div className="bg-gray-800 rounded-lg border border-gray-700">
-      <div
-        className="p-4 cursor-pointer flex items-center justify-between"
-        onClick={() => setCollapsed(!collapsed)}
-      >
-        <h2 className="text-lg font-semibold">
-          PII Detection Audit
-          <span className="text-sm font-normal text-gray-400 ml-2">
-            ({stats.total_detections} detections, {stats.unique_values} unique values)
-          </span>
-        </h2>
-        <span className="text-gray-400">{collapsed ? '▶' : '▼'}</span>
-      </div>
-
-      {!collapsed && (
-        <div className="p-4 pt-0 space-y-4">
+    <CollapsibleSection
+      id="pii"
+      title="PII Detection & Scrubbing"
+      summary={`${stats.total_detections} detections, ${stats.unique_values} unique values`}
+      open={!collapsed}
+      onToggle={() => setCollapsed(!collapsed)}
+    >
           <PIIScrubSettings />
 
           {/* Stats grid */}
@@ -259,8 +259,6 @@ export function PIISection() {
           <div className="text-xs text-gray-500 italic">
             Raw PII values are never stored. Only SHA-256 hashes are retained for deduplication and audit.
           </div>
-        </div>
-      )}
-    </div>
+    </CollapsibleSection>
   )
 }
