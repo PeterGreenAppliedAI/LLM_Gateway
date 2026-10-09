@@ -121,3 +121,38 @@ class TestEnforcerWiring:
         )
         names = {p.name for p in config.get_enabled_providers()}
         assert names == {"ep-on"}
+
+
+class TestDiscoveryWithMediaEndpoints:
+    @pytest.mark.asyncio
+    async def test_media_endpoint_does_not_crash_discovery(self):
+        """Regression: discover_all indexed gather results against a
+        differently-filtered endpoint list — IndexError the moment a
+        media-only (tts/stt) endpoint was configured."""
+        from gateway.catalog.discovery import ModelDiscoveryService
+        from gateway.catalog.models import ModelCatalog
+        from gateway.config import EndpointConfig
+
+        endpoints = [
+            EndpointConfig(name="text-ep", type="ollama", url="http://t:11434"),
+            EndpointConfig(
+                name="audio-ep",
+                type="openai",
+                url="http://a:8000",
+                capabilities=["tts", "stt"],
+            ),
+            EndpointConfig(name="text-ep2", type="vllm", url="http://v:8000"),
+        ]
+        discovery = ModelDiscoveryService(endpoints, ModelCatalog())
+
+        async def fake_discover(endpoint):
+            return [f"model-on-{endpoint.name}"]
+
+        discovery._discover_endpoint = fake_discover
+        results = await discovery.discover_all()
+
+        assert results == {
+            "text-ep": ["model-on-text-ep"],
+            "text-ep2": ["model-on-text-ep2"],
+        }
+        assert "audio-ep" not in results

@@ -118,8 +118,12 @@ class ModelDiscoveryService:
             Dict mapping endpoint name to list of discovered model names
         """
         results: dict[str, list[str]] = {}
-        tasks = []
 
+        # Build the discovered list once and zip results against THE SAME
+        # list: the task list skips media-only endpoints, so indexing
+        # results by a differently-filtered enumeration crashed with
+        # IndexError the moment a media endpoint was configured.
+        text_endpoints = []
         for endpoint in self._endpoints:
             if not endpoint.enabled:
                 continue
@@ -127,13 +131,15 @@ class ModelDiscoveryService:
                 # A Kokoro/Whisper server's models aren't chat models
                 self._catalog.remove_endpoint_models(endpoint.name)
                 continue
-            tasks.append(self._discover_endpoint(endpoint))
+            text_endpoints.append(endpoint)
 
-        if tasks:
-            endpoint_results = await asyncio.gather(*tasks, return_exceptions=True)
+        if text_endpoints:
+            endpoint_results = await asyncio.gather(
+                *(self._discover_endpoint(e) for e in text_endpoints),
+                return_exceptions=True,
+            )
 
-            for i, endpoint in enumerate(e for e in self._endpoints if e.enabled):
-                result = endpoint_results[i]
+            for endpoint, result in zip(text_endpoints, endpoint_results):
                 if isinstance(result, Exception):
                     logger.warning(f"Discovery failed for {endpoint.name}: {result}")
                     results[endpoint.name] = []
