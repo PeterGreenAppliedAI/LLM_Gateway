@@ -1973,7 +1973,10 @@ accuracy) is the order below.
      released. Previously a failed batch erased the charges for finished work.
   4. `error_message` is redacted like a body before it reaches the database, journal
      or spill (upstream errors echo submitted values), and the operational error log
-     line is redacted too. Fails closed to `[REDACTION FAILED]`.
+     line is redacted too. Fails closed to `[REDACTION FAILED]`. **Requires
+     `GATEWAY_PII_ENABLED=true`:** the audit redactor is only wired when PII detection is
+     on (`main.py`); without it, audit bodies and `error_message` are stored as received.
+     Operational log redaction (D-056) does not depend on this setting.
   5. Policy, rate-limit and authentication denials are durable audit rows
      (`status: "denied"`). The live check after deploying found 401s were still
      skipped — they raise before any request context exists — so a missing context no

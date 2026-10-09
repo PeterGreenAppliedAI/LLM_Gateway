@@ -162,7 +162,8 @@ exactly how far:
 | Retention: `GATEWAY_DB_RETENTION_DAYS=0` ("keep") was rejected | D-045 `973edcf` | Default | `test_settings.py` | All |
 | Compose lost all state on `down`/`up` | D-044 `e065815` | `GATEWAY_ADMIN_API_KEY` (Compose refuses to start without it) | Manual: image build plus `down`/`up` (D-044). Not in CI. | Docker on Linux |
 | PII in tool-call arguments bypassed scrubbing (plain, JSON-escaped, numeric) | D-055, D-056 | PII scrubbing on | `test_review_2026_10_09.py`, `test_review_followup_2026_10_09.py::TestToolArgumentDecoding` | All |
-| Raw upstream error text (echoed PII) in audit rows and operational logs | D-055, D-056 | Default | `test_review_2026_10_09.py`, `test_review_followup_2026_10_09.py::TestLogRedaction` | All |
+| Raw upstream error text (echoed PII) in audit rows | D-055 | `GATEWAY_PII_ENABLED=true` (no audit redactor is wired without it; audit bodies and `error_message` are stored as received) | `test_review_2026_10_09.py::TestErrorMessageRedaction` | All |
+| Raw upstream error text (echoed PII) in operational logs | D-056 | Default (log redaction is always on) | `test_review_followup_2026_10_09.py::TestLogRedaction` | All |
 
 ### Still open
 
