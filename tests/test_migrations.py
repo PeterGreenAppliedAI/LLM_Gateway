@@ -7,8 +7,8 @@ Startup ran `create_all`, which never changes existing tables.
 
 import pytest
 import sqlalchemy as sa
-
 from alembic import command
+
 from gateway.storage import DatabaseConfig, create_async_db_engine
 from gateway.storage.keys import KeyManager
 from gateway.storage.migrate import (

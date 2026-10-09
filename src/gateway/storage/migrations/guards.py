@@ -8,7 +8,6 @@ columns. Migrations skip what already exists, so adopting such a database is
 """
 
 import sqlalchemy as sa
-
 from alembic import op
 
 
