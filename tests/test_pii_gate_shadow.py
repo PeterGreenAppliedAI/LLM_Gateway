@@ -46,16 +46,18 @@ class TestTaxonomy:
 
 class TestLocateSpans:
     def test_every_occurrence_found(self):
-        spans, hallucinated = locate_spans(TEXT, [{"category": "CONTACT", "value": EMAIL}])
+        spans, hallucinated, _ = locate_spans(TEXT, [{"category": "CONTACT", "value": EMAIL}])
         assert hallucinated == 0
         assert [TEXT[s.start : s.end] for s in spans] == [EMAIL, EMAIL]
 
     def test_hallucinated_value_discarded_and_counted(self):
-        spans, hallucinated = locate_spans(TEXT, [{"category": "GOV_ID", "value": "123-45-6789"}])
+        spans, hallucinated, _ = locate_spans(
+            TEXT, [{"category": "GOV_ID", "value": "123-45-6789"}]
+        )
         assert spans == [] and hallucinated == 1
 
     def test_unknown_category_and_empty_value_dropped(self):
-        spans, hallucinated = locate_spans(
+        spans, hallucinated, _ = locate_spans(
             TEXT, [{"category": "MADE_UP", "value": EMAIL}, {"category": "CONTACT", "value": " "}]
         )
         assert spans == [] and hallucinated == 0
@@ -158,14 +160,16 @@ class FakeGate:
 
 class FakeFinder:
     def __init__(self, findings):
-        self.findings, self.calls = findings, 0
+        self.findings, self.calls, self.model = findings, 0, "fake"
 
     async def find(self, text):
         from gateway.security.pii_finder import FinderResult
 
         self.calls += 1
-        spans, hallucinated = locate_spans(text, self.findings)
-        return FinderResult(spans=spans, hallucinated=hallucinated, latency_ms=300.0)
+        spans, hallucinated, rejected = locate_spans(text, self.findings)
+        return FinderResult(
+            spans=spans, hallucinated=hallucinated, rejected=rejected, latency_ms=300.0
+        )
 
 
 class RecordingStore:
@@ -399,3 +403,76 @@ class TestBacklogLabelling:
         # resumable: a second run finds nothing new
         assert await label_backlog(db, out, finder, limit=10, log=lambda *_: None) == 0
         assert finder.calls == 2
+
+
+class TestExtractorPrecision:
+    """phi4-mini over-reports on real traffic: the first backlog sample came back
+    ~98% false positives (placeholders, log lines, form labels). These checks
+    reject values that can't be the category claimed (D-052)."""
+
+    @pytest.mark.parametrize(
+        "category,value",
+        [
+            ("NETWORK", "<IPV4>"),
+            ("PERSON_NAME", "<N>"),
+            ("CONTACT", "@user"),
+            ("CONTACT", "Email* Phone*"),
+            ("CONTACT", "order 88231"),
+            ("CONTACT", "test@example.com"),
+            ("CONTACT", "555-0142"),
+            ("NETWORK", "10.0.0.14"),
+            ("NETWORK", "shipper:backlog:"),
+            ("FINANCIAL", "4111 1111 1111 1111"),
+            ("SPECIAL", "https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/429"),
+            ("SPECIAL", "(1205, 'Lock wait timeout exceeded; try restarting transaction')"),
+            ("PERSON_NAME", "DevMesh Services LLC"),
+            ("CREDENTIAL", "abc"),
+        ],
+    )
+    def test_implausible_values_rejected(self, category, value):
+        from gateway.security.pii_finder import plausible
+
+        assert not plausible(category, value)
+        text = f"x {value} y"
+        spans, hallucinated, rejected = locate_spans(text, [{"category": category, "value": value}])
+        assert spans == [] and rejected == 1 and hallucinated == 0
+
+    def test_every_synthetic_value_is_plausible(self):
+        from gateway.security.pii_dataset import SyntheticGenerator
+        from gateway.security.pii_finder import plausible
+
+        for r in SyntheticGenerator(seed=5).generate(1000, negative_share=0):
+            for s in r["spans"]:
+                assert plausible(s["category"], s["value"]), s
+
+    @pytest.mark.parametrize(
+        "category,returned,expected",
+        [
+            ("FINANCIAL", "IBAN DE32729518175604806358", "DE32729518175604806358"),
+            ("FINANCIAL", "card numbers, 5121 4688 1973 6994", "5121 4688 1973 6994"),
+            ("NETWORK", "IP 114.41.82.225", "114.41.82.225"),
+            ("CREDENTIAL", "key sk-ant-abc1234567", "sk-ant-abc1234567"),
+        ],
+    )
+    def test_copied_label_trimmed_to_the_value(self, category, returned, expected):
+        text = f"Use {expected} today."
+        spans, hallucinated, rejected = locate_spans(
+            text, [{"category": category, "value": returned}]
+        )
+        assert [s.value for s in spans] == [expected] and hallucinated == 0
+        assert text[spans[0].start : spans[0].end] == expected
+
+
+class TestBacklogFilters:
+    def test_templated_log_lines_skipped(self):
+        from gateway.security.pii_dataset import usable_backlog_text
+
+        msg = [{"role": "user", "content": "INFO: <IPV4>:<N> - POST /ingest 500"}]
+        assert usable_backlog_text(msg) is None
+
+    def test_same_line_with_different_counters_is_one_shape(self):
+        from gateway.security.pii_dataset import shape_id
+
+        assert shape_id("restart counter is at 1962.") == shape_id("restart counter is at 1963.")
+        assert shape_id("task 3555 slot ab12cd34ef") == shape_id("task 9 slot 0099aabbcc")
+        assert shape_id("hello") != shape_id("goodbye")

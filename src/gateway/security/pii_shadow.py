@@ -87,6 +87,7 @@ class PIIShadowAnalyzer:
             "finder_errors": 0,
             "gate_missed": 0,
             "hallucinated_values": 0,
+            "rejected_values": 0,
         }
 
     def submit(
@@ -176,6 +177,7 @@ class PIIShadowAnalyzer:
                 row["finder_categories"] = result.categories
                 row["finder_hallucinated"] = result.hallucinated
                 self.stats["hallucinated_values"] += result.hallucinated
+                self.stats["rejected_values"] += result.rejected
                 if reason == "sampled":
                     row["gate_missed"] = bool(result.spans)
                     if result.spans:

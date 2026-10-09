@@ -27,6 +27,7 @@ import hashlib
 import json
 import os
 import random
+import re
 import string
 import sys
 from collections.abc import Iterator
@@ -49,30 +50,49 @@ REDACTION_MARKERS = (
     "[messages not stored",
 )
 
+# Upstream log templating (the log pipeline's own placeholders): the values
+# are already gone, and the extractor labels the placeholders themselves
+TEMPLATE_PLACEHOLDER = re.compile(r"<(?:IPV4|IPV6|N|NUM|HEX|UUID|HASH|PATH|URL|EMAIL)>")
+_SHAPE_DIGITS = re.compile(r"\d+")
+_SHAPE_HEX = re.compile(r"\b[0-9a-f]{8,}\b")
+
 
 def text_id(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()[:16]
 
 
+def shape_id(text: str) -> str:
+    """Near-duplicate key: the same log line with different counters is one shape."""
+    shape = _SHAPE_DIGITS.sub("0", _SHAPE_HEX.sub("h", text))
+    return hashlib.sha256(shape.encode()).hexdigest()[:16]
+
+
 def make_record(
-    text: str, spans: list[dict], source: str, labeler: str, hallucinated: int = 0
+    text: str,
+    spans: list[dict],
+    source: str,
+    labeler: str,
+    hallucinated: int = 0,
+    rejected: int = 0,
 ) -> dict:
     return {
         "id": text_id(text),
+        "shape": shape_id(text),
         "text": text,
         "spans": spans,
         "source": source,
         "labeler": labeler,
         "hallucinated": hallucinated,
+        "rejected": rejected,
     }
 
 
-def record_from_finder(text: str, result: FinderResult) -> dict:
+def record_from_finder(text: str, result: FinderResult, labeler: str = "phi4-mini") -> dict:
     spans = [
         {"category": s.category, "value": s.value, "start": s.start, "end": s.end}
         for s in result.spans
     ]
-    return make_record(text, spans, "backlog", "phi4-mini", result.hallucinated)
+    return make_record(text, spans, "backlog", labeler, result.hallucinated, result.rejected)
 
 
 # =============================================================================
@@ -425,6 +445,8 @@ def usable_backlog_text(messages) -> str | None:
     text = messages_to_text(messages).strip()
     if not text or any(marker in text for marker in REDACTION_MARKERS):
         return None
+    if TEMPLATE_PLACEHOLDER.search(text):
+        return None
     return text
 
 
@@ -442,7 +464,8 @@ def existing_ids(path: Path) -> set[str]:
     if not path.exists():
         return set()
     with path.open(encoding="utf-8") as f:
-        return {json.loads(line)["id"] for line in f if line.strip()}
+        records = [json.loads(line) for line in f if line.strip()]
+    return {r["id"] for r in records} | {r["shape"] for r in records if "shape" in r}
 
 
 async def label_backlog(
@@ -484,10 +507,10 @@ async def label_backlog(
                     text = usable_backlog_text(messages)
                     if text is None:
                         continue
-                    tid = text_id(text)
-                    if tid in seen:
+                    tid, sid = text_id(text), shape_id(text)
+                    if tid in seen or sid in seen:
                         continue
-                    seen.add(tid)
+                    seen.update((tid, sid))
                     queue.append(text)
                     if len(queue) >= limit:
                         break
@@ -506,7 +529,10 @@ async def label_backlog(
             if result.error:
                 errors += 1
                 return
-            f.write(json.dumps(record_from_finder(text, result), ensure_ascii=False) + "\n")
+            f.write(
+                json.dumps(record_from_finder(text, result, finder.model), ensure_ascii=False)
+                + "\n"
+            )
             written += 1
             if written % 100 == 0:
                 f.flush()

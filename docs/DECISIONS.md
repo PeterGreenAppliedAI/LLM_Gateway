@@ -1973,6 +1973,34 @@ labelled by phi4-mini, plus synthetic examples.
   because they hold raw text. Never commit or export them.
 - **Tests:** `tests/test_pii_gate_shadow.py`.
 
+### D-052 extractor precision: phi4-mini on real traffic (2026-10-09)
+
+- **Problem:** the first real-data sample (60 random backlog texts) came back 66 spans, ~65
+  of them wrong. Two causes: (a) ~42% of the backlog is the log pipeline's own templated
+  lines, already carrying placeholders (`<IPV4>`, `<N>`), and phi4-mini labelled the
+  placeholders; (b) it reported error messages, URLs, service names and form labels. On
+  synthetic text it also copied labels with values ("IBAN DE89…", "card 5121…"), so the
+  verbatim check discarded real finds (card/IBAN recall 0/22).
+- **Fix** (labeller stays phi4-mini, per the project lead):
+  - `plausible(category, value)`: a loose shape check that only rules out the impossible.
+    It rejects placeholders, contact details with no `@`, digits or address shape,
+    private IPs as NETWORK, URLs and log/error text as free-text categories, organisation
+    names as PERSON_NAME. It also rejects taxonomy hard negatives a pattern can recognise:
+    example.com/.test addresses, 555-01xx numbers, well-known test cards. Rejected values
+    are counted (`rejected`, and `rejected_values` in shadow stats), not stored.
+  - `core_value`: for single-token categories (credentials, IDs, financial, network),
+    trims a copied label down to the value when that value is in the text.
+  - Prompt: says an empty list is the normal answer, lists what is never a finding, and
+    gives one worked example (value only, internal IP not reported).
+  - Backlog: skips templated log text, and dedupes by *shape* (digits and hex runs
+    normalised) so one log line with 10,000 counters is labelled once.
+- **Measured** (same model, same data): on 80 backlog texts, false spans went from ~65 (on
+  60 texts) to 0, with 2 plausible real names kept. On 120 synthetic texts, recall: contact
+  31/35, card/IBAN 16/22, network 17/22, gov ID 4/4, credentials 10/15, health 6/16, names
+  14/36, special 0/8. phi4-mini is weak on names, health and special-category text: the
+  synthetic set, with exact labels, carries those categories in training.
+- **Tests:** `TestExtractorPrecision`, `TestBacklogFilters` in `tests/test_pii_gate_shadow.py`.
+
 ## D-053: Review fixes: overflow honors the catalog, budgets strip pins, media endpoints don't crash discovery
 
 - **Status:** Implemented, 2026-10-09, `fe2863a` and `dbc2dec`. Amends D-031/D-032 and
