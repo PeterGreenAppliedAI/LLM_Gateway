@@ -2027,9 +2027,19 @@ accuracy) is the order below.
   3. Everything under `/v1/devmesh/*` is admin-only. `/v1/models` remains the client-facing,
      key- and environment-scoped listing. The dashboard (the only caller found in the
      access log) already sends the admin key.
+- **Found by the live check against real upstreams (not by the mock-based review):**
+  request-context fields (`model`, `client_id`, `user_id`) were added to log lines outside
+  the redaction pass — a model name carrying an email logged raw on every line of the
+  request. They're redacted now; machine fields (`request_id`, `timestamp`, `level`) are
+  not, so digit runs in IDs can't be mangled. The same check showed the scrubber
+  redacting the gateway's own endpoint IPs out of the logs, making routing problems
+  undebuggable: log redaction excludes `IP_ADDRESS` (`PIIScrubber(exclude_types=...)`);
+  request and audit scrubbing still treat IPv4 as PII.
 - **What works now:** `tests/test_review_followup_2026_10_09.py` — the escaped-email
   bypass, the numeric-JSON regression, byte-for-byte passthrough of clean arguments, log
   redaction on the dispatcher's structured-field path plus message and exception text in
-  both formatters, and client/keyless refusal on all five operational routes (13 tests).
+  both formatters, context-field redaction, endpoint IPs preserved in logs but still
+  scrubbed in requests, and client/keyless refusal on all five operational routes
+  (16 tests).
 - **Lesson:** a redaction boundary belongs where the data leaves, not where a bug was last
   seen. D-055 fixed the reported path each time; D-056 moves both fixes to the choke point.

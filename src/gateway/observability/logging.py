@@ -186,7 +186,7 @@ def _redact_log_value(value: Any) -> Any:
     if _log_scrubber is None:
         from gateway.security.pii import PIIScrubber  # lazy: avoids an import cycle
 
-        _log_scrubber = PIIScrubber()
+        _log_scrubber = PIIScrubber(exclude_types={"IP_ADDRESS"})
     if isinstance(value, str):
         return _log_scrubber.redact(value) if value else value
     if isinstance(value, dict):
@@ -232,14 +232,16 @@ class StructuredJsonFormatter(logging.Formatter):
         ctx = get_request_context()
         if ctx and self._config.include_request_id:
             log_data["request_id"] = sanitize_log_value(ctx.request_id)
+            # Client-supplied context (model names, user ids) is redacted like
+            # any other field: a model string can carry an email (D-056)
             if ctx.client_id:
-                log_data["client_id"] = sanitize_log_value(ctx.client_id)
+                log_data["client_id"] = redact_for_log(sanitize_log_value(ctx.client_id))
             if ctx.user_id:
-                log_data["user_id"] = sanitize_log_value(ctx.user_id)
+                log_data["user_id"] = redact_for_log(sanitize_log_value(ctx.user_id))
             if ctx.provider:
                 log_data["provider"] = sanitize_log_value(ctx.provider)
             if ctx.model:
-                log_data["model"] = sanitize_log_value(ctx.model)
+                log_data["model"] = redact_for_log(sanitize_log_value(ctx.model))
             if ctx.task:
                 log_data["task"] = sanitize_log_value(ctx.task)
 

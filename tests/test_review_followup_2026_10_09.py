@@ -171,3 +171,38 @@ class TestOperationalCatalogIsAdminOnly:
     def test_route_debug_refused_for_clients(self, client):
         r = client.post("/v1/devmesh/route", json={"model": "m"}, headers={"X-API-Key": CLIENT})
         assert r.status_code in (401, 403)
+
+
+class TestLogRedactionLiveFindings:
+    """Found by the post-deploy check against real upstreams."""
+
+    def test_context_model_field_redacted(self):
+        from gateway.observability import RequestContext
+        from gateway.observability.logging import (
+            LogConfig,
+            StructuredJsonFormatter,
+            clear_request_context,
+            set_request_context,
+        )
+
+        set_request_context(
+            RequestContext(request_id="r1", client_id="c", model=f"probe-{EMAIL}", task="chat")
+        )
+        try:
+            record = logging.LogRecord(
+                "httpx", logging.INFO, __file__, 1, "HTTP Request", None, None
+            )
+            out = StructuredJsonFormatter(LogConfig()).format(record)
+        finally:
+            clear_request_context()
+        assert EMAIL not in out
+        assert json.loads(out)["request_id"] == "r1"  # machine fields untouched
+
+    def test_endpoint_ips_survive_log_redaction(self):
+        from gateway.observability.logging import redact_for_log
+
+        line = "HTTP Request: POST http://10.0.0.19:11434/api/chat"
+        assert redact_for_log(line) == line
+
+    def test_request_scrubbing_still_catches_ips(self):
+        assert PIIScrubber().scan("client at 10.0.0.19", scrub=True).has_pii

@@ -112,6 +112,12 @@ class PIIScrubber:
     forwarded everything past the cut unscrubbed.
     """
 
+    def __init__(self, exclude_types: frozenset[str] | set[str] = frozenset()):
+        # Operational logs exclude IP_ADDRESS (D-056): endpoint addresses
+        # there are infrastructure, and redacting them made routing
+        # problems undebuggable. Request and audit scrubbing keep it.
+        self._patterns = [(t, p) for t, p in _PII_PATTERNS if t not in exclude_types]
+
     def scan(self, text: str, scrub: bool = False) -> PIIScanResult:
         """Scan text for PII and optionally scrub it.
 
@@ -131,7 +137,7 @@ class PIIScrubber:
 
         # Collect all matches with positions
         all_matches: list[PIIMatch] = []
-        for pii_type, pattern in _PII_PATTERNS:
+        for pii_type, pattern in self._patterns:
             placeholder = f"[{pii_type}]"
             for m in pattern.finditer(scan_text):
                 all_matches.append(
